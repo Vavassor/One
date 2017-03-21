@@ -1,0 +1,8 @@
+Debug/
+Release/
+.cproject
+.project
+*.o
+*.obj
+One
+*.exe
