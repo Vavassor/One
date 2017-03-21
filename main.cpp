@@ -40,6 +40,7 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #include <cstdarg>
 #include <cstdio>
 #include <cstdint>
+#include <cassert>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -50,6 +51,12 @@ typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
+
+#define ASSERT(expression) assert(expression)
+
+#define TAU  6.28318530717958647692f
+#define PI   3.14159265358979323846f
+#define PI_2 1.57079632679489661923f
 
 // Clock Function Declarations..................................................
 
@@ -168,7 +175,269 @@ float float_range(float min, float max)
 
 } // namespace arandom
 
+// Vector Functions.............................................................
+
+#include <cmath>
+
+using std::sqrt;
+using std::isfinite;
+
+struct Vector3
+{
+    float x, y, z;
+};
+
+const Vector3 vector3_zero   = { 0.0f, 0.0f, 0.0f };
+const Vector3 vector3_unit_x = { 1.0f, 0.0f, 0.0f };
+const Vector3 vector3_unit_y = { 0.0f, 1.0f, 0.0f };
+const Vector3 vector3_unit_z = { 0.0f, 0.0f, 1.0f };
+
+Vector3 operator + (Vector3 v0, Vector3 v1)
+{
+    Vector3 result;
+    result.x = v0.x + v1.x;
+    result.y = v0.y + v1.y;
+    result.z = v0.z + v1.z;
+    return result;
+}
+
+Vector3& operator += (Vector3& v0, Vector3 v1)
+{
+    v0.x += v1.x;
+    v0.y += v1.y;
+    v0.z += v1.z;
+    return v0;
+}
+
+Vector3 operator - (Vector3 v0, Vector3 v1)
+{
+    Vector3 result;
+    result.x = v0.x - v1.x;
+    result.y = v0.y - v1.y;
+    result.z = v0.z - v1.z;
+    return result;
+}
+
+Vector3& operator -= (Vector3& v0, Vector3 v1)
+{
+    v0.x -= v1.x;
+    v0.y -= v1.y;
+    v0.z -= v1.z;
+    return v0;
+}
+
+Vector3 operator * (Vector3 v, float s)
+{
+    Vector3 result;
+    result.x = v.x * s;
+    result.y = v.y * s;
+    result.z = v.z * s;
+    return result;
+}
+
+Vector3 operator * (float s, Vector3 v)
+{
+    Vector3 result;
+    result.x = s * v.x;
+    result.y = s * v.y;
+    result.z = s * v.z;
+    return result;
+}
+
+Vector3& operator *= (Vector3& v, float s)
+{
+    v.x *= s;
+    v.y *= s;
+    v.z *= s;
+    return v;
+}
+
+Vector3 operator / (Vector3 v, float s)
+{
+    Vector3 result;
+    result.x = v.x / s;
+    result.y = v.y / s;
+    result.z = v.z / s;
+    return result;
+}
+
+Vector3& operator /= (Vector3& v, float s)
+{
+    v.x /= s;
+    v.y /= s;
+    v.z /= s;
+    return v;
+}
+
+Vector3 operator - (Vector3 v)
+{
+    return { -v.x, -v.y, -v.z };
+}
+
+float squared_length(Vector3 v)
+{
+    return (v.x * v.x) + (v.y * v.y) + (v.z * v.z);
+}
+
+float length(Vector3 v)
+{
+    return sqrt(squared_length(v));
+}
+
+Vector3 normalize(Vector3 v)
+{
+    float l = length(v);
+    ASSERT(l != 0.0f && isfinite(l));
+    return v / l;
+}
+
+// inner product
+float dot(Vector3 v0, Vector3 v1)
+{
+    return (v0.x * v1.x) + (v0.y * v1.y) + (v0.z * v1.z);
+}
+
+Vector3 cross(Vector3 v0, Vector3 v1)
+{
+    Vector3 result;
+    result.x = (v0.y * v1.z) - (v0.z * v1.y);
+    result.y = (v0.z * v1.x) - (v0.x * v1.z);
+    result.z = (v0.x * v1.y) - (v0.y * v1.x);
+    return result;
+}
+
+// isotropic scale is just operator *
+Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
+{
+    Vector3 result;
+    result.x = v0.x * v1.x;
+    result.y = v0.y * v1.y;
+    result.z = v0.z * v1.z;
+    return result;
+}
+
+// Matrix Functions.............................................................
+
+struct Matrix4
+{
+    float elements[16]; // in row-major order
+
+    float& operator [] (int index) { return elements[index]; }
+    const float& operator [] (int index) const { return elements[index]; }
+};
+
+const Matrix4 matrix4_identity =
+{{
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 1.0f
+}};
+
+Matrix4 operator * (const Matrix4& a, const Matrix4& b)
+{
+    Matrix4 result;
+    for(int i = 0; i < 4; ++i)
+    {
+        for(int j = 0; j < 4; ++j)
+        {
+            float m = 0.0f;
+            for(int w = 0; w < 4; ++w)
+            {
+                 m += a[4 * i + w] * b[4 * w + j];
+            }
+            result[4 * i + j] = m;
+        }
+    }
+    return result;
+}
+
+Matrix4 transpose(const Matrix4& m)
+{
+    return
+    {{
+        m[0], m[4], m[8],  m[12],
+        m[1], m[5], m[9],  m[13],
+        m[2], m[6], m[10], m[14],
+        m[3], m[7], m[11], m[15]
+    }};
+}
+
+Matrix4 view_matrix(
+    Vector3 x_axis, Vector3 y_axis, Vector3 z_axis, Vector3 position)
+{
+    Matrix4 result;
+
+    result[0]  = x_axis.x;
+    result[1]  = x_axis.y;
+    result[2]  = x_axis.z;
+    result[3]  = -dot(x_axis, position);
+
+    result[4]  = y_axis.x;
+    result[5]  = y_axis.y;
+    result[6]  = y_axis.z;
+    result[7]  = -dot(y_axis, position);
+
+    result[8]  = z_axis.x;
+    result[9]  = z_axis.y;
+    result[10] = z_axis.z;
+    result[11] = -dot(z_axis, position);
+
+    result[12] = 0.0f;
+    result[13] = 0.0f;
+    result[14] = 0.0f;
+    result[15] = 1.0f;
+
+    return result;
+}
+
+// This function assumes a right-handed coordinate system.
+Matrix4 look_at_matrix(Vector3 position, Vector3 target, Vector3 world_up)
+{
+    Vector3 forward = normalize(position - target);
+    Vector3 right = normalize(cross(world_up, forward));
+    Vector3 up = normalize(cross(forward, right));
+    return view_matrix(right, up, forward, position);
+}
+
+// This transforms from a right-handed coordinate system to OpenGL's default
+// clip space. A position will be viewable in this clip space if its x, y, and
+// z components are in the range [-w,w] of its w component.
+Matrix4 perspective_projection_matrix(
+    float fovy, float width, float height, float near_plane, float far_plane)
+{
+    float coty = 1.0f / tan(fovy / 2.0f);
+    float aspect_ratio = width / height;
+    float neg_depth = near_plane - far_plane;
+
+    Matrix4 result;
+
+    result[0] = coty / aspect_ratio;
+    result[1] = 0.0f;
+    result[2] = 0.0f;
+    result[3] = 0.0f;
+
+    result[4] = 0.0f;
+    result[5] = coty;
+    result[6] = 0.0f;
+    result[7] = 0.0f;
+
+    result[8] = 0.0f;
+    result[9] = 0.0f;
+    result[10] = (near_plane + far_plane) / neg_depth;
+    result[11] = 2.0f * near_plane * far_plane / neg_depth;
+
+    result[12] = 0.0f;
+    result[13] = 0.0f;
+    result[14] = -1.0f;
+    result[15] = 0.0f;
+
+    return result;
+}
+
 // Main Functions...............................................................
+
+enum class UserKey { Space, Left, Up, Right, Down };
 
 namespace
 {
@@ -178,17 +447,17 @@ namespace
     const double frame_frequency = 1.0 / 60.0;
     const int key_count = 5;
 
-    u64 window_pixels[window_height][window_width];
     bool keys_pressed[key_count];
     bool old_keys_pressed[key_count];
     // This counts the frames since the last time the key state changed.
     int edge_counts[key_count];
 
-    float x, y;
+    Vector3 position;
 }
 
-static bool key_tapped(int which)
+static bool key_tapped(UserKey key)
 {
+    int which = static_cast<int>(key);
     return keys_pressed[which] && edge_counts[which] == 0;
 }
 
@@ -208,35 +477,58 @@ static void main_update()
         }
     }
 
-    if(key_tapped(1))
+    if(key_tapped(UserKey::Left))
     {
-        x -= 0.05f;
+        position.x -= 0.4f;
     }
-    if(key_tapped(3))
+    if(key_tapped(UserKey::Right))
     {
-        x += 0.05f;
+        position.x += 0.4f;
     }
-    if(key_tapped(2))
+    if(key_tapped(UserKey::Up))
     {
-        y += 0.05f;
+        position.y += 0.4f;
     }
-    if(key_tapped(4))
+    if(key_tapped(UserKey::Down))
     {
-        y -= 0.05f;
+        position.y -= 0.4f;
     }
 
     // Draw everything.
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glBegin(GL_TRIANGLES);
-    glColor3f(1.0f, 0.0f, 0.0f);
-    glVertex2f(x,        y       );
-    glVertex2f(x + 0.4f, y       );
-    glVertex2f(x,        y + 0.4f);
-    glVertex2f(x + 0.4f, y       );
-    glVertex2f(x + 0.4f, y + 0.4f);
-    glVertex2f(x,        y + 0.4f);
-    glEnd();
+    // Set up the camera.
+    {
+        const Matrix4 model_view = look_at_matrix(
+            { 0.0f, -1.5f, 1.5f }, vector3_zero, vector3_unit_z);
+        const Matrix4 projection = perspective_projection_matrix(
+            PI_2, window_width, window_height, 0.05f, 8.0f);
+
+        // glLoadMatrixf accepts matrices as arrays in column major order in
+        // memory and Matrix4 stores them in row major, so they need to be
+        // transposed.
+        glMatrixMode(GL_MODELVIEW);
+        glLoadMatrixf(transpose(model_view).elements);
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(transpose(projection).elements);
+
+        glViewport(0, 0, window_width, window_height);
+    }
+
+    // Draw a rectangle.
+    {
+        float x = position.x;
+        float y = position.y;
+        glBegin(GL_TRIANGLES);
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glVertex3f(x,        y       , 0.0f);
+        glVertex3f(x + 0.4f, y       , 0.0f);
+        glVertex3f(x,        y + 0.4f, 0.0f);
+        glVertex3f(x + 0.4f, y       , 0.0f);
+        glVertex3f(x + 0.4f, y + 0.4f, 0.0f);
+        glVertex3f(x,        y + 0.4f, 0.0f);
+        glEnd();
+    }
 }
 
 // Platform-Specific Implementations============================================
