@@ -41,6 +41,7 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #include <cstdio>
 #include <cstdint>
 #include <cassert>
+#include <cstdlib>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -53,6 +54,19 @@ typedef int32_t s32;
 typedef int64_t s64;
 
 #define ASSERT(expression) assert(expression)
+
+#define ALLOCATE(type, count) static_cast<type*>(malloc(sizeof(type) * (count)))
+#define DEALLOCATE(memory) free(memory)
+#define SAFE_DEALLOCATE(memory) \
+    if(memory) { DEALLOCATE(memory); (memory) = nullptr; }
+
+static int string_size(const char* string)
+{
+    ASSERT(string);
+    const char* s;
+    for(s = string; *s; ++s);
+    return s - string;
+}
 
 #define TAU  6.28318530717958647692f
 #define PI   3.14159265358979323846f
@@ -542,7 +556,33 @@ void (APIENTRYA *p_glBufferData)(
 void (APIENTRYA *p_glDeleteBuffers)(GLsizei n, const GLuint* buffers) = nullptr;
 void (APIENTRYA *p_glGenBuffers)(GLsizei n, GLuint* buffers) = nullptr;
 
+void (APIENTRYA* p_glAttachShader)(GLuint program, GLuint shader) = nullptr;
+void (APIENTRYA* p_glCompileShader)(GLuint shader) = nullptr;
+GLuint (APIENTRYA* p_glCreateProgram)(void) = nullptr;
+GLuint (APIENTRYA* p_glCreateShader)(GLenum type) = nullptr;
+void (APIENTRYA* p_glDeleteProgram)(GLuint program) = nullptr;
+void (APIENTRYA* p_glDeleteShader)(GLuint shader) = nullptr;
+void (APIENTRYA* p_glDetachShader)(GLuint program, GLuint shader) = nullptr;
 void (APIENTRYA *p_glEnableVertexAttribArray)(GLuint index) = nullptr;
+void (APIENTRYA* p_glGetProgramInfoLog)(
+    GLuint program, GLsizei bufSize, GLsizei* length,
+    GLchar* infoLog) = nullptr;
+void (APIENTRYA* p_glGetProgramiv)(
+    GLuint program, GLenum pname, GLint * params) = nullptr;
+void (APIENTRYA* p_glGetShaderInfoLog)(
+    GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) = nullptr;
+void (APIENTRYA* p_glGetShaderiv)(
+    GLuint shader, GLenum pname, GLint* params) = nullptr;
+GLint (APIENTRYA* p_glGetUniformLocation)(
+    GLuint program, const GLchar* name) = nullptr;
+void (APIENTRYA* p_glLinkProgram)(GLuint program) = nullptr;
+void (APIENTRYA* p_glShaderSource)(
+    GLuint shader, GLsizei count, const GLchar* const* string,
+    const GLint* length) = nullptr;
+void (APIENTRYA* p_glUniformMatrix4fv)(
+    GLint location, GLsizei count, GLboolean transpose,
+    const GLfloat* value) = nullptr;
+void (APIENTRYA* p_glUseProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glVertexAttribPointer)(
     GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
     const void* pointer) = nullptr;
@@ -556,12 +596,26 @@ void (APIENTRYA *p_glVertexAttribPointer)(
 #define glDeleteBuffers p_glDeleteBuffers
 #define glGenBuffers p_glGenBuffers
 
+#define glAttachShader p_glAttachShader
+#define glCompileShader p_glCompileShader
+#define glCreateProgram p_glCreateProgram
+#define glCreateShader p_glCreateShader
+#define glDeleteProgram p_glDeleteProgram
+#define glDeleteShader p_glDeleteShader
+#define glDetachShader p_glDetachShader
 #define glEnableVertexAttribArray p_glEnableVertexAttribArray
+#define glGetProgramInfoLog p_glGetProgramInfoLog
+#define glGetProgramiv p_glGetProgramiv
+#define glGetShaderInfoLog p_glGetShaderInfoLog
+#define glGetShaderiv p_glGetShaderiv
+#define glGetUniformLocation p_glGetUniformLocation
+#define glLinkProgram p_glLinkProgram
+#define glShaderSource p_glShaderSource
+#define glUniformMatrix4fv p_glUniformMatrix4fv
+#define glUseProgram p_glUseProgram
 #define glVertexAttribPointer p_glVertexAttribPointer
 
-namespace ogl {
-
-static bool load_functions()
+static bool ogl_load_functions()
 {
     p_glBindVertexArray = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
         GET_PROC("glBindVertexArray"));
@@ -579,8 +633,42 @@ static bool load_functions()
     p_glGenBuffers = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(
         GET_PROC("glGenBuffers"));
 
+    p_glAttachShader = reinterpret_cast<void (APIENTRYA*)(GLuint, GLuint)>(
+        GET_PROC("glAttachShader"));
+    p_glCompileShader = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glCompileShader"));
+    p_glCreateProgram = reinterpret_cast<GLuint (APIENTRYA*)(void)>(
+        GET_PROC("glCreateProgram"));
+    p_glCreateShader = reinterpret_cast<GLuint (APIENTRYA*)(GLenum)>(
+        GET_PROC("glCreateShader"));
+    p_glDeleteProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glDeleteProgram"));
+    p_glDeleteShader = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glDeleteShader"));
+    p_glDetachShader = reinterpret_cast<void (APIENTRYA*)(GLuint, GLuint)>(
+        GET_PROC("glDetachShader"));
     p_glEnableVertexAttribArray = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
         GET_PROC("glEnableVertexAttribArray"));
+    p_glGetProgramInfoLog = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLsizei, GLsizei*, GLchar*)>(GET_PROC("glGetProgramInfoLog"));
+    p_glGetProgramiv = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLenum, GLint*)>(GET_PROC("glGetProgramiv"));
+    p_glGetShaderInfoLog = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLsizei, GLsizei*, GLchar*)>(GET_PROC("glGetShaderInfoLog"));
+    p_glGetShaderiv = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLenum, GLint*)>(GET_PROC("glGetShaderiv"));
+    p_glGetUniformLocation = reinterpret_cast<GLint (APIENTRYA*)(
+        GLuint, const GLchar*)>(GET_PROC("glGetUniformLocation"));
+    p_glLinkProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+            GET_PROC("glLinkProgram"));
+    p_glShaderSource = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLsizei, const GLchar* const*, const GLint*)>(
+            GET_PROC("glShaderSource"));
+    p_glUniformMatrix4fv = reinterpret_cast<void (APIENTRYA*)(
+        GLint, GLsizei, GLboolean, const GLfloat*)>(
+            GET_PROC("glUniformMatrix4fv"));
+    p_glUseProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glUseProgram"));
     p_glVertexAttribPointer = reinterpret_cast<void (APIENTRYA*)(
         GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)>(
             GET_PROC("glVertexAttribPointer"));
@@ -596,13 +684,165 @@ static bool load_functions()
     failure_count += p_glDeleteBuffers == nullptr;
     failure_count += p_glGenBuffers == nullptr;
 
+    failure_count += p_glAttachShader == nullptr;
+    failure_count += p_glCompileShader == nullptr;
+    failure_count += p_glCreateProgram == nullptr;
+    failure_count += p_glCreateShader == nullptr;
+    failure_count += p_glDeleteProgram == nullptr;
+    failure_count += p_glDeleteShader == nullptr;
+    failure_count += p_glDetachShader == nullptr;
     failure_count += p_glEnableVertexAttribArray == nullptr;
+    failure_count += p_glGetProgramInfoLog == nullptr;
+    failure_count += p_glGetProgramiv == nullptr;
+    failure_count += p_glGetShaderInfoLog == nullptr;
+    failure_count += p_glGetShaderiv == nullptr;
+    failure_count += p_glGetUniformLocation == nullptr;
+    failure_count += p_glLinkProgram == nullptr;
+    failure_count += p_glShaderSource == nullptr;
+    failure_count += p_glUniformMatrix4fv == nullptr;
+    failure_count += p_glUseProgram == nullptr;
     failure_count += p_glVertexAttribPointer == nullptr;
 
     return failure_count == 0;
 }
 
-} // namespace ogl
+// Shader Functions.............................................................
+
+const char* default_vertex_source = R"(
+#version 330
+
+layout(location = 0) in vec3 position;
+
+uniform mat4x4 model_view_projection;
+
+void main()
+{
+    gl_Position = model_view_projection
+        * vec4(position.x, position.y, position.z, 1.0);
+}
+)";
+
+const char* default_fragment_source = R"(
+#version 330
+
+layout(location = 0) out vec4 output_colour;
+
+void main()
+{
+    output_colour = vec4(1.0, 0.0, 0.0, 1.0);
+}
+)";
+
+static GLuint load_shader(GLenum type, const char* source, GLint source_size)
+{
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, &source_size);
+    glCompileShader(shader);
+
+    // Output any errors if the compilation failed.
+
+    GLint compile_status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_status);
+    if(compile_status == GL_FALSE)
+    {
+        GLint info_log_size = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &info_log_size);
+        if(info_log_size > 0)
+        {
+            GLchar* info_log = ALLOCATE(GLchar, info_log_size);
+            if(info_log)
+            {
+                GLsizei bytes_written = 0;
+                glGetShaderInfoLog(
+                    shader, info_log_size, &bytes_written, info_log);
+                LOG_ERROR("Couldn't compile the shader.\n%s", info_log);
+                DEALLOCATE(info_log);
+            }
+            else
+            {
+                LOG_ERROR("Couldn't compile the shader.");
+            }
+        }
+
+        glDeleteShader(shader);
+
+        return 0;
+    }
+
+    return shader;
+}
+
+static GLuint load_shader_program(
+    const char* vertex_source, const char* fragment_source)
+{
+    GLuint program;
+
+    GLuint vertex_shader = load_shader(
+        GL_VERTEX_SHADER, vertex_source, string_size(vertex_source));
+    if(vertex_shader == 0)
+    {
+        LOG_ERROR("Failed to load the vertex shader.");
+        return 0;
+    }
+
+    GLuint fragment_shader = load_shader(
+        GL_FRAGMENT_SHADER, fragment_source, string_size(fragment_source));
+    if(fragment_shader == 0)
+    {
+        LOG_ERROR("Failed to load the fragment shader.");
+        glDeleteShader(vertex_shader);
+        return 0;
+    }
+
+    // Create the program object and link the shaders to it.
+
+    program = glCreateProgram();
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glLinkProgram(program);
+
+    // Check if linking failed and output any errors.
+
+    GLint link_status = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &link_status);
+    if(link_status == GL_FALSE)
+    {
+        int info_log_size = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &info_log_size);
+        if(info_log_size > 0)
+        {
+            GLchar* info_log = ALLOCATE(GLchar, info_log_size);
+            if(info_log)
+            {
+                GLsizei bytes_written = 0;
+                glGetProgramInfoLog(
+                    program, info_log_size, &bytes_written, info_log);
+                LOG_ERROR(
+                    "Couldn't link the shader program.\n%s", info_log);
+                DEALLOCATE(info_log);
+            }
+            else
+            {
+                LOG_ERROR("Couldn't link the shader program.");
+            }
+        }
+
+        glDeleteProgram(program);
+        glDeleteShader(fragment_shader);
+        glDeleteShader(vertex_shader);
+
+        return 0;
+    }
+
+    // Shaders are no longer needed after the program object is linked.
+    glDetachShader(program, vertex_shader);
+    glDetachShader(program, fragment_shader);
+
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    return program;
+}
 
 // Render System Functions......................................................
 
@@ -611,10 +851,11 @@ namespace render_system {
 GLuint vertex_array;
 const int buffers_count = 2;
 GLuint buffers[buffers_count];
+GLuint shader;
 
 static bool initialise()
 {
-    bool functions_loaded = ogl::load_functions();
+    bool functions_loaded = ogl_load_functions();
     if(!functions_loaded)
     {
         LOG_ERROR("OpenGL functions could not be loaded!");
@@ -650,6 +891,9 @@ static bool initialise()
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
     glBufferData(
         GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    shader = load_shader_program(
+        default_vertex_source, default_fragment_source);
 
     return true;
 }
@@ -724,26 +968,23 @@ static void main_update()
         angle += 0.02f;
 
         const Vector3 scale = { 1.0f, 1.0f, 1.0f };
-        const Quaternion orientation = axis_angle_rotation(
-            vector3_unit_z, angle);
-        const Matrix4 model = compose_transform(position, orientation, scale);
+        Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
+        Matrix4 model = compose_transform(position, orientation, scale);
 
         const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
         const Matrix4 view = look_at_matrix(
             camera_position, vector3_zero, vector3_unit_z);
 
-        const Matrix4 model_view = view * model;
-
         const Matrix4 projection = perspective_projection_matrix(
             PI_2, window_width, window_height, 0.05f, 8.0f);
 
-        // glLoadMatrixf accepts matrices as arrays in column major order in
-        // memory and Matrix4 stores them in row major, so they need to be
-        // transposed.
-        glMatrixMode(GL_MODELVIEW);
-        glLoadMatrixf(transpose(model_view).elements);
-        glMatrixMode(GL_PROJECTION);
-        glLoadMatrixf(transpose(projection).elements);
+        const Matrix4 model_view_projection = projection * view * model;
+
+        glUseProgram(render_system::shader);
+        GLint location = glGetUniformLocation(
+            render_system::shader, "model_view_projection");
+        glUniformMatrix4fv(
+            location, 1, GL_TRUE, model_view_projection.elements);
 
         glViewport(0, 0, window_width, window_height);
     }
