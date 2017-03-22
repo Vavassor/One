@@ -179,6 +179,7 @@ float float_range(float min, float max)
 
 #include <cmath>
 
+using std::abs;
 using std::sqrt;
 using std::isfinite;
 
@@ -316,6 +317,43 @@ Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
     return result;
 }
 
+// Quaternion Functions.........................................................
+
+static bool float_almost_one(float x)
+{
+    return abs(x - 1.0f) <= 0.0000005f;
+}
+
+struct Quaternion
+{
+    float w, x, y, z;
+};
+
+const Quaternion quaternion_identity = { 1.0f, 0.0f, 0.0f, 0.0f };
+
+float norm(Quaternion q)
+{
+    return sqrt((q.w * q.w) + (q.x * q.x) + (q.y * q.y) + (q.z * q.z));
+}
+
+Quaternion axis_angle_rotation(Vector3 axis, float angle)
+{
+    ASSERT(isfinite(angle));
+
+    angle /= 2.0f;
+    float phase = sin(angle);
+    Vector3 v = normalize(axis);
+
+    Quaternion result;
+    result.w = cos(angle);
+    result.x = v.x * phase;
+    result.y = v.y * phase;
+    result.z = v.z * phase;
+    // Rotations must be unit quaternions.
+    ASSERT(float_almost_one(norm(result)));
+    return result;
+}
+
 // Matrix Functions.............................................................
 
 struct Matrix4
@@ -435,6 +473,189 @@ Matrix4 perspective_projection_matrix(
     return result;
 }
 
+Matrix4 compose_transform(
+    Vector3 position, Quaternion orientation, Vector3 scale)
+{
+    float w = orientation.w;
+    float x = orientation.x;
+    float y = orientation.y;
+    float z = orientation.z;
+
+    float xw = x * w;
+    float xx = x * x;
+    float xy = x * y;
+    float xz = x * z;
+
+    float yw = y * w;
+    float yy = y * y;
+    float yz = y * z;
+
+    float zw = z * w;
+    float zz = z * z;
+
+    Matrix4 result;
+
+    result[0]  = (1.0f - 2.0f * (yy + zz)) * scale.x;
+    result[1]  = (       2.0f * (xy - zw)) * scale.y;
+    result[2]  = (       2.0f * (xz + yw)) * scale.z;
+    result[3]  = position.x;
+
+    result[4]  = (       2.0f * (xy + zw)) * scale.x;
+    result[5]  = (1.0f - 2.0f * (xx + zz)) * scale.y;
+    result[6]  = (       2.0f * (yz - xw)) * scale.z;
+    result[7]  = position.y;
+
+    result[8]  = (       2.0f * (xw - yw)) * scale.x;
+    result[9]  = (       2.0f * (yz + xw)) * scale.y;
+    result[10] = (1.0f - 2.0f * (xx + yy)) * scale.z;
+    result[11] = position.z;
+
+    result[12] = 0.0f;
+    result[13] = 0.0f;
+    result[14] = 0.0f;
+    result[15] = 1.0f;
+
+    return result;
+}
+
+// OpenGL Function loading......................................................
+
+#if defined(OS_LINUX)
+#define APIENTRYA
+#define GET_PROC(name) \
+    (*glXGetProcAddress)(reinterpret_cast<const GLubyte*>(name))
+
+#elif defined(OS_WINDOWS)
+#define APIENTRYA APIENTRY
+#define GET_PROC(name) \
+    (*wglGetProcAddress)(reinterpret_cast<LPCSTR>(name))
+#endif
+
+void (APIENTRYA *p_glBindVertexArray)(GLuint ren_array) = nullptr;
+void (APIENTRYA *p_glDeleteVertexArrays)(
+    GLsizei n, const GLuint* arrays) = nullptr;
+void (APIENTRYA *p_glGenVertexArrays)(GLsizei n, GLuint* arrays) = nullptr;
+
+void (APIENTRYA *p_glBindBuffer)(GLenum target, GLuint buffer) = nullptr;
+void (APIENTRYA *p_glBufferData)(
+    GLenum target, GLsizeiptr size, const void* data, GLenum usage) = nullptr;
+void (APIENTRYA *p_glDeleteBuffers)(GLsizei n, const GLuint* buffers) = nullptr;
+void (APIENTRYA *p_glGenBuffers)(GLsizei n, GLuint* buffers) = nullptr;
+
+void (APIENTRYA *p_glEnableVertexAttribArray)(GLuint index) = nullptr;
+void (APIENTRYA *p_glVertexAttribPointer)(
+    GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
+    const void* pointer) = nullptr;
+
+#define glBindVertexArray p_glBindVertexArray
+#define glDeleteVertexArrays p_glDeleteVertexArrays
+#define glGenVertexArrays p_glGenVertexArrays
+
+#define glBindBuffer p_glBindBuffer
+#define glBufferData p_glBufferData
+#define glDeleteBuffers p_glDeleteBuffers
+#define glGenBuffers p_glGenBuffers
+
+#define glEnableVertexAttribArray p_glEnableVertexAttribArray
+#define glVertexAttribPointer p_glVertexAttribPointer
+
+namespace ogl {
+
+static bool load_functions()
+{
+    p_glBindVertexArray = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glBindVertexArray"));
+    p_glDeleteVertexArrays = reinterpret_cast<void (APIENTRYA *)(
+        GLsizei, const GLuint*)>(GET_PROC("glDeleteVertexArrays"));
+    p_glGenVertexArrays = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(
+        GET_PROC("glGenVertexArrays"));
+
+    p_glBindBuffer = reinterpret_cast<void (APIENTRYA*)(GLenum, GLuint)>(
+        GET_PROC("glBindBuffer"));
+    p_glBufferData = reinterpret_cast<void (APIENTRYA*)(
+        GLenum, GLsizeiptr, const void*, GLenum)>(GET_PROC("glBufferData"));
+    p_glDeleteBuffers = reinterpret_cast<void (APIENTRYA*)(
+        GLsizei, const GLuint*)>(GET_PROC("glDeleteBuffers"));
+    p_glGenBuffers = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(
+        GET_PROC("glGenBuffers"));
+
+    p_glEnableVertexAttribArray = reinterpret_cast<void (APIENTRYA*)(GLuint)>(
+        GET_PROC("glEnableVertexAttribArray"));
+    p_glVertexAttribPointer = reinterpret_cast<void (APIENTRYA*)(
+        GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)>(
+            GET_PROC("glVertexAttribPointer"));
+
+    int failure_count = 0;
+
+    failure_count += p_glBindVertexArray == nullptr;
+    failure_count += p_glDeleteVertexArrays == nullptr;
+    failure_count += p_glGenVertexArrays == nullptr;
+
+    failure_count += p_glBindBuffer == nullptr;
+    failure_count += p_glBufferData == nullptr;
+    failure_count += p_glDeleteBuffers == nullptr;
+    failure_count += p_glGenBuffers == nullptr;
+
+    failure_count += p_glEnableVertexAttribArray == nullptr;
+    failure_count += p_glVertexAttribPointer == nullptr;
+
+    return failure_count == 0;
+}
+
+} // namespace ogl
+
+// Render System Functions......................................................
+
+namespace render_system {
+
+GLuint vertex_array;
+const int buffers_count = 2;
+GLuint buffers[buffers_count];
+
+static bool initialise()
+{
+    bool functions_loaded = ogl::load_functions();
+    if(!functions_loaded)
+    {
+        LOG_ERROR("OpenGL functions could not be loaded!");
+        return false;
+    }
+
+    const GLfloat vertices[] =
+    {
+         1.0f,  0.0f, -1.0f / sqrt(2.0f),
+        -1.0f,  0.0f, -1.0f / sqrt(2.0f),
+         0.0f,  1.0f,  1.0f / sqrt(2.0f),
+         0.0f, -1.0f,  1.0f / sqrt(2.0f),
+    };
+    const GLushort indices[] =
+    {
+        0, 1, 3,
+        1, 0, 2,
+        2, 3, 1,
+        3, 2, 0,
+    };
+
+    glGenVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+
+    glGenBuffers(buffers_count, &buffers[0]);
+
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glVertexAttribPointer(
+        0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), nullptr);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    return true;
+}
+
+} // namespace render_system
+
 // Main Functions...............................................................
 
 enum class UserKey { Space, Left, Up, Right, Down };
@@ -499,8 +720,20 @@ static void main_update()
 
     // Set up the camera.
     {
-        const Matrix4 model_view = look_at_matrix(
-            { 0.0f, -1.5f, 1.5f }, vector3_zero, vector3_unit_z);
+        static float angle = 0.0f;
+        angle += 0.02f;
+
+        const Vector3 scale = { 1.0f, 1.0f, 1.0f };
+        const Quaternion orientation = axis_angle_rotation(
+            vector3_unit_z, angle);
+        const Matrix4 model = compose_transform(position, orientation, scale);
+
+        const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
+        const Matrix4 view = look_at_matrix(
+            camera_position, vector3_zero, vector3_unit_z);
+
+        const Matrix4 model_view = view * model;
+
         const Matrix4 projection = perspective_projection_matrix(
             PI_2, window_width, window_height, 0.05f, 8.0f);
 
@@ -515,20 +748,8 @@ static void main_update()
         glViewport(0, 0, window_width, window_height);
     }
 
-    // Draw a rectangle.
-    {
-        float x = position.x;
-        float y = position.y;
-        glBegin(GL_TRIANGLES);
-        glColor3f(1.0f, 0.0f, 0.0f);
-        glVertex3f(x,        y       , 0.0f);
-        glVertex3f(x + 0.4f, y       , 0.0f);
-        glVertex3f(x,        y + 0.4f, 0.0f);
-        glVertex3f(x + 0.4f, y       , 0.0f);
-        glVertex3f(x + 0.4f, y + 0.4f, 0.0f);
-        glVertex3f(x,        y + 0.4f, 0.0f);
-        glEnd();
-    }
+    glBindVertexArray(render_system::vertex_array);
+    glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, nullptr);
 }
 
 // Platform-Specific Implementations============================================
@@ -659,6 +880,13 @@ static bool main_create()
     if(!made_current)
     {
         LOG_ERROR("Failed to attach the GLX context to the window.");
+        return false;
+    }
+
+    bool initialised = render_system::initialise();
+    if(!initialised)
+    {
+        LOG_ERROR("Render system failed initialisation.");
         return false;
     }
 
@@ -918,6 +1146,13 @@ static bool main_create(HINSTANCE instance, int show_command)
     {
         LOG_ERROR("Couldn't set this thread's rendering context "
             "(wglMakeCurrent failed).");
+        return false;
+    }
+
+    bool initialised = render_system::initialise();
+    if(!initialised)
+    {
+        LOG_ERROR("Render system failed initialisation.");
         return false;
     }
 
