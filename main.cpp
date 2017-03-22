@@ -532,6 +532,54 @@ Matrix4 compose_transform(
     return result;
 }
 
+Matrix4 inverse_transform(const Matrix4& m)
+{
+    // The scale can be extracted from the rotation data by just taking the
+    // length of the first three row vectors.
+
+    float dx = sqrt(m[0] * m[0] + m[1] * m[1] + m[2]  * m[2]);
+    float dy = sqrt(m[4] * m[4] + m[5] * m[5] + m[6]  * m[6]);
+    float dz = sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+
+    // The scale can then by used to normalise the rotation rows.
+
+    float m00 = m[0] / dx;
+    float m10 = m[1] / dy;
+    float m20 = m[2] / dz;
+
+    float m01 = m[4] / dx;
+    float m11 = m[5] / dy;
+    float m21 = m[6] / dz;
+
+    float m02 = m[8] / dx;
+    float m12 = m[9] / dy;
+    float m22 = m[10] / dz;
+
+    // The inverse of the translation elements is the negation of the
+    // translation vector multiplied by the transpose of the rotation and the
+    // reciprocal of the dilation.
+
+    float a = -(m00 * m[3] + m10 * m[7] + m20 * m[11]) / dx;
+    float b = -(m01 * m[3] + m11 * m[7] + m21 * m[11]) / dy;
+    float c = -(m02 * m[3] + m12 * m[7] + m22 * m[11]) / dz;
+
+    // Apply the inverse dilation to the rotation elements.
+
+    m00 /= dx;
+    m11 /= dy;
+    m22 /= dz;
+
+    // Make sure to place the rotation elements in transposed order.
+
+    return
+    {{
+        m00,  m10,  m20,  a,
+        m01,  m11,  m21,  b,
+        m02,  m12,  m22,  c,
+        0.0f, 0.0f, 0.0f, 0.0f,
+    }};
+}
+
 // OpenGL Function loading......................................................
 
 #if defined(OS_LINUX)
@@ -708,31 +756,6 @@ static bool ogl_load_functions()
 
 // Shader Functions.............................................................
 
-const char* default_vertex_source = R"(
-#version 330
-
-layout(location = 0) in vec3 position;
-
-uniform mat4x4 model_view_projection;
-
-void main()
-{
-    gl_Position = model_view_projection
-        * vec4(position.x, position.y, position.z, 1.0);
-}
-)";
-
-const char* default_fragment_source = R"(
-#version 330
-
-layout(location = 0) out vec4 output_colour;
-
-void main()
-{
-    output_colour = vec4(1.0, 0.0, 0.0, 1.0);
-}
-)";
-
 static GLuint load_shader(GLenum type, const char* source, GLint source_size)
 {
     GLuint shader = glCreateShader(type);
@@ -848,6 +871,45 @@ static GLuint load_shader_program(
 
 namespace render_system {
 
+const char* default_vertex_source = R"(
+#version 330
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+
+uniform mat4x4 model_view_projection;
+uniform mat4x4 normal_matrix;
+
+out vec3 surface_normal;
+
+void main()
+{
+    gl_Position = model_view_projection
+        * vec4(position.x, position.y, position.z, 1.0);
+    surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
+}
+)";
+
+const char* default_fragment_source = R"(
+#version 330
+
+layout(location = 0) out vec4 output_colour;
+
+in vec3 surface_normal;
+
+float half_lambert(vec3 n, vec3 l)
+{
+    return 0.5 * dot(n, -l) + 0.5;
+}
+
+void main()
+{
+    vec3 light_direction = vec3(1, 0.5, -1);
+    float light = half_lambert(surface_normal, light_direction);
+    output_colour = vec4(vec3(light), 1.0);
+}
+)";
+
 GLuint vertex_array;
 const int buffers_count = 2;
 GLuint buffers[buffers_count];
@@ -862,19 +924,21 @@ static bool initialise()
         return false;
     }
 
+    glEnable(GL_CULL_FACE);
+
     const GLfloat vertices[] =
     {
-         1.0f,  0.0f, -1.0f / sqrt(2.0f),
-        -1.0f,  0.0f, -1.0f / sqrt(2.0f),
-         0.0f,  1.0f,  1.0f / sqrt(2.0f),
-         0.0f, -1.0f,  1.0f / sqrt(2.0f),
+         1.0f,  0.0f, -1.0f / sqrt(2.0f),  0.816497f, 0.0f, -0.57735f,
+        -1.0f,  0.0f, -1.0f / sqrt(2.0f), -0.816497f, 0.0f, -0.57735f,
+         0.0f,  1.0f,  1.0f / sqrt(2.0f),  0.0f, 0.816497f,  0.57735f,
+         0.0f, -1.0f,  1.0f / sqrt(2.0f),  0.0f,-0.816497f,  0.57735f,
     };
     const GLushort indices[] =
     {
-        0, 1, 3,
-        1, 0, 2,
-        2, 3, 1,
-        3, 2, 0,
+        0, 1, 2,
+        1, 0, 3,
+        2, 3, 0,
+        3, 2, 1,
     };
 
     glGenVertexArrays(1, &vertex_array);
@@ -884,13 +948,19 @@ static bool initialise()
 
     glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    const int vertex_size = 6 * sizeof(GLfloat);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, vertex_size, nullptr);
     glVertexAttribPointer(
-        0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), nullptr);
+        1, 3, GL_FLOAT, GL_FALSE, vertex_size,
+        reinterpret_cast<GLvoid*>(sizeof(float) * 3));
     glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
     glBufferData(
         GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    glBindVertexArray(0);
 
     shader = load_shader_program(
         default_vertex_source, default_fragment_source);
@@ -980,11 +1050,15 @@ static void main_update()
 
         const Matrix4 model_view_projection = projection * view * model;
 
+        const Matrix4 normal_matrix = transpose(inverse_transform(model));
+
         glUseProgram(render_system::shader);
         GLint location = glGetUniformLocation(
             render_system::shader, "model_view_projection");
         glUniformMatrix4fv(
             location, 1, GL_TRUE, model_view_projection.elements);
+        location = glGetUniformLocation(render_system::shader, "normal_matrix");
+        glUniformMatrix4fv(location, 1, GL_TRUE, normal_matrix.elements);
 
         glViewport(0, 0, window_width, window_height);
     }
