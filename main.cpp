@@ -604,33 +604,33 @@ void (APIENTRYA *p_glBufferData)(
 void (APIENTRYA *p_glDeleteBuffers)(GLsizei n, const GLuint* buffers) = nullptr;
 void (APIENTRYA *p_glGenBuffers)(GLsizei n, GLuint* buffers) = nullptr;
 
-void (APIENTRYA* p_glAttachShader)(GLuint program, GLuint shader) = nullptr;
-void (APIENTRYA* p_glCompileShader)(GLuint shader) = nullptr;
-GLuint (APIENTRYA* p_glCreateProgram)(void) = nullptr;
-GLuint (APIENTRYA* p_glCreateShader)(GLenum type) = nullptr;
-void (APIENTRYA* p_glDeleteProgram)(GLuint program) = nullptr;
-void (APIENTRYA* p_glDeleteShader)(GLuint shader) = nullptr;
-void (APIENTRYA* p_glDetachShader)(GLuint program, GLuint shader) = nullptr;
+void (APIENTRYA *p_glAttachShader)(GLuint program, GLuint shader) = nullptr;
+void (APIENTRYA *p_glCompileShader)(GLuint shader) = nullptr;
+GLuint (APIENTRYA *p_glCreateProgram)(void) = nullptr;
+GLuint (APIENTRYA *p_glCreateShader)(GLenum type) = nullptr;
+void (APIENTRYA *p_glDeleteProgram)(GLuint program) = nullptr;
+void (APIENTRYA *p_glDeleteShader)(GLuint shader) = nullptr;
+void (APIENTRYA *p_glDetachShader)(GLuint program, GLuint shader) = nullptr;
 void (APIENTRYA *p_glEnableVertexAttribArray)(GLuint index) = nullptr;
-void (APIENTRYA* p_glGetProgramInfoLog)(
+void (APIENTRYA *p_glGetProgramInfoLog)(
     GLuint program, GLsizei bufSize, GLsizei* length,
     GLchar* infoLog) = nullptr;
-void (APIENTRYA* p_glGetProgramiv)(
-    GLuint program, GLenum pname, GLint * params) = nullptr;
-void (APIENTRYA* p_glGetShaderInfoLog)(
+void (APIENTRYA *p_glGetProgramiv)(
+    GLuint program, GLenum pname, GLint* params) = nullptr;
+void (APIENTRYA *p_glGetShaderInfoLog)(
     GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) = nullptr;
-void (APIENTRYA* p_glGetShaderiv)(
+void (APIENTRYA *p_glGetShaderiv)(
     GLuint shader, GLenum pname, GLint* params) = nullptr;
-GLint (APIENTRYA* p_glGetUniformLocation)(
+GLint (APIENTRYA *p_glGetUniformLocation)(
     GLuint program, const GLchar* name) = nullptr;
-void (APIENTRYA* p_glLinkProgram)(GLuint program) = nullptr;
-void (APIENTRYA* p_glShaderSource)(
+void (APIENTRYA *p_glLinkProgram)(GLuint program) = nullptr;
+void (APIENTRYA *p_glShaderSource)(
     GLuint shader, GLsizei count, const GLchar* const* string,
     const GLint* length) = nullptr;
-void (APIENTRYA* p_glUniformMatrix4fv)(
+void (APIENTRYA *p_glUniformMatrix4fv)(
     GLint location, GLsizei count, GLboolean transpose,
     const GLfloat* value) = nullptr;
-void (APIENTRYA* p_glUseProgram)(GLuint program) = nullptr;
+void (APIENTRYA *p_glUseProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glVertexAttribPointer)(
     GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
     const void* pointer) = nullptr;
@@ -914,6 +914,12 @@ GLuint vertex_array;
 const int buffers_count = 2;
 GLuint buffers[buffers_count];
 GLuint shader;
+Matrix4 projection;
+struct
+{
+    int width;
+    int height;
+} viewport;
 
 static bool initialise()
 {
@@ -924,6 +930,7 @@ static bool initialise()
         return false;
     }
 
+    glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
 
     const GLfloat vertices[] =
@@ -966,6 +973,50 @@ static bool initialise()
         default_vertex_source, default_fragment_source);
 
     return true;
+}
+
+static void resize_viewport(int width, int height)
+{
+    viewport.width = width;
+    viewport.height = height;
+    const float fov = PI_2;
+    const float near = 0.05f;
+    const float far = 8.0f;
+    projection = perspective_projection_matrix(fov, width, height, near, far);
+}
+
+static void update(Vector3 position)
+{
+    glViewport(0, 0, viewport.width, viewport.height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Set up the camera.
+    {
+        static float angle = 0.0f;
+        angle += 0.02f;
+
+        const Vector3 scale = { 1.0f, 1.0f, 1.0f };
+        Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
+        Matrix4 model = compose_transform(position, orientation, scale);
+
+        const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
+        const Matrix4 view = look_at_matrix(
+            camera_position, vector3_zero, vector3_unit_z);
+
+        const Matrix4 model_view_projection = projection * view * model;
+
+        const Matrix4 normal_matrix = transpose(inverse_transform(model));
+
+        glUseProgram(shader);
+        GLint location = glGetUniformLocation(shader, "model_view_projection");
+        glUniformMatrix4fv(
+            location, 1, GL_TRUE, model_view_projection.elements);
+        location = glGetUniformLocation(shader, "normal_matrix");
+        glUniformMatrix4fv(location, 1, GL_TRUE, normal_matrix.elements);
+    }
+
+    glBindVertexArray(vertex_array);
+    glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, nullptr);
 }
 
 } // namespace render_system
@@ -1029,42 +1080,7 @@ static void main_update()
         position.y -= 0.4f;
     }
 
-    // Draw everything.
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // Set up the camera.
-    {
-        static float angle = 0.0f;
-        angle += 0.02f;
-
-        const Vector3 scale = { 1.0f, 1.0f, 1.0f };
-        Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
-        Matrix4 model = compose_transform(position, orientation, scale);
-
-        const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
-        const Matrix4 view = look_at_matrix(
-            camera_position, vector3_zero, vector3_unit_z);
-
-        const Matrix4 projection = perspective_projection_matrix(
-            PI_2, window_width, window_height, 0.05f, 8.0f);
-
-        const Matrix4 model_view_projection = projection * view * model;
-
-        const Matrix4 normal_matrix = transpose(inverse_transform(model));
-
-        glUseProgram(render_system::shader);
-        GLint location = glGetUniformLocation(
-            render_system::shader, "model_view_projection");
-        glUniformMatrix4fv(
-            location, 1, GL_TRUE, model_view_projection.elements);
-        location = glGetUniformLocation(render_system::shader, "normal_matrix");
-        glUniformMatrix4fv(location, 1, GL_TRUE, normal_matrix.elements);
-
-        glViewport(0, 0, window_width, window_height);
-    }
-
-    glBindVertexArray(render_system::vertex_array);
-    glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, nullptr);
+    render_system::update(position);
 }
 
 // Platform-Specific Implementations============================================
@@ -1166,12 +1182,13 @@ static bool main_create()
         display, DefaultRootWindow(display), visual_info->visual, AllocNone);
     XSetWindowAttributes window_attributes = { };
     window_attributes.colormap = colormap;
+    window_attributes.event_mask = StructureNotifyMask;
     int screen = DefaultScreen(display);
     Window root_window = RootWindow(display, screen);
     window = XCreateWindow(
         display, root_window, 0, 0, window_width, window_height, 0,
-        visual_info->depth, InputOutput, visual_info->visual, CWColormap,
-        &window_attributes);
+        visual_info->depth, InputOutput, visual_info->visual,
+        CWColormap | CWEventMask, &window_attributes);
 
     // Register to receive window close messages.
     wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
@@ -1204,6 +1221,7 @@ static bool main_create()
         LOG_ERROR("Render system failed initialisation.");
         return false;
     }
+    render_system::resize_viewport(window_width, window_height);
 
     return true;
 }
@@ -1256,6 +1274,13 @@ static void main_loop()
                         XDestroyWindow(display, window);
                         return;
                     }
+                    break;
+                }
+                case ConfigureNotify:
+                {
+                    XConfigureRequestEvent configure = event.xconfigurerequest;
+                    render_system::resize_viewport(
+                        configure.width, configure.height);
                     break;
                 }
             }
