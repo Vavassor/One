@@ -43,6 +43,8 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #include <cassert>
 #include <cstdlib>
 
+// Useful Things................................................................
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -96,7 +98,7 @@ void log_add_message(LogLevel level, const char* format, ...);
 #define LOG_ERROR(format, ...) \
     log_add_message(LogLevel::Error, format, ##__VA_ARGS__)
 
-#ifdef NDEBUG
+#if defined(NDEBUG)
 #define LOG_DEBUG(format, ...) // do nothing
 #else
 #define LOG_DEBUG(format, ...) \
@@ -164,9 +166,15 @@ u64 seed(u64 value)
     return old_seed;
 }
 
+// just an easier-to-remember alias
+u64 generate()
+{
+    return xoroshiro128plus();
+}
+
 int int_range(int min, int max)
 {
-    int x = xoroshiro128plus() % static_cast<u64>(max - min + 1);
+    int x = generate() % static_cast<u64>(max - min + 1);
     return min + x;
 }
 
@@ -183,7 +191,7 @@ static inline float to_float(u64 x)
 
 float float_range(float min, float max)
 {
-    float f = to_float(xoroshiro128plus());
+    float f = to_float(generate());
     return min + f * (max - min);
 }
 
@@ -541,18 +549,18 @@ Matrix4 inverse_transform(const Matrix4& m)
     float dy = sqrt(m[4] * m[4] + m[5] * m[5] + m[6]  * m[6]);
     float dz = sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
 
-    // The scale can then by used to normalise the rotation rows.
+    // The extracted scale can then be divided out to isolate the rotation rows.
 
     float m00 = m[0] / dx;
-    float m10 = m[1] / dy;
-    float m20 = m[2] / dz;
+    float m10 = m[4] / dy;
+    float m20 = m[8] / dz;
 
-    float m01 = m[4] / dx;
+    float m01 = m[1] / dx;
     float m11 = m[5] / dy;
-    float m21 = m[6] / dz;
+    float m21 = m[9] / dz;
 
-    float m02 = m[8] / dx;
-    float m12 = m[9] / dy;
+    float m02 = m[2] / dx;
+    float m12 = m[6] / dy;
     float m22 = m[10] / dz;
 
     // The inverse of the translation elements is the negation of the
@@ -563,20 +571,22 @@ Matrix4 inverse_transform(const Matrix4& m)
     float b = -(m01 * m[3] + m11 * m[7] + m21 * m[11]) / dy;
     float c = -(m02 * m[3] + m12 * m[7] + m22 * m[11]) / dz;
 
-    // Apply the inverse dilation to the rotation elements.
+    // After the unmodified rotation elements have been used to figure out the
+    // inverse translation, they can be modified with the inverse dilation.
 
     m00 /= dx;
     m11 /= dy;
     m22 /= dz;
 
-    // Make sure to place the rotation elements in transposed order.
+    // Put everything in, making sure to place the rotation elements in
+    // transposed order.
 
     return
     {{
         m00,  m10,  m20,  a,
         m01,  m11,  m21,  b,
         m02,  m12,  m22,  c,
-        0.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
     }};
 }
 
@@ -840,8 +850,7 @@ static GLuint load_shader_program(
                 GLsizei bytes_written = 0;
                 glGetProgramInfoLog(
                     program, info_log_size, &bytes_written, info_log);
-                LOG_ERROR(
-                    "Couldn't link the shader program.\n%s", info_log);
+                LOG_ERROR("Couldn't link the shader program.\n%s", info_log);
                 DEALLOCATE(info_log);
             }
             else
@@ -884,9 +893,8 @@ out vec3 surface_normal;
 
 void main()
 {
-    gl_Position = model_view_projection
-        * vec4(position.x, position.y, position.z, 1.0);
-    surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
+    gl_Position = model_view_projection * vec4(position, 1.0);
+    surface_normal = (normal_matrix * vec4(normal, 1.0)).xyz;
 }
 )";
 
@@ -902,6 +910,11 @@ float half_lambert(vec3 n, vec3 l)
     return 0.5 * dot(n, -l) + 0.5;
 }
 
+float lambert(vec3 n, vec3 l)
+{
+    return max(dot(n, -l), 0.0);
+}
+
 void main()
 {
     vec3 light_direction = vec3(1, 0.5, -1);
@@ -910,20 +923,16 @@ void main()
 }
 )";
 
+bool functions_loaded = false;
 GLuint vertex_array;
 const int buffers_count = 2;
 GLuint buffers[buffers_count];
 GLuint shader;
 Matrix4 projection;
-struct
-{
-    int width;
-    int height;
-} viewport;
 
 static bool initialise()
 {
-    bool functions_loaded = ogl_load_functions();
+    functions_loaded = ogl_load_functions();
     if(!functions_loaded)
     {
         LOG_ERROR("OpenGL functions could not be loaded!");
@@ -951,7 +960,7 @@ static bool initialise()
     glGenVertexArrays(1, &vertex_array);
     glBindVertexArray(vertex_array);
 
-    glGenBuffers(buffers_count, &buffers[0]);
+    glGenBuffers(buffers_count, buffers);
 
     glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
@@ -971,26 +980,39 @@ static bool initialise()
 
     shader = load_shader_program(
         default_vertex_source, default_fragment_source);
+    if(shader == 0)
+    {
+        LOG_ERROR("The default shader failed to load.");
+        return false;
+    }
 
     return true;
 }
 
+static void terminate()
+{
+    if(functions_loaded)
+    {
+        glDeleteVertexArrays(1, &vertex_array);
+        glDeleteBuffers(buffers_count, buffers);
+        glDeleteProgram(shader);
+    }
+}
+
 static void resize_viewport(int width, int height)
 {
-    viewport.width = width;
-    viewport.height = height;
     const float fov = PI_2;
     const float near = 0.05f;
-    const float far = 8.0f;
+    const float far = 12.0f;
     projection = perspective_projection_matrix(fov, width, height, near, far);
+    glViewport(0, 0, width, height);
 }
 
 static void update(Vector3 position)
 {
-    glViewport(0, 0, viewport.width, viewport.height);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // Set up the camera.
+    // Set up the matrices.
     {
         static float angle = 0.0f;
         angle += 0.02f;
@@ -1003,9 +1025,10 @@ static void update(Vector3 position)
         const Matrix4 view = look_at_matrix(
             camera_position, vector3_zero, vector3_unit_z);
 
-        const Matrix4 model_view_projection = projection * view * model;
+        Matrix4 model_view = view * model;
+        Matrix4 model_view_projection = projection * model_view;
 
-        const Matrix4 normal_matrix = transpose(inverse_transform(model));
+        Matrix4 normal_matrix = transpose(inverse_transform(model_view));
 
         glUseProgram(shader);
         GLint location = glGetUniformLocation(shader, "model_view_projection");
@@ -1228,6 +1251,8 @@ static bool main_create()
 
 static void main_destroy()
 {
+    render_system::terminate();
+
     if(visual_info)
     {
         XFree(visual_info);
