@@ -57,10 +57,14 @@ typedef int64_t s64;
 
 #define ASSERT(expression) assert(expression)
 
-#define ALLOCATE(type, count) static_cast<type*>(malloc(sizeof(type) * (count)))
+#define ALLOCATE(type, count) static_cast<type*>(calloc((count), sizeof(type)))
+#define REALLOCATE(memory, type, count) \
+    static_cast<type*>(realloc((memory), sizeof(type) * (count)))
 #define DEALLOCATE(memory) free(memory)
 #define SAFE_DEALLOCATE(memory) \
     if(memory) { DEALLOCATE(memory); (memory) = nullptr; }
+
+#define ARRAY_COUNT(array) (sizeof(array) / sizeof(*(array)))
 
 static int string_size(const char* string)
 {
@@ -923,12 +927,165 @@ void main()
 }
 )";
 
+struct Object
+{
+    Matrix4 model_view_projection;
+    Matrix4 normal_matrix;
+    GLuint vertex_array;
+    GLuint buffers[2];
+    int indices_count;
+};
+
+static void object_create(Object* object)
+{
+    glGenVertexArrays(1, &object->vertex_array);
+    glGenBuffers(ARRAY_COUNT(object->buffers), object->buffers);
+}
+
+static void object_destroy(Object* object)
+{
+    glDeleteVertexArrays(1, &object->vertex_array);
+    glDeleteBuffers(ARRAY_COUNT(object->buffers), object->buffers);
+}
+
+static void object_set_surface(
+    Object* object, const float* vertices, int vertices_count,
+    const s16* indices, int indices_count)
+{
+    glBindVertexArray(object->vertex_array);
+
+    const int vertex_size = sizeof(float) * (3 + 3);
+    GLsizei vertices_size = vertex_size * vertices_count;
+    GLvoid* offset = reinterpret_cast<GLvoid*>(sizeof(float) * 3);
+    glBindBuffer(GL_ARRAY_BUFFER, object->buffers[0]);
+    glBufferData(GL_ARRAY_BUFFER, vertices_size, vertices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, vertex_size, nullptr);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, vertex_size, offset);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+
+    GLsizei indices_size = sizeof(s16) * indices_count;
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->buffers[1]);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER, indices_size, indices, GL_STATIC_DRAW);
+    object->indices_count = indices_count;
+
+    glBindVertexArray(0);
+}
+
+static void object_set_matrices(
+    Object* object, Matrix4 model, Matrix4 view, Matrix4 projection)
+{
+    Matrix4 model_view = view * model;
+    object->model_view_projection = projection * model_view;
+    object->normal_matrix = transpose(inverse_transform(model_view));
+}
+
+struct Floor
+{
+    struct Vertex
+    {
+        Vector3 position;
+        Vector3 normal;
+    };
+    Vertex* vertices;
+    int vertices_count;
+    int vertices_capacity;
+    s16* indices;
+    int indices_count;
+    int indices_capacity;
+};
+
+static void floor_destroy(Floor* floor)
+{
+    SAFE_DEALLOCATE(floor->vertices);
+    SAFE_DEALLOCATE(floor->indices);
+}
+
+static bool floor_add_tile(Floor* floor, int x, int y)
+{
+    if(floor->vertices_count + 4 >= floor->vertices_capacity)
+    {
+        if(floor->vertices_capacity == 0)
+        {
+            floor->vertices_capacity = 5;
+        }
+        floor->vertices_capacity *= 2;
+        Floor::Vertex* vertices = REALLOCATE(
+            floor->vertices, Floor::Vertex, floor->vertices_capacity);
+        if(!vertices)
+        {
+            return false;
+        }
+        floor->vertices = vertices;
+    }
+    if(floor->indices_count + 6 >= floor->indices_capacity)
+    {
+        if(floor->indices_capacity == 0)
+        {
+            floor->indices_capacity = 5;
+        }
+        floor->indices_capacity *= 2;
+        s16* indices = REALLOCATE(
+            floor->indices, s16, floor->indices_capacity);
+        if(!indices)
+        {
+            return false;
+        }
+        floor->indices = indices;
+    }
+
+    float px = 0.4f * (x - 5.0f);
+    float py = 0.4f * (y - 2.0f);
+    int o = floor->vertices_count;
+    floor->vertices[o    ].position = { px       , py       , -1.0f };
+    floor->vertices[o + 1].position = { px + 0.4f, py       , -1.0f };
+    floor->vertices[o + 2].position = { px       , py + 0.4f, -1.0f };
+    floor->vertices[o + 3].position = { px + 0.4f, py + 0.4f, -1.0f };
+    floor->vertices[o    ].normal   = vector3_unit_z;
+    floor->vertices[o + 1].normal   = vector3_unit_z;
+    floor->vertices[o + 2].normal   = vector3_unit_z;
+    floor->vertices[o + 3].normal   = vector3_unit_z;
+    floor->vertices_count += 4;
+
+    int c = floor->indices_count;
+    floor->indices[c    ] = o + 0;
+    floor->indices[c + 1] = o + 1;
+    floor->indices[c + 2] = o + 2;
+    floor->indices[c + 3] = o + 2;
+    floor->indices[c + 4] = o + 1;
+    floor->indices[c + 5] = o + 3;
+    floor->indices_count += 6;
+
+    return true;
+}
+
+static void floor_generate(Object* object)
+{
+    Floor floor = {};
+    for(int y = 0; y < 10; ++y)
+    {
+        for(int x = y & 1; x < 10; x += 2)
+        {
+            bool added = floor_add_tile(&floor, x, y);
+            if(!added)
+            {
+                floor_destroy(&floor);
+                return;
+            }
+        }
+    }
+    object_set_surface(
+        object, reinterpret_cast<float*>(floor.vertices),
+        6 * floor.vertices_count, floor.indices, floor.indices_count);
+    floor_destroy(&floor);
+}
+
 bool functions_loaded = false;
-GLuint vertex_array;
-const int buffers_count = 2;
-GLuint buffers[buffers_count];
 GLuint shader;
 Matrix4 projection;
+int objects_count = 2;
+Object objects[2];
 
 static bool initialise()
 {
@@ -942,41 +1099,32 @@ static bool initialise()
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
 
-    const GLfloat vertices[] =
+    Object tetrahedron;
+    const int vertices_count = 4;
+    const float vertices[] =
     {
          1.0f,  0.0f, -1.0f / sqrt(2.0f),  0.816497f, 0.0f, -0.57735f,
         -1.0f,  0.0f, -1.0f / sqrt(2.0f), -0.816497f, 0.0f, -0.57735f,
          0.0f,  1.0f,  1.0f / sqrt(2.0f),  0.0f, 0.816497f,  0.57735f,
          0.0f, -1.0f,  1.0f / sqrt(2.0f),  0.0f,-0.816497f,  0.57735f,
     };
-    const GLushort indices[] =
+    const int indices_count = 12;
+    const s16 indices[indices_count] =
     {
         0, 1, 2,
         1, 0, 3,
         2, 3, 0,
         3, 2, 1,
     };
+    object_create(&tetrahedron);
+    object_set_surface(
+        &tetrahedron, vertices, vertices_count, indices, indices_count);
+    objects[0] = tetrahedron;
 
-    glGenVertexArrays(1, &vertex_array);
-    glBindVertexArray(vertex_array);
-
-    glGenBuffers(buffers_count, buffers);
-
-    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-    const int vertex_size = 6 * sizeof(GLfloat);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, vertex_size, nullptr);
-    glVertexAttribPointer(
-        1, 3, GL_FLOAT, GL_FALSE, vertex_size,
-        reinterpret_cast<GLvoid*>(sizeof(float) * 3));
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-    glBindVertexArray(0);
+    Object floor;
+    object_create(&floor);
+    floor_generate(&floor);
+    objects[1] = floor;
 
     shader = load_shader_program(
         default_vertex_source, default_fragment_source);
@@ -993,8 +1141,10 @@ static void terminate()
 {
     if(functions_loaded)
     {
-        glDeleteVertexArrays(1, &vertex_array);
-        glDeleteBuffers(buffers_count, buffers);
+        for(int i = 0; i < objects_count; ++i)
+        {
+            object_destroy(objects + i);
+        }
         glDeleteProgram(shader);
     }
 }
@@ -1019,27 +1169,32 @@ static void update(Vector3 position)
 
         const Vector3 scale = { 1.0f, 1.0f, 1.0f };
         Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
-        Matrix4 model = compose_transform(position, orientation, scale);
+        Matrix4 model0 = compose_transform(position, orientation, scale);
+
+        Matrix4 model1 = matrix4_identity;
 
         const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
         const Matrix4 view = look_at_matrix(
             camera_position, vector3_zero, vector3_unit_z);
 
-        Matrix4 model_view = view * model;
-        Matrix4 model_view_projection = projection * model_view;
-
-        Matrix4 normal_matrix = transpose(inverse_transform(model_view));
-
-        glUseProgram(shader);
-        GLint location = glGetUniformLocation(shader, "model_view_projection");
-        glUniformMatrix4fv(
-            location, 1, GL_TRUE, model_view_projection.elements);
-        location = glGetUniformLocation(shader, "normal_matrix");
-        glUniformMatrix4fv(location, 1, GL_TRUE, normal_matrix.elements);
+        object_set_matrices(objects, model0, view, projection);
+        object_set_matrices(objects + 1, model1, view, projection);
     }
 
-    glBindVertexArray(vertex_array);
-    glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, nullptr);
+    glUseProgram(shader);
+    GLint location0 = glGetUniformLocation(shader, "model_view_projection");
+    GLint location1 = glGetUniformLocation(shader, "normal_matrix");
+
+    for(int i = 0; i < objects_count; ++i)
+    {
+        Object* o = objects + i;
+        glUniformMatrix4fv(
+            location0, 1, GL_TRUE, o->model_view_projection.elements);
+        glUniformMatrix4fv(location1, 1, GL_TRUE, o->normal_matrix.elements);
+        glBindVertexArray(o->vertex_array);
+        glDrawElements(
+            GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
+    }
 }
 
 } // namespace render_system
