@@ -343,6 +343,18 @@ Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
     return result;
 }
 
+static bool floats_almost_equal(float a, float b, float epsilon)
+{
+    return abs(a - b) <= epsilon * fmax(1.0f, fmax(a, b));
+}
+
+static bool vectors_close(Vector3 a, Vector3 b)
+{
+    return floats_almost_equal(a.x, b.x, 0.00002f)
+        && floats_almost_equal(a.y, b.y, 0.00002f)
+        && floats_almost_equal(a.z, b.z, 0.00002f);
+}
+
 // Quaternion Functions.........................................................
 
 static bool float_almost_one(float x)
@@ -950,7 +962,7 @@ static void object_destroy(Object* object)
 
 static void object_set_surface(
     Object* object, const float* vertices, int vertices_count,
-    const s16* indices, int indices_count)
+    const u16* indices, int indices_count)
 {
     glBindVertexArray(object->vertex_array);
 
@@ -964,7 +976,7 @@ static void object_set_surface(
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
 
-    GLsizei indices_size = sizeof(s16) * indices_count;
+    GLsizei indices_size = sizeof(u16) * indices_count;
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->buffers[1]);
     glBufferData(
         GL_ELEMENT_ARRAY_BUFFER, indices_size, indices, GL_STATIC_DRAW);
@@ -991,7 +1003,7 @@ struct Floor
     Vertex* vertices;
     int vertices_count;
     int vertices_capacity;
-    s16* indices;
+    u16* indices;
     int indices_count;
     int indices_capacity;
 };
@@ -1000,6 +1012,89 @@ static void floor_destroy(Floor* floor)
 {
     SAFE_DEALLOCATE(floor->vertices);
     SAFE_DEALLOCATE(floor->indices);
+}
+
+static bool vertices_match(Floor::Vertex* a, Floor::Vertex* b)
+{
+    return vectors_close(a->position, b->position)
+        && vectors_close(a->normal, b->normal);
+}
+
+static inline void cycle_increment(int* s, int n)
+{
+    *s = (*s + 1) % n;
+}
+
+// a vertex and index, paired
+struct Verdex
+{
+    Floor::Vertex vertex;
+    u16 index;
+};
+
+static u32 jenkins_hash(const u8* key, size_t length)
+{
+    size_t i = 0;
+    u32 hash = 0;
+    while (i != length)
+    {
+        hash += key[i++];
+        hash += hash << 10;
+        hash ^= hash >> 6;
+    }
+    hash += hash << 3;
+    hash ^= hash >> 11;
+    hash += hash << 15;
+    return hash;
+}
+
+static int hash_vertex(Floor::Vertex vertex, int n)
+{
+    return jenkins_hash(reinterpret_cast<u8*>(&vertex), sizeof vertex) % n;
+}
+
+static const u16 invalid_index = 0xFFFF;
+
+static void vertex_table_clear(Verdex* table, int table_count)
+{
+    for(int i = 0; i < table_count; ++i)
+    {
+        table[i].index = invalid_index;
+    }
+}
+
+static int vertex_table_insert(
+    Verdex* table, int table_count, u16 index, Floor::Vertex vertex)
+{
+    int probe = hash_vertex(vertex, table_count);
+    while(table[probe].index != invalid_index)
+    {
+        cycle_increment(&probe, table_count);
+    }
+    table[probe].index = index;
+    table[probe].vertex = vertex;
+    return probe;
+}
+
+static Verdex vertex_table_search(
+    Verdex* table, int table_count, Floor::Vertex vertex)
+{
+    int probe = hash_vertex(vertex, table_count);
+    for(int i = 0; i < table_count; ++i)
+    {
+        if(table[probe].index == invalid_index)
+        {
+            break;
+        }
+        if(vertices_match(&table[probe].vertex, &vertex))
+        {
+            return table[probe];
+        }
+        cycle_increment(&probe, table_count);
+    }
+    Verdex verdex;
+    verdex.index = invalid_index;
+    return verdex;
 }
 
 static bool floor_add_tile(Floor* floor, int x, int y)
@@ -1026,8 +1121,8 @@ static bool floor_add_tile(Floor* floor, int x, int y)
             floor->indices_capacity = 5;
         }
         floor->indices_capacity *= 2;
-        s16* indices = REALLOCATE(
-            floor->indices, s16, floor->indices_capacity);
+        u16* indices = REALLOCATE(
+            floor->indices, u16, floor->indices_capacity);
         if(!indices)
         {
             return false;
@@ -1060,6 +1155,66 @@ static bool floor_add_tile(Floor* floor, int x, int y)
     return true;
 }
 
+static void floor_reindex(Floor* floor)
+{
+    Floor::Vertex* out_vertices = nullptr;
+    int out_vertices_count = 0;
+    int out_vertices_capacity = 0;
+
+    const int table_count = 512;
+    Verdex* table = ALLOCATE(Verdex, table_count);
+    if(!table)
+    {
+        return;
+    }
+    vertex_table_clear(table, table_count);
+
+    int next_index = 0;
+    for(int i = 0; i < floor->indices_count; ++i)
+    {
+        u16 index = floor->indices[i];
+        Floor::Vertex vertex = floor->vertices[index];
+        Verdex match = vertex_table_search(table, table_count, vertex);
+        if(match.index == invalid_index)
+        {
+            vertex_table_insert(table, table_count, next_index, vertex);
+            floor->indices[i] = next_index;
+            next_index += 1;
+            if(out_vertices_count + 1 >= out_vertices_capacity)
+            {
+                if(out_vertices_capacity == 0)
+                {
+                    out_vertices_capacity = 5;
+                }
+                out_vertices_capacity *= 2;
+                Floor::Vertex* vertices = REALLOCATE(
+                    out_vertices, Floor::Vertex, out_vertices_capacity);
+                if(vertices)
+                {
+                    out_vertices = vertices;
+                }
+                else
+                {
+                    SAFE_DEALLOCATE(out_vertices);
+                    DEALLOCATE(table);
+                    return;
+                }
+            }
+            out_vertices[out_vertices_count] = vertex;
+            out_vertices_count += 1;
+        }
+        else
+        {
+            floor->indices[i] = match.index;
+        }
+    }
+    DEALLOCATE(table);
+    DEALLOCATE(floor->vertices);
+    floor->vertices = out_vertices;
+    floor->vertices_count = out_vertices_count;
+    floor->vertices_capacity = out_vertices_capacity;
+}
+
 static void floor_generate(Object* object)
 {
     Floor floor = {};
@@ -1075,6 +1230,9 @@ static void floor_generate(Object* object)
             }
         }
     }
+
+    floor_reindex(&floor);
+
     object_set_surface(
         object, reinterpret_cast<float*>(floor.vertices),
         6 * floor.vertices_count, floor.indices, floor.indices_count);
@@ -1109,7 +1267,7 @@ static bool initialise()
          0.0f, -1.0f,  1.0f / sqrt(2.0f),  0.0f,-0.816497f,  0.57735f,
     };
     const int indices_count = 12;
-    const s16 indices[indices_count] =
+    const u16 indices[indices_count] =
     {
         0, 1, 2,
         1, 0, 3,
@@ -1449,7 +1607,8 @@ static void main_loop()
                 case ClientMessage:
                 {
                     XClientMessageEvent client_message = event.xclient;
-                    if(client_message.data.l[0] == wm_delete_window)
+                    Atom message = static_cast<Atom>(client_message.data.l[0]);
+                    if(message == wm_delete_window)
                     {
                         XDestroyWindow(display, window);
                         return;
