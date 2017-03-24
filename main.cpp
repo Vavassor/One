@@ -42,6 +42,7 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #include <cstdint>
 #include <cassert>
 #include <cstdlib>
+#include <cstring>
 
 // Useful Things................................................................
 
@@ -63,6 +64,37 @@ typedef int64_t s64;
 #define DEALLOCATE(memory) free(memory)
 #define SAFE_DEALLOCATE(memory) \
     if(memory) { DEALLOCATE(memory); (memory) = nullptr; }
+
+static bool ensure_array_size(
+    void** array, int* capacity, int item_size, int extra)
+{
+    while(extra >= *capacity)
+    {
+        int old_capacity = *capacity;
+        if(*capacity == 0)
+        {
+            *capacity = 10;
+        }
+        else
+        {
+            *capacity *= 2;
+        }
+        void* new_array = realloc(*array, item_size * (*capacity));
+        if(!new_array)
+        {
+            return false;
+        }
+        int size_changed = *capacity - old_capacity;
+        u8* place = reinterpret_cast<u8*>(new_array) + item_size * old_capacity;
+        memset(place, 0, size_changed);
+        *array = new_array;
+    }
+    return true;
+}
+
+#define ENSURE_ARRAY_SIZE(array, capacity, extra) \
+    ensure_array_size( \
+        reinterpret_cast<void**>(array), (capacity), sizeof(**(array)), (extra))
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(*(array)))
 
@@ -311,7 +343,7 @@ float length(Vector3 v)
     return sqrt(squared_length(v));
 }
 
-Vector3 normalize(Vector3 v)
+Vector3 normalise(Vector3 v)
 {
     float l = length(v);
     ASSERT(l != 0.0f && isfinite(l));
@@ -343,18 +375,6 @@ Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
     return result;
 }
 
-static bool floats_almost_equal(float a, float b, float epsilon)
-{
-    return abs(a - b) <= epsilon * fmax(1.0f, fmax(a, b));
-}
-
-static bool vectors_close(Vector3 a, Vector3 b)
-{
-    return floats_almost_equal(a.x, b.x, 0.00002f)
-        && floats_almost_equal(a.y, b.y, 0.00002f)
-        && floats_almost_equal(a.z, b.z, 0.00002f);
-}
-
 // Quaternion Functions.........................................................
 
 static bool float_almost_one(float x)
@@ -380,7 +400,7 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 
     angle /= 2.0f;
     float phase = sin(angle);
-    Vector3 v = normalize(axis);
+    Vector3 v = normalise(axis);
 
     Quaternion result;
     result.w = cos(angle);
@@ -428,6 +448,17 @@ Matrix4 operator * (const Matrix4& a, const Matrix4& b)
     return result;
 }
 
+Vector3 operator * (const Matrix4& m, Vector3 v)
+{
+    float a = (m[12] * v.x) + (m[13] * v.y) + (m[14] * v.z) + m[15];
+
+    Vector3 result;
+    result.x = ((m[0] * v.x) + (m[1] * v.y) + (m[2]  * v.z) + m[3])  / a;
+    result.y = ((m[4] * v.x) + (m[5] * v.y) + (m[6]  * v.z) + m[7])  / a;
+    result.z = ((m[8] * v.x) + (m[9] * v.y) + (m[10] * v.z) + m[11]) / a;
+    return result;
+}
+
 Matrix4 transpose(const Matrix4& m)
 {
     return
@@ -470,9 +501,9 @@ Matrix4 view_matrix(
 // This function assumes a right-handed coordinate system.
 Matrix4 look_at_matrix(Vector3 position, Vector3 target, Vector3 world_up)
 {
-    Vector3 forward = normalize(position - target);
-    Vector3 right = normalize(cross(world_up, forward));
-    Vector3 up = normalize(cross(forward, right));
+    Vector3 forward = normalise(position - target);
+    Vector3 right = normalise(cross(world_up, forward));
+    Vector3 up = normalise(cross(forward, right));
     return view_matrix(right, up, forward, position);
 }
 
@@ -653,6 +684,8 @@ void (APIENTRYA *p_glLinkProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glShaderSource)(
     GLuint shader, GLsizei count, const GLchar* const* string,
     const GLint* length) = nullptr;
+void (APIENTRYA *p_glUniform3fv)(
+    GLint location, GLsizei count, const GLfloat* value) = nullptr;
 void (APIENTRYA *p_glUniformMatrix4fv)(
     GLint location, GLsizei count, GLboolean transpose,
     const GLfloat* value) = nullptr;
@@ -685,6 +718,7 @@ void (APIENTRYA *p_glVertexAttribPointer)(
 #define glGetUniformLocation p_glGetUniformLocation
 #define glLinkProgram p_glLinkProgram
 #define glShaderSource p_glShaderSource
+#define glUniform3fv p_glUniform3fv
 #define glUniformMatrix4fv p_glUniformMatrix4fv
 #define glUseProgram p_glUseProgram
 #define glVertexAttribPointer p_glVertexAttribPointer
@@ -738,6 +772,8 @@ static bool ogl_load_functions()
     p_glShaderSource = reinterpret_cast<void (APIENTRYA*)(
         GLuint, GLsizei, const GLchar* const*, const GLint*)>(
             GET_PROC("glShaderSource"));
+    p_glUniform3fv = reinterpret_cast<void (APIENTRY*)(
+        GLint, GLsizei, const GLfloat*)>(GET_PROC("glUniform3fv"));
     p_glUniformMatrix4fv = reinterpret_cast<void (APIENTRYA*)(
         GLint, GLsizei, GLboolean, const GLfloat*)>(
             GET_PROC("glUniformMatrix4fv"));
@@ -773,6 +809,7 @@ static bool ogl_load_functions()
     failure_count += p_glGetUniformLocation == nullptr;
     failure_count += p_glLinkProgram == nullptr;
     failure_count += p_glShaderSource == nullptr;
+    failure_count += p_glUniform3fv == nullptr;
     failure_count += p_glUniformMatrix4fv == nullptr;
     failure_count += p_glUseProgram == nullptr;
     failure_count += p_glVertexAttribPointer == nullptr;
@@ -892,6 +929,107 @@ static GLuint load_shader_program(
     return program;
 }
 
+// Floor Functions..............................................................
+
+struct Floor
+{
+    struct Vertex
+    {
+        Vector3 position;
+        Vector3 normal;
+    };
+    Vertex* vertices;
+    int vertices_count;
+    int vertices_capacity;
+    u16* indices;
+    int indices_count;
+    int indices_capacity;
+};
+
+static void floor_destroy(Floor* floor)
+{
+    SAFE_DEALLOCATE(floor->vertices);
+    SAFE_DEALLOCATE(floor->indices);
+}
+
+// This box only has 4 faces.
+static bool floor_add_box(
+    Floor* floor, Vector3 bottom_left, Vector3 dimensions)
+{
+    bool resized0 = ENSURE_ARRAY_SIZE(
+        &floor->vertices, &floor->vertices_capacity,
+        floor->vertices_count + 16);
+    bool resized1 = ENSURE_ARRAY_SIZE(
+        &floor->indices, &floor->indices_capacity, floor->indices_count + 24);
+    if(!resized0 || !resized1)
+    {
+        return false;
+    }
+
+    float l = bottom_left.x;                // left
+    float n = bottom_left.y;                // near
+    float b = bottom_left.z;                // bottom
+    float r = bottom_left.x + dimensions.x; // right
+    float f = bottom_left.y + dimensions.y; // far
+    float t = bottom_left.z + dimensions.z; // top
+
+    int o = floor->vertices_count;
+    floor->vertices[o     ].position = { l, n, t };
+    floor->vertices[o +  1].position = { r, n, t };
+    floor->vertices[o +  2].position = { l, f, t };
+    floor->vertices[o +  3].position = { r, f, t };
+    floor->vertices[o +  4].position = { r, n, t };
+    floor->vertices[o +  5].position = { r, f, t };
+    floor->vertices[o +  6].position = { r, n, b };
+    floor->vertices[o +  7].position = { r, f, b };
+    floor->vertices[o +  8].position = { l, n, t };
+    floor->vertices[o +  9].position = { l, f, t };
+    floor->vertices[o + 10].position = { l, n, b };
+    floor->vertices[o + 11].position = { l, f, b };
+    floor->vertices[o + 12].position = { l, n, t };
+    floor->vertices[o + 13].position = { r, n, t };
+    floor->vertices[o + 14].position = { l, n, b };
+    floor->vertices[o + 15].position = { r, n, b };
+    floor->vertices[o     ].normal   =  vector3_unit_z;
+    floor->vertices[o +  1].normal   =  vector3_unit_z;
+    floor->vertices[o +  2].normal   =  vector3_unit_z;
+    floor->vertices[o +  3].normal   =  vector3_unit_z;
+    floor->vertices[o +  4].normal   =  vector3_unit_x;
+    floor->vertices[o +  5].normal   =  vector3_unit_x;
+    floor->vertices[o +  6].normal   =  vector3_unit_x;
+    floor->vertices[o +  7].normal   =  vector3_unit_x;
+    floor->vertices[o +  8].normal   = -vector3_unit_x;
+    floor->vertices[o +  9].normal   = -vector3_unit_x;
+    floor->vertices[o + 10].normal   = -vector3_unit_x;
+    floor->vertices[o + 11].normal   = -vector3_unit_x;
+    floor->vertices[o + 12].normal   = -vector3_unit_y;
+    floor->vertices[o + 13].normal   = -vector3_unit_y;
+    floor->vertices[o + 14].normal   = -vector3_unit_y;
+    floor->vertices[o + 15].normal   = -vector3_unit_y;
+    floor->vertices_count += 16;
+
+    int c = floor->indices_count;
+    const int indices_count = 24;
+    const int offsets[indices_count] =
+    {
+        0, 1, 2,
+        2, 1, 3,
+        4, 6, 5,
+        7, 5, 6,
+        8, 9, 10,
+        11, 10, 9,
+        12, 14, 13,
+        15, 13, 14,
+    };
+    for(int i = 0; i < indices_count; ++i)
+    {
+        floor->indices[c + i] = o + offsets[i];
+    }
+    floor->indices_count += indices_count;
+
+    return true;
+}
+
 // Render System Functions......................................................
 
 namespace render_system {
@@ -910,7 +1048,7 @@ out vec3 surface_normal;
 void main()
 {
     gl_Position = model_view_projection * vec4(position, 1.0);
-    surface_normal = (normal_matrix * vec4(normal, 1.0)).xyz;
+    surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
 }
 )";
 
@@ -919,21 +1057,22 @@ const char* default_fragment_source = R"(
 
 layout(location = 0) out vec4 output_colour;
 
+uniform vec3 light_direction;
+
 in vec3 surface_normal;
 
 float half_lambert(vec3 n, vec3 l)
 {
-    return 0.5 * dot(n, -l) + 0.5;
+    return 0.5 * dot(n, l) + 0.5;
 }
 
 float lambert(vec3 n, vec3 l)
 {
-    return max(dot(n, -l), 0.0);
+    return max(dot(n, l), 0.0);
 }
 
 void main()
 {
-    vec3 light_direction = vec3(1, 0.5, -1);
     float light = half_lambert(surface_normal, light_direction);
     output_colour = vec4(vec3(light), 1.0);
 }
@@ -993,236 +1132,16 @@ static void object_set_matrices(
     object->normal_matrix = transpose(inverse_transform(model_view));
 }
 
-struct Floor
-{
-    struct Vertex
-    {
-        Vector3 position;
-        Vector3 normal;
-    };
-    Vertex* vertices;
-    int vertices_count;
-    int vertices_capacity;
-    u16* indices;
-    int indices_count;
-    int indices_capacity;
-};
-
-static void floor_destroy(Floor* floor)
-{
-    SAFE_DEALLOCATE(floor->vertices);
-    SAFE_DEALLOCATE(floor->indices);
-}
-
-static bool vertices_match(Floor::Vertex* a, Floor::Vertex* b)
-{
-    return vectors_close(a->position, b->position)
-        && vectors_close(a->normal, b->normal);
-}
-
-static inline void cycle_increment(int* s, int n)
-{
-    *s = (*s + 1) % n;
-}
-
-// a vertex and index, paired
-struct Verdex
-{
-    Floor::Vertex vertex;
-    u16 index;
-};
-
-static u32 jenkins_hash(const u8* key, size_t length)
-{
-    size_t i = 0;
-    u32 hash = 0;
-    while (i != length)
-    {
-        hash += key[i++];
-        hash += hash << 10;
-        hash ^= hash >> 6;
-    }
-    hash += hash << 3;
-    hash ^= hash >> 11;
-    hash += hash << 15;
-    return hash;
-}
-
-static int hash_vertex(Floor::Vertex vertex, int n)
-{
-    return jenkins_hash(reinterpret_cast<u8*>(&vertex), sizeof vertex) % n;
-}
-
-static const u16 invalid_index = 0xFFFF;
-
-static void vertex_table_clear(Verdex* table, int table_count)
-{
-    for(int i = 0; i < table_count; ++i)
-    {
-        table[i].index = invalid_index;
-    }
-}
-
-static int vertex_table_insert(
-    Verdex* table, int table_count, u16 index, Floor::Vertex vertex)
-{
-    int probe = hash_vertex(vertex, table_count);
-    while(table[probe].index != invalid_index)
-    {
-        cycle_increment(&probe, table_count);
-    }
-    table[probe].index = index;
-    table[probe].vertex = vertex;
-    return probe;
-}
-
-static Verdex vertex_table_search(
-    Verdex* table, int table_count, Floor::Vertex vertex)
-{
-    int probe = hash_vertex(vertex, table_count);
-    for(int i = 0; i < table_count; ++i)
-    {
-        if(table[probe].index == invalid_index)
-        {
-            break;
-        }
-        if(vertices_match(&table[probe].vertex, &vertex))
-        {
-            return table[probe];
-        }
-        cycle_increment(&probe, table_count);
-    }
-    Verdex verdex;
-    verdex.index = invalid_index;
-    return verdex;
-}
-
-static bool floor_add_tile(Floor* floor, int x, int y)
-{
-    if(floor->vertices_count + 4 >= floor->vertices_capacity)
-    {
-        if(floor->vertices_capacity == 0)
-        {
-            floor->vertices_capacity = 5;
-        }
-        floor->vertices_capacity *= 2;
-        Floor::Vertex* vertices = REALLOCATE(
-            floor->vertices, Floor::Vertex, floor->vertices_capacity);
-        if(!vertices)
-        {
-            return false;
-        }
-        floor->vertices = vertices;
-    }
-    if(floor->indices_count + 6 >= floor->indices_capacity)
-    {
-        if(floor->indices_capacity == 0)
-        {
-            floor->indices_capacity = 5;
-        }
-        floor->indices_capacity *= 2;
-        u16* indices = REALLOCATE(
-            floor->indices, u16, floor->indices_capacity);
-        if(!indices)
-        {
-            return false;
-        }
-        floor->indices = indices;
-    }
-
-    float px = 0.4f * (x - 5.0f);
-    float py = 0.4f * (y - 2.0f);
-    int o = floor->vertices_count;
-    floor->vertices[o    ].position = { px       , py       , -1.0f };
-    floor->vertices[o + 1].position = { px + 0.4f, py       , -1.0f };
-    floor->vertices[o + 2].position = { px       , py + 0.4f, -1.0f };
-    floor->vertices[o + 3].position = { px + 0.4f, py + 0.4f, -1.0f };
-    floor->vertices[o    ].normal   = vector3_unit_z;
-    floor->vertices[o + 1].normal   = vector3_unit_z;
-    floor->vertices[o + 2].normal   = vector3_unit_z;
-    floor->vertices[o + 3].normal   = vector3_unit_z;
-    floor->vertices_count += 4;
-
-    int c = floor->indices_count;
-    floor->indices[c    ] = o + 0;
-    floor->indices[c + 1] = o + 1;
-    floor->indices[c + 2] = o + 2;
-    floor->indices[c + 3] = o + 2;
-    floor->indices[c + 4] = o + 1;
-    floor->indices[c + 5] = o + 3;
-    floor->indices_count += 6;
-
-    return true;
-}
-
-static void floor_reindex(Floor* floor)
-{
-    Floor::Vertex* out_vertices = nullptr;
-    int out_vertices_count = 0;
-    int out_vertices_capacity = 0;
-
-    const int table_count = 512;
-    Verdex* table = ALLOCATE(Verdex, table_count);
-    if(!table)
-    {
-        return;
-    }
-    vertex_table_clear(table, table_count);
-
-    int next_index = 0;
-    for(int i = 0; i < floor->indices_count; ++i)
-    {
-        u16 index = floor->indices[i];
-        Floor::Vertex vertex = floor->vertices[index];
-        Verdex match = vertex_table_search(table, table_count, vertex);
-        if(match.index == invalid_index)
-        {
-            vertex_table_insert(table, table_count, next_index, vertex);
-            floor->indices[i] = next_index;
-            next_index += 1;
-            if(out_vertices_count + 1 >= out_vertices_capacity)
-            {
-                if(out_vertices_capacity == 0)
-                {
-                    out_vertices_capacity = 5;
-                }
-                out_vertices_capacity *= 2;
-                Floor::Vertex* vertices = REALLOCATE(
-                    out_vertices, Floor::Vertex, out_vertices_capacity);
-                if(vertices)
-                {
-                    out_vertices = vertices;
-                }
-                else
-                {
-                    SAFE_DEALLOCATE(out_vertices);
-                    DEALLOCATE(table);
-                    return;
-                }
-            }
-            out_vertices[out_vertices_count] = vertex;
-            out_vertices_count += 1;
-        }
-        else
-        {
-            floor->indices[i] = match.index;
-        }
-    }
-    DEALLOCATE(table);
-    DEALLOCATE(floor->vertices);
-    floor->vertices = out_vertices;
-    floor->vertices_count = out_vertices_count;
-    floor->vertices_capacity = out_vertices_capacity;
-}
-
-static void floor_generate(Object* object)
+static void object_generate_floor(Object* object)
 {
     Floor floor = {};
     for(int y = 0; y < 10; ++y)
     {
         for(int x = y & 1; x < 10; x += 2)
         {
-            bool added = floor_add_tile(&floor, x, y);
+            Vector3 bottom_left = { 0.4f * (x - 5.0f), 0.4f * y, -1.4f };
+            Vector3 dimensions = { 0.4f, 0.4f, 0.4f };
+            bool added = floor_add_box(&floor, bottom_left, dimensions);
             if(!added)
             {
                 floor_destroy(&floor);
@@ -1230,12 +1149,16 @@ static void floor_generate(Object* object)
             }
         }
     }
-
-    floor_reindex(&floor);
-
+    bool added = floor_add_box(
+        &floor,{ 1.0f, 0.0f, -1.0f}, { 0.1f, 2.0f, 1.0f });
+    if(!added)
+    {
+        floor_destroy(&floor);
+        return;
+    }
     object_set_surface(
         object, reinterpret_cast<float*>(floor.vertices),
-        6 * floor.vertices_count, floor.indices, floor.indices_count);
+        floor.vertices_count, floor.indices, floor.indices_count);
     floor_destroy(&floor);
 }
 
@@ -1281,7 +1204,7 @@ static bool initialise()
 
     Object floor;
     object_create(&floor);
-    floor_generate(&floor);
+    object_generate_floor(&floor);
     objects[1] = floor;
 
     shader = load_shader_program(
@@ -1309,7 +1232,7 @@ static void terminate()
 
 static void resize_viewport(int width, int height)
 {
-    const float fov = PI_2;
+    const float fov = PI_2 * (2.0f / 3.0f);
     const float near = 0.05f;
     const float far = 12.0f;
     projection = perspective_projection_matrix(fov, width, height, near, far);
@@ -1331,15 +1254,22 @@ static void update(Vector3 position)
 
         Matrix4 model1 = matrix4_identity;
 
-        const Vector3 camera_position = { 0.0f, -1.5f, 1.5f };
+        const Vector3 camera_position = { 0.0f, -3.5f, 2.0f };
+        const Vector3 camera_target = { 0.0f, 0.0f, 1.0f };
         const Matrix4 view = look_at_matrix(
-            camera_position, vector3_zero, vector3_unit_z);
+            camera_position, camera_target, vector3_unit_z);
 
         object_set_matrices(objects, model0, view, projection);
         object_set_matrices(objects + 1, model1, view, projection);
+
+        glUseProgram(shader);
+
+        Vector3 light_direction = { 0.7f, 0.4f, -1.0f };
+        light_direction = normalise(-(view * light_direction));
+        GLint location = glGetUniformLocation(shader, "light_direction");
+        glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
     }
 
-    glUseProgram(shader);
     GLint location0 = glGetUniformLocation(shader, "model_view_projection");
     GLint location1 = glGetUniformLocation(shader, "normal_matrix");
 
