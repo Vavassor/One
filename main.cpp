@@ -29,7 +29,6 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #if defined(__linux__)
 #define OS_LINUX
 #elif defined(_WIN32)
-#include <Windows.h>
 #define OS_WINDOWS
 #else
 #error Failed to figure out what operating system this is.
@@ -704,7 +703,15 @@ typedef ptrdiff_t GLsizeiptr;
 
 #if defined(OS_LINUX)
 #define APIENTRYA
+
 #elif defined(OS_WINDOWS)
+#if defined(__MINGW32__) && !defined(_ARM_)
+#define APIENTRY __stdcall
+#elif (_MSC_VER >= 800) || defined(_STDCALL_SUPPORTED)
+#define APIENTRY __stdcall
+#else
+#define APIENTRY
+#endif
 #define APIENTRYA APIENTRY
 #endif
 
@@ -1396,8 +1403,36 @@ static void main_update()
     (*glXGetProcAddress)(reinterpret_cast<const GLubyte*>(name))
 
 #elif defined(OS_WINDOWS)
-#define GET_PROC(name) \
-    (*wglGetProcAddress)(reinterpret_cast<LPCSTR>(name))
+#define WIN32_LEAN_AND_MEAN 1
+#define NOMINMAX
+#include <Windows.h>
+#if defined(near)
+#undef near
+#endif
+#if defined(far)
+#undef far
+#endif
+
+namespace
+{
+    HMODULE gl_module;
+}
+
+static PROC windows_get_proc_address(const char* name)
+{
+    PROC address = wglGetProcAddress(reinterpret_cast<LPCSTR>(name));
+    if(address)
+    {
+        return address;
+    }
+    if(!gl_module)
+    {
+        gl_module = GetModuleHandleA("OpenGL32.dll");
+    }
+    return GetProcAddress(gl_module, reinterpret_cast<LPCSTR>(name));
+}
+
+#define GET_PROC(name) (*windows_get_proc_address)(name)
 #endif
 
 static bool ogl_load_functions()
@@ -1805,17 +1840,20 @@ double get_time(Clock* clock)
 
 void go_to_sleep(Clock* clock, double amount_to_sleep)
 {
-    int milliseconds = 1000 * (amount_to_sleep * clock->frequency);
+    int milliseconds = 1000 * amount_to_sleep;
     Sleep(milliseconds);
 }
 
 // Platform Main Functions......................................................
+
+#include <ctime>
 
 namespace
 {
     HWND window;
     HDC device_context;
     HGLRC rendering_context;
+    bool ogl_functions_loaded;
 }
 
 LRESULT CALLBACK WindowProc(
@@ -1927,18 +1965,29 @@ static bool main_create(HINSTANCE instance, int show_command)
         return false;
     }
 
+    arandom::seed(time(nullptr));
+
+    ogl_functions_loaded = ogl_load_functions();
+    if (!ogl_functions_loaded)
+    {
+        LOG_ERROR("OpenGL functions could not be loaded!");
+        return false;
+    }
     bool initialised = render_system::initialise();
     if(!initialised)
     {
         LOG_ERROR("Render system failed initialisation.");
         return false;
     }
+    render_system::resize_viewport(window_width, window_height);
 
     return true;
 }
 
 static void main_destroy()
 {
+    render_system::terminate(ogl_functions_loaded);
+
     if(rendering_context)
     {
         wglMakeCurrent(nullptr, nullptr);
