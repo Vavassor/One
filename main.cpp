@@ -739,14 +739,12 @@ Matrix4 inverse_transform(const Matrix4& m)
 	}};
 }
 
-// Collision Functions..........................................................
+// Geometry Functions...........................................................
 
 struct Triangle
 {
 	Vector3 vertices[3];
 };
-
-// BIH Tree Functions...........................................................
 
 // Axis-Aligned Bounding Box
 struct AABB
@@ -765,16 +763,6 @@ static bool aabb_overlap(AABB b0, AABB b1)
 	return abs(t.x) <= e0.x + e1.x
 		&& abs(t.y) <= e0.y + e1.y
 		&& abs(t.z) <= e0.z + e1.z;
-}
-
-static bool aabb_contains(AABB outer, AABB inner)
-{
-	return inner.max.x <= outer.max.x
-		&& inner.max.y <= outer.max.y
-		&& inner.max.z <= outer.max.z
-		&& inner.min.x >= outer.min.x
-		&& inner.min.y >= outer.min.y
-		&& inner.min.z >= outer.min.z;
 }
 
 static bool aabb_validate(AABB b)
@@ -873,7 +861,7 @@ static bool aabb_intersect(AABB a, Vector3 a_velocity, AABB b, Vector3 b_velocit
 	return result;
 }
 
-// Bounding Interval Hierarchy
+// Bounding Interval Hierarchy Functions........................................
 namespace bih {
 
 enum Flag
@@ -883,38 +871,6 @@ enum Flag
 	FLAG_Z,
 	FLAG_LEAF,
 };
-
-static Flag get_longest_axis(AABB o)
-{
-	Flag result;
-	float x = o.max.x - o.min.x;
-	float y = o.max.y - o.min.y;
-	float z = o.max.z - o.min.z;
-	if(y > x)
-	{
-		if(z > y)
-		{
-			result = FLAG_Z;
-		}
-		else
-		{
-			result = FLAG_Y;
-		}
-	}
-	else
-	{
-		if(z > x)
-		{
-			result = FLAG_Z;
-		}
-		else
-		{
-			result = FLAG_X;
-		}
-	}
-	ASSERT(result >= 0 && result < 3);
-	return result;
-}
 
 struct Node
 {
@@ -934,6 +890,11 @@ struct Tree
 	int nodes_count;
 	int nodes_capacity;
 };
+
+static void tree_destroy(Tree* tree)
+{
+	SAFE_DEALLOCATE(tree->nodes);
+}
 
 static int allocate_nodes(Tree* tree, int count)
 {
@@ -1026,9 +987,7 @@ bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles, int lo
 	}
 
 	AABB aabb = compute_bounds(triangles, lower, upper);
-#if 0
-	Flag axis = get_longest_axis(aabb);
-#else
+
 	Vector3 e0 = (bounds.max - bounds.min) / 2.0f;
 	Vector3 e1 = (aabb.max - aabb.min) / 2.0f;
 	Vector3 e = e0 - e1;
@@ -1055,7 +1014,6 @@ bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles, int lo
 			axis = FLAG_X;
 		}
 	}
-#endif
 
 	float split = (aabb.max[axis] + aabb.min[axis]) / 2.0f;
 	int pivot = partition_triangles(triangles, lower, upper, split, axis);
@@ -1180,6 +1138,19 @@ bool intersect_tree(Tree* tree, AABB aabb, Vector3 velocity, IntersectionResult*
 
 // Collision Functions..........................................................
 
+struct Collider
+{
+	bih::Tree tree;
+	Triangle* triangles;
+	int triangles_count;
+};
+
+static void collider_destroy(Collider* collider)
+{
+	bih::tree_destroy(&collider->tree);
+	SAFE_DEALLOCATE(collider->triangles);
+}
+
 struct CollisionPacket
 {
 	Vector3 intersection_point;
@@ -1187,12 +1158,12 @@ struct CollisionPacket
 	bool found_collision;
 };
 
-float clamp(float a, float min, float max)
+static float clamp(float a, float min, float max)
 {
 	return fmin(fmax(a, min), max);
 }
 
-bool point_in_triangle(Vector3 point, Vector3 pa, Vector3 pb, Vector3 pc)
+static bool point_in_triangle(Vector3 point, Vector3 pa, Vector3 pb, Vector3 pc)
 {
 	Vector3 e10 = pb - pa;
 	Vector3 e20 = pc - pa;
@@ -1212,7 +1183,7 @@ bool point_in_triangle(Vector3 point, Vector3 pa, Vector3 pb, Vector3 pc)
 	return signbit(z) && !(signbit(x) || signbit(y));
 }
 
-bool get_lowest_root(float a, float b, float c, float max_r, float* root)
+static bool get_lowest_root(float a, float b, float c, float max_r, float* root)
 {
 	// The roots of the quadratic equation ax² + bx + c = 0 can be obtained with
 	// the formula (-b ± √(b² - 4ac)) / 2a.
@@ -1250,12 +1221,12 @@ bool get_lowest_root(float a, float b, float c, float max_r, float* root)
 }
 
 // signed distance from a point to a plane
-float signed_distance(Vector3 point, Vector3 origin, Vector3 normal)
+static float signed_distance(Vector3 point, Vector3 origin, Vector3 normal)
 {
 	return dot(point, normal) - dot(origin, normal);
 }
 
-void set_packet(CollisionPacket* packet, Vector3 collision_point, float t, Vector3 velocity)
+static void set_packet(CollisionPacket* packet, Vector3 collision_point, float t, Vector3 velocity)
 {
 	float distance = t * length(velocity);
 	if(!packet->found_collision || distance < packet->nearest_distance)
@@ -1266,7 +1237,7 @@ void set_packet(CollisionPacket* packet, Vector3 collision_point, float t, Vecto
 	}
 }
 
-void collide_unit_sphere_with_triangle(Vector3 center, Vector3 velocity, Triangle triangle, CollisionPacket* packet)
+static void collide_unit_sphere_with_triangle(Vector3 center, Vector3 velocity, Triangle triangle, CollisionPacket* packet)
 {
 	Vector3 p1 = triangle.vertices[0];
 	Vector3 p2 = triangle.vertices[1];
@@ -1385,56 +1356,59 @@ void collide_unit_sphere_with_triangle(Vector3 center, Vector3 velocity, Triangl
 
 struct World
 {
-	bih::Tree tree;
-	Triangle* triangles;
-	int triangles_count;
+	Collider colliders[1];
+	int colliders_count;
 };
 
-void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, World* world, CollisionPacket* packet)
+static void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, World* world, CollisionPacket* packet)
 {
 	Vector3 world_position = anisotropic_scale(position, radius);
 	Vector3 world_velocity = anisotropic_scale(velocity, radius);
 	AABB aabb = aabb_from_ellipsoid(world_position, radius);
-	bih::IntersectionResult intersection = {};
-	bih::intersect_tree(&world->tree, aabb, world_velocity, &intersection);
-	for(int i = 0; i < intersection.indices_count; ++i)
+	for(int i = 0; i < world->colliders_count; ++i)
 	{
-		int index = intersection.indices[i];
-		Triangle triangle = world->triangles[index];
-		// Transform the triangle's vertex positions to ellipsoid space.
-		for(int j = 0; j < 3; ++j)
+		Collider* collider = world->colliders + i;
+		bih::IntersectionResult intersection = {};
+		bih::intersect_tree(&collider->tree, aabb, world_velocity, &intersection);
+		for(int j = 0; j < intersection.indices_count; ++j)
 		{
-			Vector3 v = triangle.vertices[j];
-			v = scale_reciprocal(v, radius);
-			triangle.vertices[j] = v;
+			int index = intersection.indices[j];
+			Triangle triangle = collider->triangles[index];
+			// Transform the triangle's vertex positions to ellipsoid space.
+			for(int k = 0; k < 3; ++k)
+			{
+				Vector3 v = triangle.vertices[k];
+				v = scale_reciprocal(v, radius);
+				triangle.vertices[k] = v;
+			}
+			collide_unit_sphere_with_triangle(position, velocity, triangle, packet);
+	#if 0
+			// Debug draw each triangle that is checked against.
+			// immediate::draw() cannot be called here, so just buffer the
+			// primitives and hope they're drawn during the render cycle.
+			{
+				triangle = world->triangles[index];
+				Vector3 offset = {0.0f, 0.0f, 0.03f};
+				Vector3 v0 = triangle.vertices[0] + offset;
+				Vector3 v1 = triangle.vertices[1] + offset;
+				Vector3 v2 = triangle.vertices[2] + offset;
+				Vector3 center = (v0 + v1 + v2) / 3.0f;
+				Vector3 outside_colour = {1.0f, 1.0f, 1.0f};
+				Vector3 center_colour = {0.85f, 0.85f, 0.85f};
+				immediate::add_line(v0, v1, outside_colour);
+				immediate::add_line(v1, v2, outside_colour);
+				immediate::add_line(v2, v0, outside_colour);
+				immediate::add_line(center, v0, center_colour);
+				immediate::add_line(center, v1, center_colour);
+				immediate::add_line(center, v2, center_colour);
+			}
+	#endif
 		}
-		collide_unit_sphere_with_triangle(position, velocity, triangle, packet);
-#if 0
-		// Debug draw each triangle that is checked against.
-		// immediate::draw() cannot be called here, so just buffer the
-		// primitives and hope they're drawn during the render cycle.
-		{
-			triangle = world->triangles[index];
-			Vector3 offset = {0.0f, 0.0f, 0.03f};
-			Vector3 v0 = triangle.vertices[0] + offset;
-			Vector3 v1 = triangle.vertices[1] + offset;
-			Vector3 v2 = triangle.vertices[2] + offset;
-			Vector3 center = (v0 + v1 + v2) / 3.0f;
-			Vector3 outside_colour = {1.0f, 1.0f, 1.0f};
-			Vector3 center_colour = {0.85f, 0.85f, 0.85f};
-			immediate::add_line(v0, v1, outside_colour);
-			immediate::add_line(v1, v2, outside_colour);
-			immediate::add_line(v2, v0, outside_colour);
-			immediate::add_line(center, v0, center_colour);
-			immediate::add_line(center, v1, center_colour);
-			immediate::add_line(center, v2, center_colour);
-		}
-#endif
+		SAFE_DEALLOCATE(intersection.indices);
 	}
-	SAFE_DEALLOCATE(intersection.indices);
 }
 
-Vector3 collide_with_world(Vector3 position, Vector3 radius, Vector3 velocity, World* world)
+static Vector3 collide_with_world(Vector3 position, Vector3 radius, Vector3 velocity, World* world)
 {
 	CollisionPacket go = {};
 	CollisionPacket* packet = &go;
@@ -1926,6 +1900,7 @@ static void context_destroy()
 
 		glDeleteBuffers(1, &c->buffer);
 		glDeleteVertexArrays(1, &c->vertex_array);
+		DEALLOCATE(c);
 	}
 }
 
@@ -2475,6 +2450,7 @@ int objects_count = 4;
 Object objects[4];
 Triangle* terrain_triangles;
 int terrain_triangles_count;
+bool debug_draw_colliders = false;
 
 static bool system_initialise()
 {
@@ -2557,7 +2533,7 @@ static void resize_viewport(int width, int height)
 	glViewport(0, 0, width, height);
 }
 
-static void system_update(Vector3 position)
+static void system_update(Vector3 position, World* world)
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -2616,8 +2592,16 @@ static void system_update(Vector3 position)
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
 
-	immediate::add_wire_ellipsoid(position, {0.3f, 0.3f, 0.5f}, {1.0f, 0.0f, 1.0f});
-	immediate::draw();
+	if(debug_draw_colliders)
+	{
+		immediate::add_wire_ellipsoid(position, {0.3f, 0.3f, 0.5f}, {1.0f, 0.0f, 1.0f});
+		immediate::draw();
+
+		for(int i = 0; i < world->colliders_count; ++i)
+		{
+			draw_bih_tree(&world->colliders[i].tree, 0);
+		}
+	}
 }
 
 } // namespace render
@@ -2663,24 +2647,22 @@ static bool key_pressed(UserKey key)
 	return keys_pressed[which];
 }
 
-const char* bool_to_string(bool value)
-{
-	if(value)
-	{
-		return "true";
-	}
-	else
-	{
-		return "false";
-	}
-}
-
 static void game_create()
 {
-	world.triangles = render::terrain_triangles;
-	world.triangles_count = render::terrain_triangles_count;
-	bool built = bih::build_tree(&world.tree, world.triangles, world.triangles_count);
+	Collider* collider = world.colliders;
+	world.colliders_count += 1;
+	collider->triangles = render::terrain_triangles;
+	collider->triangles_count = render::terrain_triangles_count;
+	bool built = bih::build_tree(&collider->tree, collider->triangles, collider->triangles_count);
 	ASSERT(built);
+}
+
+static void game_destroy()
+{
+	for(int i = 0; i < world.colliders_count; ++i)
+	{
+		collider_destroy(world.colliders + i);
+	}
 }
 
 static void main_update()
@@ -2744,7 +2726,7 @@ static void main_update()
 		position = vector3_zero;
 	}
 
-	render::system_update(position);
+	render::system_update(position, &world);
 }
 
 // OpenGL Function Loading......................................................
@@ -3089,6 +3071,7 @@ static bool main_create()
 
 static void main_destroy()
 {
+	game_destroy();
 	speech_system::terminate();
 	render::system_terminate(functions_loaded);
 
