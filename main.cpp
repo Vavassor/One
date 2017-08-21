@@ -29,7 +29,6 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
 #if defined(__linux__)
 #define OS_LINUX
 #elif defined(_WIN32)
-#include <Windows.h>
 #define OS_WINDOWS
 #else
 #error Failed to figure out what operating system this is.
@@ -1572,7 +1571,15 @@ typedef ptrdiff_t GLsizeiptr;
 
 #if defined(OS_LINUX)
 #define APIENTRYA
+
 #elif defined(OS_WINDOWS)
+#if defined(__MINGW32__) && !defined(_ARM_)
+#define APIENTRY __stdcall
+#elif (_MSC_VER >= 800) || defined(_STDCALL_SUPPORTED)
+#define APIENTRY __stdcall
+#else
+#define APIENTRY
+#endif
 #define APIENTRYA APIENTRY
 #endif
 
@@ -2748,8 +2755,36 @@ static void main_update()
 	(*glXGetProcAddress)(reinterpret_cast<const GLubyte*>(name))
 
 #elif defined(OS_WINDOWS)
-#define GET_PROC(name) \
-	(*wglGetProcAddress)(reinterpret_cast<LPCSTR>(name))
+#define WIN32_LEAN_AND_MEAN 1
+#define NOMINMAX
+#include <Windows.h>
+#if defined(near)
+#undef near
+#endif
+#if defined(far)
+#undef far
+#endif
+
+namespace
+{
+    HMODULE gl_module;
+}
+
+static PROC windows_get_proc_address(const char* name)
+{
+    PROC address = wglGetProcAddress(reinterpret_cast<LPCSTR>(name));
+    if(address)
+    {
+        return address;
+    }
+    if(!gl_module)
+    {
+        gl_module = GetModuleHandleA("OpenGL32.dll");
+    }
+    return GetProcAddress(gl_module, reinterpret_cast<LPCSTR>(name));
+}
+
+#define GET_PROC(name) (*windows_get_proc_address)(name)
 #endif
 
 static bool ogl_load_functions()
@@ -3194,158 +3229,161 @@ double get_time(Clock* clock)
 
 void go_to_sleep(Clock* clock, double amount_to_sleep)
 {
-	int milliseconds = 1000 * (amount_to_sleep * clock->frequency);
-	Sleep(milliseconds);
+    int milliseconds = 1000 * amount_to_sleep;
+    Sleep(milliseconds);
 }
 
 // Platform Main Functions......................................................
 
+#include <ctime>
+
 namespace
 {
-	HWND window;
-	HDC device_context;
-	HGLRC rendering_context;
+    HWND window;
+    HDC device_context;
+    HGLRC rendering_context;
+    bool ogl_functions_loaded;
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param)
 {
-	switch(message)
-	{
-		case WM_CLOSE:
-		{
-			PostQuitMessage(0);
-			return 0;
-		}
-		case WM_DESTROY:
-		{
-			HGLRC rc = wglGetCurrentContext();
-			if(rc)
-			{
-				HDC dc = wglGetCurrentDC();
-				wglMakeCurrent(nullptr, nullptr);
-				ReleaseDC(hwnd, dc);
-				wglDeleteContext(rc);
-			}
-			DestroyWindow(hwnd);
-			if(hwnd == window)
-			{
-				window = nullptr;
-			}
-			return 0;
-		}
-		default:
-		{
-			return DefWindowProc(hwnd, message, w_param, l_param);
-		}
-	}
+    switch(message)
+    {
+        case WM_CLOSE:
+        {
+            PostQuitMessage(0);
+            return 0;
+        }
+        case WM_DESTROY:
+        {
+            HGLRC rc = wglGetCurrentContext();
+            if(rc)
+            {
+                HDC dc = wglGetCurrentDC();
+                wglMakeCurrent(nullptr, nullptr);
+                ReleaseDC(hwnd, dc);
+                wglDeleteContext(rc);
+            }
+            DestroyWindow(hwnd);
+            if(hwnd == window)
+            {
+                window = nullptr;
+            }
+            return 0;
+        }
+        default:
+        {
+            return DefWindowProc(hwnd, message, w_param, l_param);
+        }
+    }
 }
 
 static bool main_create(HINSTANCE instance, int show_command)
 {
-	WNDCLASSEXA window_class = {};
-	window_class.cbSize = sizeof window_class;
-	window_class.style = CS_HREDRAW | CS_VREDRAW;
-	window_class.lpfnWndProc = WindowProc;
-	window_class.hInstance = instance;
-	window_class.hIcon = LoadIcon(instance, IDI_APPLICATION);
-	window_class.hIconSm = static_cast<HICON>(LoadIcon(instance, IDI_APPLICATION));
-	window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
-	window_class.lpszClassName = "OneWindowClass";
-	ATOM registered_class = RegisterClassExA(&window_class);
-	if(registered_class == 0)
-	{
-		LOG_ERROR("Failed to register the window class.");
-		return false;
-	}
+    WNDCLASSEXA window_class = {};
+    window_class.cbSize = sizeof window_class;
+    window_class.style = CS_HREDRAW | CS_VREDRAW;
+    window_class.lpfnWndProc = WindowProc;
+    window_class.hInstance = instance;
+    window_class.hIcon = LoadIcon(instance, IDI_APPLICATION);
+    window_class.hIconSm = static_cast<HICON>(LoadIcon(instance, IDI_APPLICATION));
+    window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    window_class.lpszClassName = "OneWindowClass";
+    ATOM registered_class = RegisterClassExA(&window_class);
+    if(registered_class == 0)
+    {
+        LOG_ERROR("Failed to register the window class.");
+        return false;
+    }
 
-	{
-		DWORD ex_style = WS_EX_APPWINDOW;
-		LPCTSTR class_name = MAKEINTATOM(registered_class);
-		LPCTSTR title = window_title;
-		DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-		int x = CW_USEDEFAULT;
-		int y = CW_USEDEFAULT;
-		int width = window_width;
-		int height = window_height;
-		HWND parent = nullptr;
-		HMENU menu = nullptr;
-		LPVOID lparam = nullptr;
-		window = CreateWindowExA(ex_style, class_name, title, style, x, y, width, height, parent, menu, instance, lparam);
-	}
-	if(!window)
-	{
-		LOG_ERROR("Failed to create the window.");
-		return false;
-	}
+    DWORD window_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    window = CreateWindowExA(WS_EX_APPWINDOW, MAKEINTATOM(registered_class), window_title, window_style, CW_USEDEFAULT, CW_USEDEFAULT, window_width, window_height, nullptr, nullptr, instance, nullptr);
+    if(!window)
+    {
+        LOG_ERROR("Failed to create the window.");
+        return false;
+    }
 
-	device_context = GetDC(window);
-	if(!device_context)
-	{
-		LOG_ERROR("Couldn't obtain the device context.");
-		return false;
-	}
+    device_context = GetDC(window);
+    if(!device_context)
+    {
+        LOG_ERROR("Couldn't obtain the device context.");
+        return false;
+    }
 
-	PIXELFORMATDESCRIPTOR descriptor = {};
-	descriptor.nSize = sizeof descriptor;
-	descriptor.nVersion = 1;
-	descriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_DEPTH_DONTCARE;
-	descriptor.iPixelType = PFD_TYPE_RGBA;
-	descriptor.cColorBits = 32;
-	descriptor.iLayerType = PFD_MAIN_PLANE;
-	int format_index = ChoosePixelFormat(device_context, &descriptor);
-	if(format_index == 0)
-	{
-		LOG_ERROR("Failed to set up the pixel format.");
-		return false;
-	}
-	if(SetPixelFormat(device_context, format_index, &descriptor) == FALSE)
-	{
-		LOG_ERROR("Failed to set up the pixel format.");
-		return false;
-	}
+    PIXELFORMATDESCRIPTOR descriptor = {};
+    descriptor.nSize = sizeof descriptor;
+    descriptor.nVersion = 1;
+    descriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_DEPTH_DONTCARE;
+    descriptor.iPixelType = PFD_TYPE_RGBA;
+    descriptor.cColorBits = 32;
+    descriptor.iLayerType = PFD_MAIN_PLANE;
+    int format_index = ChoosePixelFormat(device_context, &descriptor);
+    if(format_index == 0)
+    {
+        LOG_ERROR("Failed to set up the pixel format.");
+        return false;
+    }
+    if(SetPixelFormat(device_context, format_index, &descriptor) == FALSE)
+    {
+        LOG_ERROR("Failed to set up the pixel format.");
+        return false;
+    }
 
-	rendering_context = wglCreateContext(device_context);
-	if(!rendering_context)
-	{
-		LOG_ERROR("Couldn't create the rendering context.");
-		return false;
-	}
+    rendering_context = wglCreateContext(device_context);
+    if(!rendering_context)
+    {
+        LOG_ERROR("Couldn't create the rendering context.");
+        return false;
+    }
 
-	ShowWindow(window, show_command);
+    ShowWindow(window, show_command);
 
-	// Set it to be this thread's rendering context.
-	if(wglMakeCurrent(device_context, rendering_context) == FALSE)
-	{
-		LOG_ERROR("Couldn't set this thread's rendering context (wglMakeCurrent failed).");
-		return false;
-	}
+    // Set it to be this thread's rendering context.
+    if(wglMakeCurrent(device_context, rendering_context) == FALSE)
+    {
+        LOG_ERROR("Couldn't set this thread's rendering context "
+            "(wglMakeCurrent failed).");
+        return false;
+    }
 
-	bool initialised = render_system::initialise();
-	if(!initialised)
-	{
-		LOG_ERROR("Render system failed initialisation.");
-		return false;
-	}
+    arandom::seed(time(nullptr));
 
-	return true;
+    ogl_functions_loaded = ogl_load_functions();
+    if(!ogl_functions_loaded)
+    {
+        LOG_ERROR("OpenGL functions could not be loaded!");
+        return false;
+    }
+    bool initialised = render_system::initialise();
+    if(!initialised)
+    {
+        LOG_ERROR("Render system failed initialisation.");
+        return false;
+    }
+    render_system::resize_viewport(window_width, window_height);
+
+    return true;
 }
 
 static void main_destroy()
 {
-	if(rendering_context)
-	{
-		wglMakeCurrent(nullptr, nullptr);
-		ReleaseDC(window, device_context);
-		wglDeleteContext(rendering_context);
-	}
-	else if(device_context)
-	{
-		ReleaseDC(window, device_context);
-	}
-	if(window)
-	{
-		DestroyWindow(window);
-	}
+    render_system::terminate(ogl_functions_loaded);
+
+    if(rendering_context)
+    {
+        wglMakeCurrent(nullptr, nullptr);
+        ReleaseDC(window, device_context);
+        wglDeleteContext(rendering_context);
+    }
+    else if(device_context)
+    {
+        ReleaseDC(window, device_context);
+    }
+    if(window)
+    {
+        DestroyWindow(window);
+    }
 }
 
 static int main_loop()
