@@ -917,8 +917,6 @@ static Flag get_longest_axis(AABB o)
 	return result;
 }
 
-#if 0
-
 struct Node
 {
 	union
@@ -986,30 +984,6 @@ static float compute_just_max(Triangle* triangles, int lower, int upper, Flag ax
 	return result;
 }
 
-static bool validate_partition(Triangle* triangles, int lower, int upper, int pivot, float split, Flag axis)
-{
-	bool result = true;
-	for(int i = lower; i <= pivot - 1; ++i)
-	{
-		Triangle* triangle = triangles + i;
-		float v0 = triangle->vertices[0][axis];
-		float v1 = triangle->vertices[1][axis];
-		float v2 = triangle->vertices[2][axis];
-		float a = (v0 + v1 + v2) / 3.0f;
-		result = result && a < split;
-	}
-	for(int i = pivot; i <= upper; ++i)
-	{
-		Triangle* triangle = triangles + i;
-		float v0 = triangle->vertices[0][axis];
-		float v1 = triangle->vertices[1][axis];
-		float v2 = triangle->vertices[2][axis];
-		float a = (v0 + v1 + v2) / 3.0f;
-		result = result && a >= split;
-	}
-	return result;
-}
-
 static int partition_triangles(Triangle* triangles, int lower, int upper, float split, Flag axis)
 {
 	int pivot = lower;
@@ -1033,7 +1007,6 @@ static int partition_triangles(Triangle* triangles, int lower, int upper, float 
 			pivot += 1;
 		}
 	}
-	ASSERT(validate_partition(triangles, lower, upper, pivot, split, axis));
 	if(pivot == lower && j < pivot)
 	{
 		pivot = j;
@@ -1041,9 +1014,9 @@ static int partition_triangles(Triangle* triangles, int lower, int upper, float 
 	return pivot;
 }
 
-bool build_node(Tree* tree, Node* node, AABB node_bounds, Triangle* triangles, int lower, int upper)
+bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles, int lower, int upper)
 {
-	ASSERT(aabb_validate(node_bounds));
+	ASSERT(aabb_validate(bounds));
 	ASSERT(lower <= upper);
 
 	if(upper - lower < 1)
@@ -1057,7 +1030,7 @@ bool build_node(Tree* tree, Node* node, AABB node_bounds, Triangle* triangles, i
 #if 0
 	Flag axis = get_longest_axis(aabb);
 #else
-	Vector3 e0 = (node_bounds.max - node_bounds.min) / 2.0f;
+	Vector3 e0 = (bounds.max - bounds.min) / 2.0f;
 	Vector3 e1 = (aabb.max - aabb.min) / 2.0f;
 	Vector3 e = e0 - e1;
 	Flag axis;
@@ -1087,7 +1060,6 @@ bool build_node(Tree* tree, Node* node, AABB node_bounds, Triangle* triangles, i
 
 	float split = (aabb.max[axis] + aabb.min[axis]) / 2.0f;
 	int pivot = partition_triangles(triangles, lower, upper, split, axis);
-
 
 	if(pivot < lower)
 	{
@@ -1202,257 +1174,8 @@ bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb, Vector
 
 bool intersect_tree(Tree* tree, AABB aabb, Vector3 velocity, IntersectionResult* result)
 {
-	float t0, t1;
-	bool intersects = aabb_intersect(aabb, velocity, tree->bounds, vector3_zero, &t0, &t1);
-	if(!intersects)
-	{
-		return false;
-	}
 	return intersect_node(tree->nodes, tree->nodes, tree->bounds, aabb, velocity, result);
 }
-
-#else
-
-struct Node
-{
-	union
-	{
-		struct
-		{
-			Node* children[2];
-			float clip[2];
-		} inner;
-		struct
-		{
-			int items;
-		} leaf;
-	};
-	Flag flag;
-};
-
-struct Tree
-{
-	Node* root;
-	AABB bounds;
-};
-
-static float triangle_min(Triangle* triangle, Flag axis)
-{
-	float min = FLT_MAX;
-	for(int i = 0; i < 3; ++i)
-	{
-		float v = triangle->vertices[i][axis];
-		min = fmin(min, v);
-	}
-	return min;
-}
-
-static float triangle_max(Triangle* triangle, Flag axis)
-{
-	float max = -FLT_MAX;
-	for(int i = 0; i < 3; ++i)
-	{
-		float v = triangle->vertices[i][axis];
-		max = fmax(max, v);
-	}
-	return max;
-}
-
-static float triangle_mean(Triangle* triangle, Flag axis)
-{
-	float sum = 0.0f;
-	for(int i = 0; i < 3; ++i)
-	{
-		sum += triangle->vertices[i][axis];
-	}
-	return sum / 3.0f;
-}
-
-static bool left_smaller(Triangle* triangles, int i, Flag axis, float split, float* max)
-{
-	float t_max = triangle_max(triangles + i, axis);
-	if(t_max < split)
-	{
-		*max = fmax(*max, t_max);
-		return true;
-	}
-	else
-	{
-		float t_min = triangle_min(triangles + i, axis);
-		float midpoint = (t_max + t_min) / 2.0f;
-		if(midpoint < split)
-		{
-			*max = fmax(*max, t_max);
-			return true;
-		}
-		else
-		{
-			return false;
-		}
-	}
-}
-
-static bool right_greater_or_equal(Triangle* triangles, int j, Flag axis, float split, float* min)
-{
-	float t_min = triangle_min(triangles + j, axis);
-	if(t_min >= split)
-	{
-		*min = fmin(*min, t_min);
-		return true;
-	}
-	else
-	{
-		float t_max = triangle_max(triangles + j, axis);
-		float midpoint = (t_max + t_min) / 2.0f;
-		if(midpoint >= split)
-		{
-			*min = fmin(*min, t_min);
-			return true;
-		}
-		else
-		{
-			return false;
-		}
-	}
-}
-
-static int partition_triangles(Triangle* triangles, int lower, int upper, float split, Flag axis, float* clip0, float* clip1)
-{
-	int i = lower;
-	int j = upper;
-
-	float max = -FLT_MAX;
-	float min = FLT_MAX;
-
-	for(;;)
-	{
-		while(left_smaller(triangles, i, axis, split, &max))
-		{
-			i += 1;
-		}
-		while(j > lower && right_greater_or_equal(triangles, j, axis, split, &min))
-		{
-			j -= 1;
-		}
-		if(i >= j)
-		{
-			break;
-		}
-		else
-		{
-			Triangle temp = triangles[i];
-			triangles[i] = triangles[j];
-			triangles[j] = temp;
-			max = fmax(max, triangle_max(triangles + i, axis));
- 			min = fmin(min, triangle_min(triangles + j, axis));
-			i += 1;
-			j -= 1;
-		}
-	}
-	if(j == lower)
-	{
-		max = triangle_max(triangles + lower, axis);
-	}
-	*clip0 = max;
-	*clip1 = min;
-	return j;
-}
-
-static Node* build_node(Triangle* triangles, int lower, int upper, AABB bounds)
-{
-	Node* node = ALLOCATE(Node, 1);
-
-	if(upper - lower < 1)
-	{
-		node->flag = FLAG_LEAF;
-		node->leaf.items = lower;
-		return node;
-	}
-
-	Flag axis = get_longest_axis(bounds);
-	node->flag = axis;
-
-#if 0
-	float split = (bounds.max[axis] + bounds.min[axis]) / 2.0f;
-#else
-	int i0 = arandom::int_range(lower, upper);
-	int i1 = arandom::int_range(lower, upper);
-	int i2 = arandom::int_range(lower, upper);
-	float s0 = triangle_mean(triangles + i0, axis);
-	float s1 = triangle_mean(triangles + i1, axis);
-	float s2 = triangle_mean(triangles + i2, axis);
-	float split = fmax(s0, fmax(s1, s2));
-#endif
-	float clip0, clip1;
-	int pivot = partition_triangles(triangles, lower, upper, split, axis, &clip0, &clip1);
-	node->inner.clip[0] = clip0;
-	node->inner.clip[1] = clip1;
-
-	AABB left_bounds = bounds;
-	left_bounds.max[axis] = clip0;
-	node->inner.children[0] = build_node(triangles, lower, pivot, left_bounds);
-
-	AABB right_bounds = bounds;
-	right_bounds.min[axis] = clip1;
-	node->inner.children[1] = build_node(triangles, pivot + 1, upper, right_bounds);
-
-	return node;
-}
-
-static bool build_tree(Tree* tree, Triangle* triangles, int triangles_count)
-{
-	tree->bounds = compute_bounds(triangles, 0, triangles_count - 1);
-	tree->root = build_node(triangles, 0, triangles_count - 1, tree->bounds);
-	return tree->root;
-}
-
-struct IntersectionResult
-{
-	int* indices;
-	int indices_count;
-	int indices_capacity;
-};
-
-bool intersect_node(Node* node, AABB bounds, AABB aabb, Vector3 velocity, IntersectionResult* result)
-{
-	float t0, t1;
-	bool intersects = aabb_intersect(aabb, velocity, bounds, vector3_zero, &t0, &t1);
-	if(!intersects)
-	{
-		return false;
-	}
-
-	if(node->flag == bih::FLAG_LEAF)
-	{
-		bool big_enough = ENSURE_ARRAY_SIZE(result->indices, 1);
-		if(!big_enough)
-		{
-			return false;
-		}
-		result->indices[result->indices_count] = node->leaf.items;
-		result->indices_count += 1;
-		immediate::add_wire_aabb(bounds, {1.0f, 1.0f, 0.7f});
-		return true;
-	}
-
-	Flag axis = node->flag;
-
-	AABB left_bounds = bounds;
-	reinterpret_cast<float*>(&left_bounds.max)[axis] = node->inner.clip[0];
-	bool intersects0 = intersect_node(node->inner.children[0], left_bounds, aabb, velocity, result);
-
-	AABB right_bounds = bounds;
-	reinterpret_cast<float*>(&right_bounds.min)[axis] = node->inner.clip[1];
-	bool intersects1 = intersect_node(node->inner.children[1], right_bounds, aabb, velocity, result);
-
-	return intersects0 || intersects1;
-}
-
-bool intersect_tree(Tree* tree, AABB aabb, Vector3 velocity, IntersectionResult* result)
-{
-	return intersect_node(tree->root, tree->bounds, aabb, velocity, result);
-}
-#endif
 
 } // namespace bih
 
@@ -1675,9 +1398,6 @@ void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, World* 
 	AABB aabb = aabb_from_ellipsoid(world_position, radius);
 	bih::IntersectionResult intersection = {};
 	bih::intersect_tree(&world->tree, aabb, world_velocity, &intersection);
-#if 0
-	LOG_DEBUG("triangles received %d", intersection.indices_count);
-#endif
 	for(int i = 0; i < intersection.indices_count; ++i)
 	{
 		int index = intersection.indices[i];
@@ -2154,7 +1874,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 
 namespace immediate {
 
-static const int context_max_vertices = 2048;
+static const int context_max_vertices = 8192;
 
 struct Context
 {
@@ -2357,10 +2077,7 @@ static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector3 colour
 	immediate::add_line(p[3], p[2], colour);
 	immediate::add_line(p[2], p[0], colour);
 	immediate::add_line(p[0], p[3], colour);
-	immediate::add_line(p[1], p[2], colour);
 }
-
-#if 0
 
 static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int depth, int target_depth)
 {
@@ -2369,8 +2086,8 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 		bih::Flag axis = node->flag;
 
 		AABB left = bounds;
-		left.max][axis] = node->clip[0];
-		if(depth == target_depth)
+		left.max[axis] = node->clip[0];
+		if(depth == target_depth || target_depth < 0)
 		{
 			add_aabb_plane(bounds, axis, node->clip[0], {1.0f, 0.0f, 0.0f});
 		}
@@ -2378,7 +2095,7 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 
 		AABB right = bounds;
 		right.min[axis] = node->clip[1];
-		if(depth == target_depth)
+		if(depth == target_depth || target_depth < 0)
 		{
 			add_aabb_plane(bounds, axis, node->clip[1], {0.0f, 0.0f, 1.0f});
 		}
@@ -2394,43 +2111,9 @@ static void draw_bih_tree(bih::Tree* tree, int target_depth)
 	immediate::draw();
 }
 
-#else
-
-static void add_bih_node(bih::Node* node, AABB bounds, int depth, int target_depth)
-{
-	if(node->flag != bih::FLAG_LEAF)
-	{
-		bih::Flag axis = node->flag;
-
-		AABB left = bounds;
-		left.max[axis] = node->inner.clip[0];
-		if(depth == target_depth)
-		{
-			add_aabb_plane(bounds, axis, node->inner.clip[0], {1.0f, 0.0f, 0.0f});
-		}
-		add_bih_node(node->inner.children[0], left, depth + 1, target_depth);
-
-		AABB right = bounds;
-		right.min[axis] = node->inner.clip[1];
-		if(depth == target_depth)
-		{
-			add_aabb_plane(bounds, axis, node->inner.clip[1], {0.0f, 0.0f, 1.0f});
-		}
-		add_bih_node(node->inner.children[1], right, depth + 1, target_depth);
-	}
-}
-
-static void draw_bih_tree(bih::Tree* tree, int target_depth)
-{
-	add_bih_node(tree->root, tree->bounds, 0, target_depth);
-	immediate::draw();
-}
-
-#endif
-
 // Render System Functions......................................................
 
-namespace render_system {
+namespace render {
 
 const char* default_vertex_source = R"(
 #version 330
@@ -2786,7 +2469,7 @@ Object objects[4];
 Triangle* terrain_triangles;
 int terrain_triangles_count;
 
-static bool initialise()
+static bool system_initialise()
 {
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
@@ -2845,7 +2528,7 @@ static bool initialise()
 	return true;
 }
 
-static void terminate(bool functions_loaded)
+static void system_terminate(bool functions_loaded)
 {
 	if(functions_loaded)
 	{
@@ -2867,7 +2550,7 @@ static void resize_viewport(int width, int height)
 	glViewport(0, 0, width, height);
 }
 
-static void update(Vector3 position)
+static void system_update(Vector3 position)
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -2930,7 +2613,7 @@ static void update(Vector3 position)
 	immediate::draw();
 }
 
-} // namespace render_system
+} // namespace render
 
 // Speech Function Declarations.................................................
 
@@ -2987,9 +2670,10 @@ const char* bool_to_string(bool value)
 
 static void game_create()
 {
-	world.triangles = render_system::terrain_triangles;
-	world.triangles_count = render_system::terrain_triangles_count;
-	bih::build_tree(&world.tree, world.triangles, world.triangles_count);
+	world.triangles = render::terrain_triangles;
+	world.triangles_count = render::terrain_triangles_count;
+	bool built = bih::build_tree(&world.tree, world.triangles, world.triangles_count);
+	ASSERT(built);
 }
 
 static void main_update()
@@ -3053,7 +2737,7 @@ static void main_update()
 		position = vector3_zero;
 	}
 
-	render_system::update(position);
+	render::system_update(position);
 }
 
 // OpenGL Function Loading......................................................
@@ -3348,13 +3032,13 @@ static bool main_create()
 		LOG_ERROR("OpenGL functions could not be loaded!");
 		return false;
 	}
-	bool initialised = render_system::initialise();
+	bool initialised = render::system_initialise();
 	if(!initialised)
 	{
 		LOG_ERROR("Render system failed initialisation.");
 		return false;
 	}
-	render_system::resize_viewport(window_width, window_height);
+	render::resize_viewport(window_width, window_height);
 
 	initialised = speech_system::initialise();
 	if(!initialised)
@@ -3371,7 +3055,7 @@ static bool main_create()
 static void main_destroy()
 {
 	speech_system::terminate();
-	render_system::terminate(functions_loaded);
+	render::system_terminate(functions_loaded);
 
 	if(visual_info)
 	{
@@ -3424,7 +3108,7 @@ static void main_loop()
 				case ConfigureNotify:
 				{
 					XConfigureRequestEvent configure = event.xconfigurerequest;
-					render_system::resize_viewport(configure.width, configure.height);
+					render::resize_viewport(configure.width, configure.height);
 					break;
 				}
 			}
