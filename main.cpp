@@ -145,12 +145,14 @@ void log_add_message(LogLevel level, const char* format, ...);
 
 struct Vector3;
 struct AABB;
+struct Triangle;
 
 namespace immediate {
 
 void draw();
 void add_line(Vector3 start, Vector3 end, Vector3 colour);
 void add_wire_aabb(AABB aabb, Vector3 colour);
+void add_triangle(Triangle* triangle, Vector3 colour);
 
 } // namespace immediate
 
@@ -420,27 +422,13 @@ Vector3 lerp(Vector3 v0, Vector3 v1, float t)
 	return result;
 }
 
-Vector3 project(Vector3 a, Vector3 b)
+Vector3 reciprocal(Vector3 v)
 {
-    return (dot(a, b) / dot(b, b)) * b;
-}
-
-Vector3 reject(Vector3 a, Vector3 b)
-{
-    return a - project(a, b);
-}
-
-Vector3 orthogonal(Vector3 v)
-{
-	float l = length(v);
-	float s = (v.x > 0.0f) ? l : -l;
-	float xt = v.x + s;
-	float d = -v.y / (s * xt);
-
+	ASSERT(v.x != 0.0f && v.y != 0.0f && v.z != 0.0f);
 	Vector3 result;
-	result.x = d * xt;
-	result.y = 1.0f + d * v.y;
-	result.z = d * v.z;
+	result.x = 1.0f / v.x;
+	result.y = 1.0f / v.y;
+	result.z = 1.0f / v.z;
 	return result;
 }
 
@@ -485,22 +473,6 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 	result.z = v.z * phase;
 	// Rotations must be unit quaternions.
 	ASSERT(float_almost_one(norm(result)));
-	return result;
-}
-
-Quaternion rotation_to(Vector3 u, Vector3 v)
-{
-	Quaternion result;
-	float k_cos_theta = dot(u, v);
-	float k = sqrt(squared_length(u) * squared_length(v));
-	if(float_almost_one(k_cos_theta / k))
-	{
-		result = axis_angle_rotation(orthogonal(u), PI);
-	}
-	else
-	{
-		result = axis_angle_rotation(cross(u, v), k_cos_theta + k);
-	}
 	return result;
 }
 
@@ -743,8 +715,33 @@ Matrix4 inverse_transform(const Matrix4& m)
 
 struct Triangle
 {
+	// assumes clockwise winding for the front face
 	Vector3 vertices[3];
 };
+
+struct Quad
+{
+	// assumes clockwise winding for the front face
+	// also, there's nothing guaranteeing these are coplanar
+	Vector3 vertices[4];
+};
+
+struct Ray
+{
+	Vector3 origin;
+	Vector3 direction;
+	Vector3 inverse_direction;
+};
+
+Ray make_ray(Vector3 origin, Vector3 direction)
+{
+	Vector3 normal = normalise(direction);
+	Ray result;
+	result.origin = origin;
+	result.direction = normal;
+	result.inverse_direction = reciprocal(normal);
+	return result;
+}
 
 // Axis-Aligned Bounding Box
 struct AABB
@@ -861,6 +858,26 @@ static bool aabb_intersect(AABB a, Vector3 a_velocity, AABB b, Vector3 b_velocit
 	return result;
 }
 
+static bool intersect_aabb_ray(AABB aabb, Ray ray)
+{
+	float t1 = (aabb.min.x - ray.origin.x) * ray.inverse_direction.x;
+	float t2 = (aabb.max.x - ray.origin.x) * ray.inverse_direction.x;
+
+	float tl = fmin(t1, t2);
+	float th = fmax(t1, t2);
+
+	for(int i = 1; i < 3; ++i)
+	{
+		t1 = (aabb.min[i] - ray.origin[i]) * ray.inverse_direction[i];
+		t2 = (aabb.max[i] - ray.origin[i]) * ray.inverse_direction[i];
+
+		tl = fmax(tl, fmin(fmin(t1, t2), th));
+		th = fmin(th, fmax(fmax(t1, t2), tl));
+	}
+
+	return th > fmax(tl, 0.0f);
+}
+
 // Bounding Interval Hierarchy Functions........................................
 namespace bih {
 
@@ -974,7 +991,7 @@ static int partition_triangles(Triangle* triangles, int lower, int upper, float 
 	return pivot;
 }
 
-bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles, int lower, int upper)
+static bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles, int lower, int upper)
 {
 	ASSERT(aabb_validate(bounds));
 	ASSERT(lower <= upper);
@@ -1089,7 +1106,7 @@ struct IntersectionResult
 	int indices_capacity;
 };
 
-bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb, Vector3 velocity, IntersectionResult* result)
+static bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb, Vector3 velocity, IntersectionResult* result)
 {
 	ASSERT(aabb_validate(node_bounds));
 	ASSERT(aabb_validate(aabb));
@@ -1110,6 +1127,9 @@ bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb, Vector
 		}
 		result->indices[result->indices_count] = node->items;
 		result->indices_count += 1;
+#if 0
+		immediate::add_wire_aabb(node_bounds, {1.0f, 1.0f, 1.9f});
+#endif
 		return true;
 	}
 
@@ -1132,6 +1152,47 @@ bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb, Vector
 bool intersect_tree(Tree* tree, AABB aabb, Vector3 velocity, IntersectionResult* result)
 {
 	return intersect_node(tree->nodes, tree->nodes, tree->bounds, aabb, velocity, result);
+}
+
+static bool intersect_node(Node* nodes, Node* node, AABB bounds, Ray ray, IntersectionResult* result)
+{
+	bool intersects = intersect_aabb_ray(bounds, ray);
+	if(!intersects)
+	{
+		return false;
+	}
+
+	if(node->flag == FLAG_LEAF)
+	{
+		bool big_enough = ENSURE_ARRAY_SIZE(result->indices, 1);
+		if(!big_enough)
+		{
+			return false;
+		}
+		result->indices[result->indices_count] = node->items;
+		result->indices_count += 1;
+		return true;
+	}
+
+	Flag axis = node->flag;
+	Node* children = nodes + node->index;
+
+	Node* left = children + 0;
+	AABB left_bounds = bounds;
+	left_bounds.max[axis] = node->clip[0];
+	bool intersects0 = intersect_node(nodes, left, left_bounds, ray, result);
+
+	Node* right = children + 1;
+	AABB right_bounds = bounds;
+	right_bounds.min[axis] = node->clip[1];
+	bool intersects1 = intersect_node(nodes, right, right_bounds, ray, result);
+
+	return intersects0 || intersects1;
+}
+
+bool intersect_tree(Tree* tree, Ray ray, IntersectionResult* result)
+{
+	return intersect_node(tree->nodes, tree->nodes, tree->bounds, ray, result);
 }
 
 } // namespace bih
@@ -1382,27 +1443,21 @@ static void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, 
 				triangle.vertices[k] = v;
 			}
 			collide_unit_sphere_with_triangle(position, velocity, triangle, packet);
-	#if 0
+#if 0
 			// Debug draw each triangle that is checked against.
 			// immediate::draw() cannot be called here, so just buffer the
 			// primitives and hope they're drawn during the render cycle.
 			{
-				triangle = world->triangles[index];
+				triangle = collider->triangles[index];
 				Vector3 offset = {0.0f, 0.0f, 0.03f};
-				Vector3 v0 = triangle.vertices[0] + offset;
-				Vector3 v1 = triangle.vertices[1] + offset;
-				Vector3 v2 = triangle.vertices[2] + offset;
-				Vector3 center = (v0 + v1 + v2) / 3.0f;
-				Vector3 outside_colour = {1.0f, 1.0f, 1.0f};
-				Vector3 center_colour = {0.85f, 0.85f, 0.85f};
-				immediate::add_line(v0, v1, outside_colour);
-				immediate::add_line(v1, v2, outside_colour);
-				immediate::add_line(v2, v0, outside_colour);
-				immediate::add_line(center, v0, center_colour);
-				immediate::add_line(center, v1, center_colour);
-				immediate::add_line(center, v2, center_colour);
+				for(int l = 0; l < 3; ++l)
+				{
+					triangle.vertices[l] += offset;
+				}
+				Vector3 colour = {1.0f, 1.0f, 1.0f};
+				immediate::add_triangle(&triangle, colour);
 			}
-	#endif
+#endif
 		}
 		SAFE_DEALLOCATE(intersection.indices);
 	}
@@ -1486,6 +1541,53 @@ Vector3 collide_and_slide(Vector3 position, Vector3 radius, Vector3 velocity, Ve
 	return final_position;
 }
 
+static void collide_ray_triangle(Triangle* triangle, Ray* ray, CollisionPacket* packet)
+{
+	Vector3 v0 = triangle->vertices[0];
+	Vector3 v1 = triangle->vertices[1];
+	Vector3 v2 = triangle->vertices[2];
+	Vector3 e1 = v1 - v0;
+	Vector3 e2 = v2 - v0;
+	Vector3 normal = cross(ray->direction, e2);
+
+	float d = dot(e1, normal);
+	if(d < 1e-8f && d > -1e-8f)
+	{
+		// The ray is parallel to the plane.
+		packet->found_collision = false;
+		return;
+	}
+
+	float id = 1.0f / d;
+	Vector3 s = ray->origin - v0;
+	float u = dot(s, normal) * id;
+	if(u < 0.0f || u > 1.0f)
+	{
+		packet->found_collision = false;
+		return;
+	}
+
+	Vector3 q = cross(normal, e1);
+	float v = dot(ray->direction, q) * id;
+	if(v < 0.0f || u + v > 1.0f)
+	{
+		packet->found_collision = false;
+		return;
+	}
+
+	float t = dot(e2, q) * id;
+	if(t < 1e-6f)
+	{
+		packet->found_collision = false;
+	}
+	else
+	{
+		packet->found_collision = true;
+		packet->nearest_distance = t;
+		packet->intersection_point = ray->origin + t * ray->direction;
+	}
+}
+
 // OpenGL Function and Type Declarations........................................
 
 #if defined(__gl_h_) || defined(__GL_H__)
@@ -1558,6 +1660,7 @@ typedef ptrdiff_t GLsizeiptr;
 #endif
 
 void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
+void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
 void (APIENTRYA *p_glEnable)(GLenum cap) = nullptr;
 void (APIENTRYA *p_glViewport)(GLint x, GLint y, GLsizei width, GLsizei height) = nullptr;
 
@@ -1607,6 +1710,7 @@ void (APIENTRYA *p_glVertexAttribPointer)(GLuint index, GLint size, GLenum type,
 #define glUnmapBuffer p_glUnmapBuffer
 
 #define glClear p_glClear
+#define glDepthMask p_glDepthMask
 #define glEnable p_glEnable
 #define glViewport p_glViewport
 
@@ -1857,6 +1961,13 @@ namespace immediate {
 
 static const int context_max_vertices = 8192;
 
+enum class DrawMode
+{
+	None,
+	Lines,
+	Triangles,
+};
+
 struct Context
 {
 	VertexPC vertices[context_max_vertices];
@@ -1865,6 +1976,7 @@ struct Context
 	GLuint buffer;
 	GLuint shader;
 	int filled;
+	DrawMode draw_mode;
 };
 
 Context* context;
@@ -1885,9 +1997,9 @@ static void context_create()
     GLvoid* offset0 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, position));
     GLvoid* offset1 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, colour));
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset1);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset1);
     glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
 
     glBindVertexArray(0);
 }
@@ -1909,9 +2021,23 @@ static void set_matrices(Matrix4 view, Matrix4 projection)
 	context->view_projection = projection * view;
 }
 
+static GLenum get_mode(DrawMode draw_mode)
+{
+	switch(draw_mode)
+	{
+		default:
+		case DrawMode::Lines:     return GL_LINES;
+		case DrawMode::Triangles: return GL_TRIANGLES;
+	}
+}
+
 void draw()
 {
 	Context* c = context;
+	if(c->filled == 0 || c->draw_mode == DrawMode::None)
+	{
+		return;
+	}
 
     glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
     GLvoid* mapped_buffer = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
@@ -1925,18 +2051,21 @@ void draw()
 	GLint location = glGetUniformLocation(context->shader, "model_view_projection");
 	glUniformMatrix4fv(location, 1, GL_TRUE, c->view_projection.elements);
 	glBindVertexArray(c->vertex_array);
-	glDrawArrays(GL_LINES, 0, c->filled);
+	glDrawArrays(get_mode(c->draw_mode), 0, c->filled);
 
+	c->draw_mode = DrawMode::None;
 	c->filled = 0;
 }
 
 void add_line(Vector3 start, Vector3 end, Vector3 colour)
 {
 	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
 	c->vertices[c->filled] = {start, colour};
 	c->vertices[c->filled+1] = {end, colour};
 	c->filled += 2;
+	c->draw_mode = DrawMode::Lines;
 }
 
 // This is an approximate formula for an ellipse's perimeter. It has the
@@ -2011,6 +2140,39 @@ void add_wire_aabb(AABB aabb, Vector3 colour)
 	immediate::add_line(p[6], p[4], colour);
 }
 
+void add_triangle(Triangle* triangle, Vector3 colour)
+{
+	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->filled + 3 < context_max_vertices);
+	for(int i = 0; i < 3; ++i)
+	{
+		c->vertices[c->filled + i].position = triangle->vertices[i];
+		c->vertices[c->filled + i].colour = colour;
+	}
+	c->filled += 3;
+	c->draw_mode = DrawMode::Triangles;
+}
+
+void add_quad(Quad* quad, Vector3 colour)
+{
+	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->filled + 6 < context_max_vertices);
+	c->vertices[c->filled + 0].position = quad->vertices[0];
+	c->vertices[c->filled + 1].position = quad->vertices[1];
+	c->vertices[c->filled + 2].position = quad->vertices[2];
+	c->vertices[c->filled + 3].position = quad->vertices[0];
+	c->vertices[c->filled + 4].position = quad->vertices[2];
+	c->vertices[c->filled + 5].position = quad->vertices[3];
+	for(int i = 0; i < 6; ++i)
+	{
+		c->vertices[c->filled + i].colour = colour;
+	}
+	c->filled += 6;
+	c->draw_mode = DrawMode::Triangles;
+}
+
 } // namespace immediate
 
 // Debug Drawing Functions......................................................
@@ -2030,22 +2192,22 @@ static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector3 colour
 		case bih::FLAG_X:
 		{
 			p[1] += {0.0f, d.y , 0.0f};
-			p[2] += {0.0f, 0.0f, d.z };
-			p[3] += {0.0f, d.y , d.z };
+			p[2] += {0.0f, d.y , d.z };
+			p[3] += {0.0f, 0.0f, d.z };
 			break;
 		}
 		case bih::FLAG_Y:
 		{
 			p[1] += {d.x , 0.0f, 0.0f};
-			p[2] += {0.0f, 0.0f, d.z };
-			p[3] += {d.x , 0.0f, d.z };
+			p[2] += {d.x , 0.0f, d.z };
+			p[3] += {0.0f, 0.0f, d.z };
 			break;
 		}
 		case bih::FLAG_Z:
 		{
 			p[1] += {d.x , 0.0f, 0.0f};
-			p[2] += {0.0f, d.y , 0.0f};
-			p[3] += {d.x , d.y , 0.0f};
+			p[2] += {d.x , d.y , 0.0f};
+			p[3] += {0.0f, d.y , 0.0f};
 			break;
 		}
 		default:
@@ -2055,10 +2217,10 @@ static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector3 colour
 		}
 	}
 	immediate::add_line(p[0], p[1], colour);
-	immediate::add_line(p[1], p[3], colour);
-	immediate::add_line(p[3], p[2], colour);
-	immediate::add_line(p[2], p[0], colour);
-	immediate::add_line(p[0], p[3], colour);
+	immediate::add_line(p[1], p[2], colour);
+	immediate::add_line(p[2], p[3], colour);
+	immediate::add_line(p[3], p[0], colour);
+	immediate::add_line(p[0], p[2], colour);
 }
 
 static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int depth, int target_depth)
@@ -2149,7 +2311,7 @@ const char* vertex_source_vertex_colour = R"(
 #version 330
 
 layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 colour;
+layout(location = 2) in vec3 colour;
 
 uniform mat4x4 model_view_projection;
 
@@ -2441,16 +2603,111 @@ static void object_generate_terrain(Object* object, Triangle** triangles, int* t
 	DEALLOCATE(indices);
 }
 
+void object_generate_sky(Object* object)
+{
+	const float radius = 1.0f;
+	const int meridians = 9;
+	const int parallels = 7;
+	int rings = parallels + 1;
+
+	int vertices_count = meridians * parallels + 2;
+	VertexPNC* vertices = ALLOCATE(VertexPNC, vertices_count);
+	if(!vertices)
+	{
+		return;
+	}
+
+	const Vector3 top_colour = {1.0f, 1.0f, 0.2f};
+	const Vector3 bottom_colour = {0.1f, 0.7f, 0.6f};
+	vertices[0].position = radius * vector3_unit_z;
+	vertices[0].normal = -vector3_unit_z;
+	vertices[0].colour = top_colour;
+	for(int i = 0; i < parallels; ++i)
+	{
+		float step = (i + 1) / static_cast<float>(rings);
+		float theta = step * PI;
+		Vector3 ring_colour = lerp(top_colour, bottom_colour, step);
+		for(int j = 0; j < meridians; ++j)
+		{
+			float phi = (j + 1) / static_cast<float>(meridians) * TAU;
+			float x = radius * sin(theta) * cos(phi);
+			float y = radius * sin(theta) * sin(phi);
+			float z = radius * cos(theta);
+			Vector3 position = {x, y, z};
+			VertexPNC* vertex = &vertices[meridians*i+j+1];
+			vertex->position = position;
+			vertex->normal = -normalise(position);
+			vertex->colour = ring_colour;
+		}
+	}
+	vertices[vertices_count - 1].position = radius * -vector3_unit_z;
+	vertices[vertices_count - 1].normal = vector3_unit_z;
+	vertices[vertices_count - 1].colour = bottom_colour;
+
+	int indices_count = 6 * meridians * rings;
+	u16* indices = ALLOCATE(u16, indices_count);
+	if(!indices)
+	{
+		DEALLOCATE(vertices);
+		return;
+	}
+
+	int out_base = 0;
+	int in_base = 1;
+	for(int i = 0; i < meridians; ++i)
+	{
+		int o = out_base + 3 * i;
+		indices[o+0] = 0;
+		indices[o+1] = in_base + (i + 1) % meridians;
+		indices[o+2] = in_base + i;
+	}
+	out_base += 3 * meridians;
+	for(int i = 0; i < rings - 2; ++i)
+	{
+		for(int j = 0; j < meridians; ++j)
+		{
+			int x = meridians * i + j;
+			int o = out_base + 6 * x;
+			int k0 = in_base + x;
+			int k1 = in_base + meridians * i;
+
+			indices[o+0] = k0;
+			indices[o+1] = k1 + (j + 1) % meridians;
+			indices[o+2] = k0 + meridians;
+
+			indices[o+3] = k0 + meridians;
+			indices[o+4] = k1 + (j + 1) % meridians;
+			indices[o+5] = k1 + meridians + (j + 1) % meridians;
+		}
+	}
+	out_base += 6 * meridians * (rings - 2);
+	in_base += meridians * (parallels - 2);
+	for(int i = 0; i < meridians; ++i)
+	{
+		int o = out_base + 3 * i;
+		indices[o+0] = vertices_count - 1;
+		indices[o+1] = in_base + i;
+		indices[o+2] = in_base + (i + 1) % meridians;
+	}
+
+	object_set_surface(object, vertices, vertices_count, indices, indices_count);
+
+	DEALLOCATE(vertices);
+	DEALLOCATE(indices);
+}
+
 // Whole system
 
 GLuint shader;
 GLuint shader_vertex_colour;
 Matrix4 projection;
+Matrix4 sky_projection;
 int objects_count = 4;
 Object objects[4];
+Object sky;
 Triangle* terrain_triangles;
 int terrain_triangles_count;
-bool debug_draw_colliders = false;
+bool debug_draw_colliders = true;
 
 static bool system_initialise()
 {
@@ -2491,6 +2748,9 @@ static bool system_initialise()
 	object_generate_terrain(&terrain, &terrain_triangles, &terrain_triangles_count);
 	objects[3] = terrain;
 
+	object_create(&sky);
+	object_generate_sky(&sky);
+
 	shader = load_shader_program(default_vertex_source, default_fragment_source);
 	if(shader == 0)
 	{
@@ -2530,6 +2790,7 @@ static void resize_viewport(int width, int height)
 	const float near = 0.05f;
 	const float far = 12.0f;
 	projection = perspective_projection_matrix(fov, width, height, near, far);
+	sky_projection = perspective_projection_matrix(fov, width, height, 0.001f, 1.0f);
 	glViewport(0, 0, width, height);
 }
 
@@ -2560,15 +2821,20 @@ static void system_update(Vector3 position, World* world)
 		}
 
 		Matrix4 model3 = matrix4_identity;
+		Matrix4 model4 = matrix4_identity;
 
 		const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
 		const Vector3 camera_target = {0.0f, 0.0f, 0.5f};
 		const Matrix4 view = look_at_matrix(camera_position, camera_target, vector3_unit_z);
 
+		Vector3 direction = normalise(camera_target - camera_position);
+		const Matrix4 view4 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
+
 		object_set_matrices(objects, model0, view, projection);
 		object_set_matrices(objects + 1, model1, view, projection);
 		object_set_matrices(objects + 2, model2, view, projection);
 		object_set_matrices(objects + 3, model3, view, projection);
+		object_set_matrices(&sky, model4, view4, sky_projection);
 
 		immediate::set_matrices(view, projection);
 
@@ -2592,6 +2858,8 @@ static void system_update(Vector3 position, World* world)
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
 
+	immediate::draw();
+
 	if(debug_draw_colliders)
 	{
 		immediate::add_wire_ellipsoid(position, {0.3f, 0.3f, 0.5f}, {1.0f, 0.0f, 1.0f});
@@ -2601,6 +2869,18 @@ static void system_update(Vector3 position, World* world)
 		{
 			draw_bih_tree(&world->colliders[i].tree, 0);
 		}
+	}
+
+	// Draw the sky behind everything else.
+	{
+		glDepthMask(GL_FALSE);
+		glUseProgram(shader_vertex_colour);
+		Object* o = &sky;
+		GLint location = glGetUniformLocation(shader_vertex_colour, "model_view_projection");
+		glUniformMatrix4fv(location, 1, GL_TRUE, o->model_view_projection.elements);
+		glBindVertexArray(o->vertex_array);
+		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
+		glDepthMask(GL_TRUE);
 	}
 }
 
@@ -2772,6 +3052,7 @@ static PROC windows_get_proc_address(const char* name)
 static bool ogl_load_functions()
 {
 	p_glClear = reinterpret_cast<void (APIENTRYA*)(GLbitfield)>(GET_PROC("glClear"));
+	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
 	p_glEnable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glEnable"));
 	p_glViewport = reinterpret_cast<void (APIENTRYA*)(GLint, GLint, GLsizei, GLsizei)>(GET_PROC("glViewport"));
 
@@ -2812,6 +3093,7 @@ static bool ogl_load_functions()
 	int failure_count = 0;
 
 	failure_count += p_glClear == nullptr;
+	failure_count += p_glDepthMask == nullptr;
 	failure_count += p_glEnable == nullptr;
 	failure_count += p_glViewport == nullptr;
 
