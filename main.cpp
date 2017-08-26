@@ -98,6 +98,11 @@ static bool ensure_array_size(void** array, int* capacity, int item_size, int ex
 #define ARRAY_COUNT(array) \
 	static_cast<int>(sizeof(array) / sizeof(*(array)))
 
+#define MAX(a, b) \
+	(((a) > (b)) ? (a) : (b))
+#define MIN(a, b) \
+	(((a) < (b)) ? (a) : (b))
+
 static int string_size(const char* string)
 {
 	ASSERT(string);
@@ -661,6 +666,35 @@ Matrix4 compose_transform(Vector3 position, Quaternion orientation, Vector3 scal
 	return result;
 }
 
+Matrix4 inverse_view_matrix(const Matrix4& m)
+{
+	float a = -((m[0] * m[3]) + (m[4] * m[7]) + (m[8]  * m[11]));
+	float b = -((m[1] * m[3]) + (m[5] * m[7]) + (m[9]  * m[11]));
+	float c = -((m[2] * m[3]) + (m[6] * m[7]) + (m[10] * m[11]));
+	return
+	{{
+		m[0], m[4], m[8],  a,
+		m[1], m[5], m[9],  b,
+		m[2], m[6], m[10], c,
+		0.0f, 0.0f, 0.0f,  1.0f
+	}};
+}
+
+Matrix4 inverse_perspective_matrix(const Matrix4& m)
+{
+	float m0  = 1.0f / m[0];
+	float m5  = 1.0f / m[5];
+	float m14 = 1.0f / m[11];
+	float m15 = m[10] / m[11];
+	return
+	{{
+		m0,   0.0f, 0.0f,  0.0f,
+		0.0f, m5,   0.0f,  0.0f,
+		0.0f, 0.0f, 0.0f, -1.0f,
+		0.0f, 0.0f, m14,   m15
+	}};
+}
+
 Matrix4 inverse_transform(const Matrix4& m)
 {
 	// The scale can be extracted from the rotation data by just taking the
@@ -769,18 +803,32 @@ static bool aabb_validate(AABB b)
 		&& b.max.z > b.min.z;
 }
 
+static Vector3 max3(Vector3 v0, Vector3 v1)
+{
+	Vector3 result;
+	result.x = fmax(v0.x, v1.x);
+	result.y = fmax(v0.y, v1.y);
+	result.z = fmax(v0.z, v1.z);
+	return result;
+}
+
+static Vector3 min3(Vector3 v0, Vector3 v1)
+{
+	Vector3 result;
+	result.x = fmin(v0.x, v1.x);
+	result.y = fmin(v0.y, v1.y);
+	result.z = fmin(v0.z, v1.z);
+	return result;
+}
+
 static AABB aabb_from_triangle(Triangle* triangle)
 {
 	AABB result;
 	Vector3 v0 = triangle->vertices[0];
 	Vector3 v1 = triangle->vertices[1];
 	Vector3 v2 = triangle->vertices[2];
-	result.min.x = fmin(fmin(v0.x, v1.x), v2.x);
-	result.min.y = fmin(fmin(v0.y, v1.y), v2.y);
-	result.min.z = fmin(fmin(v0.z, v1.z), v2.z);
-	result.max.x = fmax(fmax(v0.x, v1.x), v2.x);
-	result.max.y = fmax(fmax(v0.y, v1.y), v2.y);
-	result.max.z = fmax(fmax(v0.z, v1.z), v2.z);
+	result.min = min3(min3(v0, v1), v2);
+	result.max = max3(max3(v0, v1), v2);
 	return result;
 }
 
@@ -795,12 +843,8 @@ static AABB aabb_from_ellipsoid(Vector3 center, Vector3 radius)
 static AABB aabb_merge(AABB o0, AABB o1)
 {
 	AABB result;
-	result.min.x = fmin(o0.min.x, o1.min.x);
-	result.min.y = fmin(o0.min.y, o1.min.y);
-	result.min.z = fmin(o0.min.z, o1.min.z);
-	result.max.x = fmax(o0.max.x, o1.max.x);
-	result.max.y = fmax(o0.max.y, o1.max.y);
-	result.max.z = fmax(o0.max.z, o1.max.z);
+	result.min = min3(o0.min, o1.min);
+	result.max = max3(o0.max, o1.max);
 	return result;
 }
 
@@ -811,6 +855,17 @@ static AABB compute_bounds(Triangle* triangles, int lower, int upper)
 	{
 		AABB aabb = aabb_from_triangle(triangles + i);
 		result = aabb_merge(result, aabb);
+	}
+	return result;
+}
+
+static AABB compute_bounds(Vector3* positions, int count)
+{
+	AABB result = {vector3_max, vector3_min};
+	for(int i = 0; i < count; ++i)
+	{
+		result.min = min3(result.min, positions[i]);
+		result.max = max3(result.max, positions[i]);
 	}
 	return result;
 }
@@ -877,6 +932,407 @@ static bool intersect_aabb_ray(AABB aabb, Ray ray)
 
 	return th > fmax(tl, 0.0f);
 }
+
+namespace bvh {
+
+struct Node
+{
+	AABB aabb;
+	union
+	{
+		struct
+		{
+			s32 left;
+			s32 right;
+		};
+		void* user_data;
+	};
+	union
+	{
+		s32 parent;
+		s32 next;
+	};
+	s32 height;
+};
+
+const s32 null_index = -1;
+
+static bool is_leaf(Node* node)
+{
+	return node->height == 0;
+}
+
+struct Tree
+{
+	Node* nodes;
+	int nodes_capacity;
+	int nodes_count;
+	s32 free_list;
+	s32 root_index;
+};
+
+static void initialise_free_list(Tree* tree, s32 index)
+{
+	for(s32 i = index; i < tree->nodes_capacity - 1; ++i)
+	{
+		tree->nodes[i].next = i + 1;
+		tree->nodes[i].height = null_index;
+	}
+	Node* last = tree->nodes + (tree->nodes_capacity - 1);
+	last->next = null_index;
+	last->height = null_index;
+	tree->free_list = index;
+}
+
+void tree_create(Tree* tree)
+{
+	tree->nodes_capacity = 128;
+	tree->nodes = ALLOCATE(Node, tree->nodes_capacity);
+	initialise_free_list(tree, 0);
+}
+
+void tree_destroy(Tree* tree)
+{
+	SAFE_DEALLOCATE(tree->nodes);
+}
+
+static s32 allocate_node(Tree* tree)
+{
+	int prior_capacity = tree->nodes_capacity;
+	bool ensured = ENSURE_ARRAY_SIZE(tree->nodes, 1);
+	if(!ensured)
+	{
+		return null_index;
+	}
+	if(prior_capacity != tree->nodes_capacity)
+	{
+		initialise_free_list(tree, tree->nodes_count);
+	}
+
+	s32 index = tree->free_list;
+	tree->free_list = tree->nodes[index].next;
+	tree->nodes_count += 1;
+	return index;
+}
+
+static void deallocate_node(Tree* tree, s32 index)
+{
+	tree->nodes[index].height = null_index;
+	tree->nodes[index].next = tree->free_list;
+	tree->free_list = index;
+	tree->nodes_count -= 1;
+}
+
+static s32 balance_node(Tree* tree, s32 node_index)
+{
+	// Relevant nodes are lettered as follows:
+	//      a
+	//     ╱ ╲
+	//    ╱   ╲
+	//   b     c
+	//  ╱ ╲   ╱ ╲
+	// d   e f   g
+
+	// Only an inner node with grandchildren can be rotated.
+	s32 ai = node_index;
+	Node* a = tree->nodes + ai;
+	if(is_leaf(a) || a->height < 2)
+	{
+		return ai;
+	}
+
+	s32 bi = a->left;
+	s32 ci = a->right;
+	Node* b = tree->nodes + bi;
+	Node* c = tree->nodes + ci;
+
+	s32 balance = c->height - b->height;
+	if(balance > 1)
+	{
+		// Rotate left to create this layout:
+		//     c
+		//    ╱ ╲
+		//   a   g
+		//  ╱ ╲
+		// b   f
+		// d and e aren't relevant to this move.
+
+		s32 fi = c->left;
+		s32 gi = c->right;
+		Node* f = tree->nodes + fi;
+		Node* g = tree->nodes + gi;
+
+		c->left = ai;
+		c->parent = a->parent;
+		a->parent = ci;
+
+		if(c->parent != null_index)
+		{
+			if(tree->nodes[c->parent].left == ai)
+			{
+				tree->nodes[c->parent].left = ci;
+			}
+			else
+			{
+				tree->nodes[c->parent].right = ci;
+			}
+		}
+		else
+		{
+			tree->root_index = ci;
+		}
+
+		if(f->height > g->height)
+		{
+			c->right = fi;
+			a->right = gi;
+			g->parent = ai;
+			a->aabb = aabb_merge(b->aabb, g->aabb);
+			c->aabb = aabb_merge(a->aabb, f->aabb);
+
+			a->height = 1 + MAX(b->height, g->height);
+			c->height = 1 + MAX(a->height, f->height);
+		}
+		else
+		{
+			c->right = gi;
+			a->right = fi;
+			f->parent = ai;
+			a->aabb = aabb_merge(b->aabb, f->aabb);
+			c->aabb = aabb_merge(a->aabb, g->aabb);
+
+			a->height = 1 + MAX(b->height, f->height);
+			c->height = 1 + MAX(a->height, g->height);
+		}
+
+		return ci;
+	}
+	else if(balance < -1)
+	{
+		// Rotate right to create this layout:
+		//   b
+		//  ╱ ╲
+		// d   a
+		//    ╱ ╲
+		//   e   c
+		// f and g aren't relevant to this move.
+
+		s32 di = b->left;
+		s32 ei = b->right;
+		Node* d = tree->nodes + di;
+		Node* e = tree->nodes + ei;
+
+		b->left = ai;
+		b->parent = a->parent;
+		a->parent = bi;
+
+		if(b->parent != null_index)
+		{
+			if(tree->nodes[b->parent].left == ai)
+			{
+				tree->nodes[b->parent].left = bi;
+			}
+			else
+			{
+				tree->nodes[b->parent].right = bi;
+			}
+		}
+		else
+		{
+			tree->root_index = bi;
+		}
+
+		if(d->height > e->height)
+		{
+			b->right = di;
+			a->left = ei;
+			e->parent = ai;
+			a->aabb = aabb_merge(c->aabb, e->aabb);
+			b->aabb = aabb_merge(a->aabb, d->aabb);
+
+			a->height = 1 + MAX(c->height, e->height);
+			b->height = 1 + MAX(a->height, d->height);
+		}
+		else
+		{
+			b->right = ei;
+			a->left = di;
+			d->parent = ai;
+			a->aabb = aabb_merge(c->aabb, d->aabb);
+			b->aabb = aabb_merge(a->aabb, e->aabb);
+
+			a->height = 1 + MAX(c->height, d->height);
+			b->height = 1 + MAX(a->height, e->height);
+		}
+
+		return bi;
+	}
+	else
+	{
+		// The node is already balanced.
+		return node_index;
+	}
+}
+
+static void refresh_parent_chain(Tree* tree, s32 index)
+{
+	// Walk up from parent to parent, re-balancing each according to its height
+	// in the hierarchy, then updating its bounding box and height.
+	while(index != null_index)
+	{
+		index = balance_node(tree, index);
+
+		Node* node = tree->nodes + index;
+		Node* left = tree->nodes + node->left;
+		Node* right = tree->nodes + node->right;
+
+		node->height = 1 + MAX(left->height, right->height);
+		node->aabb = aabb_merge(left->aabb, right->aabb);
+
+		index = node->parent;
+	}
+}
+
+static float aabb_proximity(AABB a, AABB b)
+{
+	const Vector3 d = (a.min + a.max) - (b.min + b.max);
+	return abs(d.x) + abs(d.y) + abs(d.z);
+}
+
+static bool aabb_choose(AABB aabb, AABB c0, AABB c1)
+{
+	return aabb_proximity(aabb, c0) < aabb_proximity(aabb, c1);
+}
+
+s32 insert_node(Tree* tree, AABB aabb, void* user_data)
+{
+	s32 node_index = allocate_node(tree);
+	Node* node = tree->nodes + node_index;
+	node->aabb = aabb;
+	node->user_data = user_data;
+
+	// If the tree is empty.
+	if(tree->root_index == null_index)
+	{
+		tree->root_index = node_index;
+		node->parent = null_index;
+		node->height = 0;
+		return node_index;
+	}
+
+	// If the root is the only node in the tree, make the root a sibling to the
+	// inserted node and create a new root above them.
+	Node* root = tree->nodes + tree->root_index;
+	if(is_leaf(root))
+	{
+		Node* sibling = root;
+		s32 sibling_index = tree->root_index;
+
+		s32 root_index = allocate_node(tree);
+		Node* root = tree->nodes + root_index;
+		root->aabb = aabb_merge(sibling->aabb, node->aabb);
+		root->left = sibling_index;
+		root->right = node_index;
+		root->parent = null_index;
+		root->height = 0;
+
+		sibling->parent = root_index;
+		node->parent = root_index;
+		tree->root_index = root_index;
+
+		return node_index;
+	}
+
+	// Choose the leaf to insert the new node at.
+	Node* branch = root;
+	s32 branch_index = tree->root_index;
+	do
+	{
+		AABB left_bounds = tree->nodes[branch->left].aabb;
+		AABB right_bounds = tree->nodes[branch->right].aabb;
+		if(aabb_choose(node->aabb, left_bounds, right_bounds))
+		{
+			branch_index = branch->left;
+		}
+		else
+		{
+			branch_index = branch->right;
+		}
+		branch = tree->nodes + branch_index;
+	} while(!is_leaf(branch));
+
+	// Replace the branch with a new parent, whose children are the branch and
+	// the inserted node.
+	s32 parent_index = allocate_node(tree);
+	Node* parent = tree->nodes + parent_index;
+	parent->left = branch_index;
+	parent->right = node_index;
+	root->parent = parent_index;
+	node->parent = parent_index;
+	refresh_parent_chain(tree, parent_index);
+
+	return node_index;
+}
+
+void remove_node(Tree* tree, s32 index)
+{
+	Node* node = tree->nodes + index;
+
+	// If this is the only node in the tree.
+	if(node->parent == null_index)
+	{
+		deallocate_node(tree, index);
+		tree->root_index = null_index;
+		return;
+	}
+
+	// All leaves must have a sibling.
+	Node* parent = tree->nodes + node->parent;
+	s32 sibling_index;
+	if(parent->left == index)
+	{
+		sibling_index = parent->right;
+	}
+	else
+	{
+		sibling_index = parent->left;
+	}
+
+	// If this node is a child of the root, make its sibling the new root, and
+	// deallocate the node and the old root.
+	if(parent->parent == null_index)
+	{
+		tree->root_index = sibling_index;
+		tree->nodes[sibling_index].parent = null_index;
+		deallocate_node(tree, index);
+		deallocate_node(tree, node->parent);
+		return;
+	}
+
+	// Replace the parent with the node's sibling and get rid of the replaced
+	// parent and the original node.
+	Node* grandparent = tree->nodes + parent->parent;
+	if(grandparent->left == node->parent)
+	{
+		grandparent->left = sibling_index;
+	}
+	else
+	{
+		grandparent->right = sibling_index;
+	}
+	tree->nodes[sibling_index].parent = parent->parent;
+	deallocate_node(tree, index);
+	deallocate_node(tree, node->parent);
+	refresh_parent_chain(tree, sibling_index);
+}
+
+s32 update_node(Tree* tree, s32 index, AABB aabb, void* user_data)
+{
+	remove_node(tree, index);
+	return insert_node(tree, aabb, user_data);
+}
+
+} // namespace bvh
 
 // Bounding Interval Hierarchy Functions........................................
 namespace bih {
@@ -1588,6 +2044,74 @@ static void collide_ray_triangle(Triangle* triangle, Ray* ray, CollisionPacket* 
 	}
 }
 
+// Frustum Functions............................................................
+
+struct Frustum
+{
+	struct Plane
+	{
+		union
+		{
+			struct
+			{
+				float x, y, z, w;
+			};
+			Vector3 normal;
+		};
+		Vector3 sign_flip;
+	};
+	Plane planes[6];
+};
+
+static float signed_one(float x)
+{
+	if(x > 0.0f)
+	{
+		return 1.0f;
+	}
+	else
+	{
+		return -1.0f;
+	}
+}
+
+// Matrix m can be a projection or view-projection matrix, and the frustum will be
+// in clip space or world space respectively.
+Frustum make_frustum(Matrix4 m)
+{
+	Frustum result;
+	for(int i = 0; i < 6; ++i)
+	{
+		Frustum::Plane* plane = result.planes + i;
+		float sign = 2 * (i & 1) - 1;
+		int row = 4 * (i / 2);
+		plane->x = m[12] + sign * m[0 + row];
+		plane->y = m[13] + sign * m[1 + row];
+		plane->z = m[14] + sign * m[2 + row];
+		plane->w = m[15] + sign * m[3 + row];
+		plane->sign_flip = {signed_one(plane->x), signed_one(plane->y), signed_one(plane->z)};
+	}
+	return result;
+}
+
+bool intersect_aabb_frustum(Frustum* frustum, AABB* aabb)
+{
+	// Division by two is ignored for the center and extents and is instead
+	// moved down to the test as a multiplication by two.
+	Vector3 center = aabb->max + aabb->min;
+	Vector3 extent = aabb->max - aabb->min;
+	for(int i = 0; i < 6; ++i)
+	{
+		Frustum::Plane plane = frustum->planes[i];
+		Vector3 sf = anisotropic_scale(extent, plane.sign_flip);
+		if(dot(center + sf, plane.normal) <= 2.0f * -plane.w)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 // OpenGL Function and Type Declarations........................................
 
 #if defined(__gl_h_) || defined(__GL_H__)
@@ -2173,6 +2697,42 @@ void add_quad(Quad* quad, Vector3 colour)
 	c->draw_mode = DrawMode::Triangles;
 }
 
+void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector3 colour)
+{
+	Matrix4 inverse = inverse_view_matrix(view) * inverse_perspective_matrix(projection);
+
+	Vector3 p[8] =
+	{
+		{-1.0f, -1.0f, -1.0f},
+		{-1.0f, -1.0f, +1.0f},
+		{-1.0f, +1.0f, -1.0f},
+		{-1.0f, +1.0f, +1.0f},
+		{+1.0f, -1.0f, -1.0f},
+		{+1.0f, -1.0f, +1.0f},
+		{+1.0f, +1.0f, -1.0f},
+		{+1.0f, +1.0f, +1.0f},
+	};
+	for(int i = 0; i < 8; ++i)
+	{
+		p[i] = inverse * p[i];
+	}
+
+	add_line(p[0], p[1], colour);
+	add_line(p[1], p[5], colour);
+	add_line(p[5], p[4], colour);
+	add_line(p[4], p[0], colour);
+
+	add_line(p[0], p[2], colour);
+	add_line(p[1], p[3], colour);
+	add_line(p[4], p[6], colour);
+	add_line(p[5], p[7], colour);
+
+	add_line(p[2], p[3], colour);
+	add_line(p[3], p[7], colour);
+	add_line(p[7], p[6], colour);
+	add_line(p[6], p[2], colour);
+}
+
 } // namespace immediate
 
 // Debug Drawing Functions......................................................
@@ -2390,9 +2950,10 @@ static void object_set_matrices(Object* object, Matrix4 model, Matrix4 view, Mat
 	object->normal_matrix = transpose(inverse_transform(model_view));
 }
 
-static void object_generate_floor(Object* object)
+static void object_generate_floor(Object* object, AABB* bounds)
 {
 	Floor floor = {};
+	AABB box = {vector3_max, vector3_min};
 	for(int y = 0; y < 10; ++y)
 	{
 		for(int x = y & 1; x < 10; x += 2)
@@ -2405,6 +2966,7 @@ static void object_generate_floor(Object* object)
 				floor_destroy(&floor);
 				return;
 			}
+			box = aabb_merge(box, {bottom_left, bottom_left + dimensions});
 		}
 	}
 	Vector3 wall_position = {1.0f, 0.0f, -1.0f};
@@ -2415,15 +2977,18 @@ static void object_generate_floor(Object* object)
 		floor_destroy(&floor);
 		return;
 	}
+	*bounds = aabb_merge(box, {wall_position, wall_position + wall_dimensions});
 	object_set_surface(object, floor.vertices, floor.vertices_count, floor.indices, floor.indices_count);
 	floor_destroy(&floor);
 }
 
-static void object_generate_player(Object* object)
+static void object_generate_player(Object* object, AABB* bounds)
 {
 	Floor floor = {};
 	Vector3 dimensions = {0.5f, 0.5f, 0.7f};
 	Vector3 position = {-dimensions.x / 2.0f, -dimensions.y / 2.0f, -dimensions.z / 2.0f};
+	bounds->min = position;
+	bounds->max = position + dimensions;
 	bool added = floor_add_box(&floor, position, dimensions);
 	if(!added)
 	{
@@ -2485,7 +3050,7 @@ Vector3 hsl_to_rgb(Vector3 hsl)
 	return result;
 }
 
-static void object_generate_terrain(Object* object, Triangle** triangles, int* triangles_count)
+static void object_generate_terrain(Object* object, AABB* bounds, Triangle** triangles, int* triangles_count)
 {
 	const int side = 10;
 	const int area = side * side;
@@ -2509,6 +3074,14 @@ static void object_generate_terrain(Object* object, Triangle** triangles, int* t
 			vertices[y*columns+x].position = {fx, fy, fz};
 		}
 	}
+
+	AABB box = {vector3_max, vector3_min};
+	for(int i = 0; i < vertices_count; ++i)
+	{
+		box.min = min3(box.min, vertices[i].position);
+		box.max = max3(box.max, vertices[i].position);
+	}
+	*bounds = box;
 
 	// Generate random vertex colours.
 	for(int i = 0; i < vertices_count; ++i)
@@ -2698,16 +3271,24 @@ void object_generate_sky(Object* object)
 
 // Whole system
 
+struct CallList
+{
+	int indices[8];
+	int count;
+};
+
 GLuint shader;
 GLuint shader_vertex_colour;
 Matrix4 projection;
 Matrix4 sky_projection;
 int objects_count = 4;
 Object objects[4];
+AABB objects_bounds[4];
 Object sky;
 Triangle* terrain_triangles;
 int terrain_triangles_count;
-bool debug_draw_colliders = true;
+CallList call_list;
+bool debug_draw_colliders = false;
 
 static bool system_initialise()
 {
@@ -2715,12 +3296,19 @@ static bool system_initialise()
 	glEnable(GL_CULL_FACE);
 
 	Object tetrahedron;
+	Vector3 positions[4] =
+	{
+		{+1.0f, +0.0f, -1.0f / sqrt(2.0f)},
+		{-1.0f, +0.0f, -1.0f / sqrt(2.0f)},
+		{+0.0f, +1.0f, +1.0f / sqrt(2.0f)},
+		{+0.0f, -1.0f, +1.0f / sqrt(2.0f)},
+	};
 	VertexPNC vertices[4] =
 	{
-		{{+1.0f, +0.0f, -1.0f / sqrt(2.0f)}, { 0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{{-1.0f, +0.0f, -1.0f / sqrt(2.0f)}, {-0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{{+0.0f, +1.0f, +1.0f / sqrt(2.0f)}, { 0.0f, 0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{{+0.0f, -1.0f, +1.0f / sqrt(2.0f)}, { 0.0f,-0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
+		{positions[0], { 0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
+		{positions[1], {-0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
+		{positions[2], { 0.0f, 0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
+		{positions[3], { 0.0f,-0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
 	};
 	u16 indices[12] =
 	{
@@ -2732,20 +3320,21 @@ static bool system_initialise()
 	object_create(&tetrahedron);
 	object_set_surface(&tetrahedron, vertices, ARRAY_COUNT(vertices), indices, ARRAY_COUNT(indices));
 	objects[0] = tetrahedron;
+	objects_bounds[0] = compute_bounds(positions, 4);
 
 	Object floor;
 	object_create(&floor);
-	object_generate_floor(&floor);
+	object_generate_floor(&floor, &objects_bounds[1]);
 	objects[1] = floor;
 
 	Object player;
 	object_create(&player);
-	object_generate_player(&player);
+	object_generate_player(&player, &objects_bounds[2]);
 	objects[2] = player;
 
 	Object terrain;
 	object_create(&terrain);
-	object_generate_terrain(&terrain, &terrain_triangles, &terrain_triangles_count);
+	object_generate_terrain(&terrain, &objects_bounds[3], &terrain_triangles, &terrain_triangles_count);
 	objects[3] = terrain;
 
 	object_create(&sky);
@@ -2799,6 +3388,7 @@ static void system_update(Vector3 position, World* world)
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	// Set up the matrices.
+	Matrix4 view_projection;
 	{
 		const Vector3 scale = vector3_one;
 
@@ -2844,14 +3434,27 @@ static void system_update(Vector3 position, World* world)
 		light_direction = normalise(-(view * light_direction));
 		GLint location = glGetUniformLocation(shader, "light_direction");
 		glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
+
+		view_projection = projection * view;
 	}
 
 	GLint location0 = glGetUniformLocation(shader, "model_view_projection");
 	GLint location1 = glGetUniformLocation(shader, "normal_matrix");
 
+	call_list.count = 0;
 	for(int i = 0; i < objects_count; ++i)
 	{
-		Object* o = objects + i;
+		Frustum frustum = make_frustum(objects[i].model_view_projection);
+		if(intersect_aabb_frustum(&frustum, &objects_bounds[i]))
+		{
+			call_list.indices[call_list.count] = i;
+			call_list.count += 1;
+		}
+	}
+
+	for(int i = 0; i < call_list.count; ++i)
+	{
+		Object* o = objects + call_list.indices[i];
 		glUniformMatrix4fv(location0, 1, GL_TRUE, o->model_view_projection.elements);
 		glUniformMatrix4fv(location1, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
