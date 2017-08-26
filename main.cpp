@@ -870,6 +870,12 @@ static AABB compute_bounds(Vector3* positions, int count)
 	return result;
 }
 
+static float distance_point_to_aabb(AABB a, Vector3 p)
+{
+	Vector3 v = max3(max3(a.min - p, vector3_zero), p - a.max);
+	return length(v);
+}
+
 static bool aabb_intersect(AABB a, Vector3 a_velocity, AABB b, Vector3 b_velocity, float* t0, float* t1)
 {
 	if(aabb_overlap(a, b))
@@ -2150,12 +2156,27 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_DEPTH_TEST 0x0B71
 #define GL_FALSE 0
 #define GL_FLOAT 0x1406
+#define GL_LINEAR 0x2601
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+#define GL_LINEAR_MIPMAP_NEAREST 0x2701
 #define GL_LINES 0x0001
+#define GL_NEAREST 0x2600
+#define GL_NEAREST_MIPMAP_LINEAR 0x2702
+#define GL_NEAREST_MIPMAP_NEAREST 0x2700
+#define GL_RED 0x1903
+#define GL_REPEAT 0x2901
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_TEXTURE_MAG_FILTER 0x2800
+#define GL_TEXTURE_MIN_FILTER 0x2801
+#define GL_TEXTURE_WRAP_S 0x2802
+#define GL_TEXTURE_WRAP_T 0x2803
 #define GL_TRIANGLES 0x0004
 #define GL_TRUE 1
 #define GL_UNSIGNED_BYTE 0x1401
 #define GL_UNSIGNED_INT 0x1405
 #define GL_UNSIGNED_SHORT 0x1403
+
+#define GL_TEXTURE0 0x84C0
 
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
@@ -2168,6 +2189,8 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_INFO_LOG_LENGTH 0x8B84
 #define GL_LINK_STATUS 0x8B82
 #define GL_VERTEX_SHADER 0x8B31
+
+#define GL_R8 0x8229
 
 #if defined(OS_LINUX)
 #define APIENTRYA
@@ -2186,10 +2209,16 @@ typedef ptrdiff_t GLsizeiptr;
 void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
 void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
 void (APIENTRYA *p_glEnable)(GLenum cap) = nullptr;
+void (APIENTRYA *p_glTexImage2D)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels) = nullptr;
 void (APIENTRYA *p_glViewport)(GLint x, GLint y, GLsizei width, GLsizei height) = nullptr;
 
+void (APIENTRYA *p_glBindTexture)(GLenum target, GLuint texture) = nullptr;
+void (APIENTRYA *p_glDeleteTextures)(GLsizei n, const GLuint* textures) = nullptr;
 void (APIENTRYA *p_glDrawArrays)(GLenum mode, GLint first, GLsizei count) = nullptr;
 void (APIENTRYA *p_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void* indices) = nullptr;
+void (APIENTRYA *p_glGenTextures)(GLsizei n, GLuint* textures) = nullptr;
+
+void (APIENTRYA *p_glActiveTexture)(GLenum texture) = nullptr;
 
 void (APIENTRYA *p_glBindVertexArray)(GLuint ren_array) = nullptr;
 void (APIENTRYA *p_glDeleteVertexArrays)(GLsizei n, const GLuint* arrays) = nullptr;
@@ -2217,10 +2246,16 @@ void (APIENTRYA *p_glGetShaderiv)(GLuint shader, GLenum pname, GLint* params) = 
 GLint (APIENTRYA *p_glGetUniformLocation)(GLuint program, const GLchar* name) = nullptr;
 void (APIENTRYA *p_glLinkProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glShaderSource)(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) = nullptr;
+void (APIENTRYA *p_glUniform1i)(GLint location, GLint v0) = nullptr;
 void (APIENTRYA *p_glUniform3fv)(GLint location, GLsizei count, const GLfloat* value) = nullptr;
 void (APIENTRYA *p_glUniformMatrix4fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) = nullptr;
 void (APIENTRYA *p_glUseProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glVertexAttribPointer)(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer) = nullptr;
+
+void (APIENTRYA *p_glBindSampler)(GLuint unit, GLuint sampler) = nullptr;
+void (APIENTRYA *p_glDeleteSamplers)(GLsizei count, const GLuint * samplers) = nullptr;
+void (APIENTRYA *p_glGenSamplers)(GLsizei count, GLuint * samplers) = nullptr;
+void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint param) = nullptr;
 
 #define glBindVertexArray p_glBindVertexArray
 #define glDeleteVertexArrays p_glDeleteVertexArrays
@@ -2236,10 +2271,16 @@ void (APIENTRYA *p_glVertexAttribPointer)(GLuint index, GLint size, GLenum type,
 #define glClear p_glClear
 #define glDepthMask p_glDepthMask
 #define glEnable p_glEnable
+#define glTexImage2D p_glTexImage2D
 #define glViewport p_glViewport
 
+#define glBindTexture p_glBindTexture
+#define glDeleteTextures p_glDeleteTextures
 #define glDrawArrays p_glDrawArrays
 #define glDrawElements p_glDrawElements
+#define glGenTextures p_glGenTextures
+
+#define glActiveTexture p_glActiveTexture
 
 #define glAttachShader p_glAttachShader
 #define glCompileShader p_glCompileShader
@@ -2256,10 +2297,16 @@ void (APIENTRYA *p_glVertexAttribPointer)(GLuint index, GLint size, GLenum type,
 #define glGetUniformLocation p_glGetUniformLocation
 #define glLinkProgram p_glLinkProgram
 #define glShaderSource p_glShaderSource
+#define glUniform1i p_glUniform1i
 #define glUniform3fv p_glUniform3fv
 #define glUniformMatrix4fv p_glUniformMatrix4fv
 #define glUseProgram p_glUseProgram
 #define glVertexAttribPointer p_glVertexAttribPointer
+
+#define glBindSampler p_glBindSampler
+#define glDeleteSamplers p_glDeleteSamplers
+#define glGenSamplers p_glGenSamplers
+#define glSamplerParameteri p_glSamplerParameteri
 
 // Shader Functions.............................................................
 
@@ -2897,6 +2944,65 @@ void main()
 }
 )";
 
+const char* vertex_source_camera_fade = R"(
+#version 330
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 colour;
+
+uniform mat4x4 model_view_projection;
+uniform mat4x4 normal_matrix;
+
+out vec3 surface_normal;
+out vec3 surface_colour;
+out float distance_to_camera;
+
+void main()
+{
+    vec4 position = model_view_projection * vec4(position, 1.0);
+	gl_Position = position;
+	surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
+	surface_colour = colour;
+
+    float zNear = 0.05f;
+    float zFar = 12.0f;
+    float z_b = position.z / position.w;
+    float z_n = 2.0 * z_b - 1.0;
+    float z_e = 2.0 * zNear * zFar / (zFar + zNear - z_n * (zFar - zNear));
+    distance_to_camera = z_e;
+}
+)";
+
+const char* fragment_source_camera_fade = R"(
+#version 330
+
+layout(location = 0) out vec4 output_colour;
+
+uniform sampler2D dither_pattern;
+uniform vec3 light_direction;
+
+in vec3 surface_normal;
+in vec3 surface_colour;
+in float distance_to_camera;
+
+float half_lambert(vec3 n, vec3 l)
+{
+	return 0.5 * dot(n, l) + 0.5;
+}
+
+void main()
+{
+    if(distance_to_camera * 3.0f - 4.0f < texture2D(dither_pattern, gl_FragCoord.xy / 4.0f).r)
+    {
+        discard;
+    }
+	float light = half_lambert(surface_normal, light_direction);
+	output_colour = vec4(surface_colour * vec3(light), 1.0);
+}
+
+)";
+
 struct Object
 {
 	Matrix4 model_view_projection;
@@ -3279,6 +3385,9 @@ struct CallList
 
 GLuint shader;
 GLuint shader_vertex_colour;
+GLuint shader_camera_fade;
+GLuint camera_fade_dither_pattern;
+GLuint nearest_repeat;
 Matrix4 projection;
 Matrix4 sky_projection;
 int objects_count = 4;
@@ -3287,7 +3396,8 @@ AABB objects_bounds[4];
 Object sky;
 Triangle* terrain_triangles;
 int terrain_triangles_count;
-CallList call_list;
+CallList solid_calls;
+CallList fade_calls;
 bool debug_draw_colliders = false;
 
 static bool system_initialise()
@@ -3340,6 +3450,15 @@ static bool system_initialise()
 	object_create(&sky);
 	object_generate_sky(&sky);
 
+	// Setup samplers.
+	{
+		glGenSamplers(1, &nearest_repeat);
+		glSamplerParameteri(nearest_repeat, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glSamplerParameteri(nearest_repeat, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glSamplerParameteri(nearest_repeat, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glSamplerParameteri(nearest_repeat, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	}
+
 	shader = load_shader_program(default_vertex_source, default_fragment_source);
 	if(shader == 0)
 	{
@@ -3352,6 +3471,33 @@ static bool system_initialise()
 	{
 		LOG_ERROR("The vertex colour shader failed to load.");
 		return false;
+	}
+
+	shader_camera_fade = load_shader_program(vertex_source_camera_fade, fragment_source_camera_fade);
+	if(shader_camera_fade == 0)
+	{
+		LOG_ERROR("The camera fade shader failed to load.");
+		return false;
+	}
+	{
+		glUseProgram(shader_camera_fade);
+		GLint location = glGetUniformLocation(shader_camera_fade, "dither_pattern");
+		glUniform1i(location, 0);
+
+		float pattern[16] =
+		{
+			1.0f, 0.5f, 1.0f, 0.1f,
+			1.0f, 1.0f, 0.9f, 1.0f,
+			1.0f, 0.3f, 1.0f, 0.7f,
+			1.0f, 1.0f, 1.0f, 1.0f,
+		};
+		glGenTextures(1, &camera_fade_dither_pattern);
+		glBindTexture(GL_TEXTURE_2D, camera_fade_dither_pattern);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 4, 4, 0, GL_RED, GL_FLOAT, pattern);
+
+		glActiveTexture(GL_TEXTURE0 + 0);
+		glBindTexture(GL_TEXTURE_2D, camera_fade_dither_pattern);
+		glBindSampler(0, nearest_repeat);
 	}
 
 	immediate::context_create();
@@ -3368,7 +3514,11 @@ static void system_terminate(bool functions_loaded)
 		{
 			object_destroy(objects + i);
 		}
+		glDeleteSamplers(1, &nearest_repeat);
 		glDeleteProgram(shader);
+		glDeleteProgram(shader_vertex_colour);
+		glDeleteProgram(shader_camera_fade);
+		glDeleteTextures(1, &camera_fade_dither_pattern);
 		immediate::context_destroy();
 	}
 }
@@ -3386,6 +3536,10 @@ static void resize_viewport(int width, int height)
 static void system_update(Vector3 position, World* world)
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
+
+	Matrix4 models[5];
 
 	// Set up the matrices.
 	Matrix4 view_projection;
@@ -3413,7 +3567,12 @@ static void system_update(Vector3 position, World* world)
 		Matrix4 model3 = matrix4_identity;
 		Matrix4 model4 = matrix4_identity;
 
-		const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
+		models[0] = model0;
+		models[1] = model1;
+		models[2] = model2;
+		models[3] = model3;
+		models[4] = model4;
+
 		const Vector3 camera_target = {0.0f, 0.0f, 0.5f};
 		const Matrix4 view = look_at_matrix(camera_position, camera_target, vector3_unit_z);
 
@@ -3428,11 +3587,15 @@ static void system_update(Vector3 position, World* world)
 
 		immediate::set_matrices(view, projection);
 
-		glUseProgram(shader);
-
 		Vector3 light_direction = {0.7f, 0.4f, -1.0f};
 		light_direction = normalise(-(view * light_direction));
+
+		glUseProgram(shader);
 		GLint location = glGetUniformLocation(shader, "light_direction");
+		glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
+
+		glUseProgram(shader_camera_fade);
+		location = glGetUniformLocation(shader_camera_fade, "light_direction");
 		glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
 
 		view_projection = projection * view;
@@ -3441,26 +3604,54 @@ static void system_update(Vector3 position, World* world)
 	GLint location0 = glGetUniformLocation(shader, "model_view_projection");
 	GLint location1 = glGetUniformLocation(shader, "normal_matrix");
 
-	call_list.count = 0;
+	GLint location00 = glGetUniformLocation(shader_camera_fade, "model_view_projection");
+	GLint location11 = glGetUniformLocation(shader_camera_fade, "normal_matrix");
+
+	// Form lists of objects not culled.
+	fade_calls.count = 0;
+	solid_calls.count = 0;
 	for(int i = 0; i < objects_count; ++i)
 	{
 		Frustum frustum = make_frustum(objects[i].model_view_projection);
 		if(intersect_aabb_frustum(&frustum, &objects_bounds[i]))
 		{
-			call_list.indices[call_list.count] = i;
-			call_list.count += 1;
+			Vector3 camera = inverse_transform(models[i]) * camera_position;
+			if(distance_point_to_aabb(objects_bounds[i], camera) < 3.5f)
+			{
+				fade_calls.indices[fade_calls.count] = i;
+				fade_calls.count += 1;
+			}
+			else
+			{
+				solid_calls.indices[solid_calls.count] = i;
+				solid_calls.count += 1;
+			}
 		}
 	}
 
-	for(int i = 0; i < call_list.count; ++i)
+	// Draw all the faded objects first because they are close to the camera.
+	glUseProgram(shader_camera_fade);
+	for(int i = 0; i < fade_calls.count; ++i)
 	{
-		Object* o = objects + call_list.indices[i];
+		Object* o = objects + fade_calls.indices[i];
+		glUniformMatrix4fv(location00, 1, GL_TRUE, o->model_view_projection.elements);
+		glUniformMatrix4fv(location11, 1, GL_TRUE, o->normal_matrix.elements);
+		glBindVertexArray(o->vertex_array);
+		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
+	}
+
+	// Draw all the solid objects in the list.
+	glUseProgram(shader);
+	for(int i = 0; i < solid_calls.count; ++i)
+	{
+		Object* o = objects + solid_calls.indices[i];
 		glUniformMatrix4fv(location0, 1, GL_TRUE, o->model_view_projection.elements);
 		glUniformMatrix4fv(location1, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
 
+	// Draw debug visualisers.
 	immediate::draw();
 
 	if(debug_draw_colliders)
@@ -3657,10 +3848,16 @@ static bool ogl_load_functions()
 	p_glClear = reinterpret_cast<void (APIENTRYA*)(GLbitfield)>(GET_PROC("glClear"));
 	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
 	p_glEnable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glEnable"));
+	p_glTexImage2D = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*)>(GET_PROC("glTexImage2D"));
 	p_glViewport = reinterpret_cast<void (APIENTRYA*)(GLint, GLint, GLsizei, GLsizei)>(GET_PROC("glViewport"));
 
+	p_glBindTexture = reinterpret_cast<void (APIENTRYA*)(GLenum, GLuint)>(GET_PROC("glBindTexture"));
+	p_glDeleteTextures = reinterpret_cast<void (APIENTRYA*)(GLsizei, const GLuint*)>(GET_PROC("glDeleteTextures"));
 	p_glDrawArrays = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLsizei)>(GET_PROC("glDrawArrays"));
 	p_glDrawElements = reinterpret_cast<void (APIENTRYA*)(GLenum, GLsizei, GLenum, const void*)>(GET_PROC("glDrawElements"));
+	p_glGenTextures = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(GET_PROC("glGenTextures"));
+
+	p_glActiveTexture = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glActiveTexture"));
 
 	p_glBindVertexArray = reinterpret_cast<void (APIENTRYA*)(GLuint)>(GET_PROC("glBindVertexArray"));
 	p_glDeleteVertexArrays = reinterpret_cast<void (APIENTRYA*)(GLsizei, const GLuint*)>(GET_PROC("glDeleteVertexArrays"));
@@ -3688,20 +3885,32 @@ static bool ogl_load_functions()
 	p_glGetUniformLocation = reinterpret_cast<GLint (APIENTRYA*)(GLuint, const GLchar*)>(GET_PROC("glGetUniformLocation"));
 	p_glLinkProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(GET_PROC("glLinkProgram"));
 	p_glShaderSource = reinterpret_cast<void (APIENTRYA*)(GLuint, GLsizei, const GLchar* const*, const GLint*)>(GET_PROC("glShaderSource"));
+	p_glUniform1i = reinterpret_cast<void (APIENTRYA*)(GLint, GLint)>(GET_PROC("glUniform1i"));
 	p_glUniform3fv = reinterpret_cast<void (APIENTRYA*)(GLint, GLsizei, const GLfloat*)>(GET_PROC("glUniform3fv"));
 	p_glUniformMatrix4fv = reinterpret_cast<void (APIENTRYA*)(GLint, GLsizei, GLboolean, const GLfloat*)>(GET_PROC("glUniformMatrix4fv"));
 	p_glUseProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(GET_PROC("glUseProgram"));
 	p_glVertexAttribPointer = reinterpret_cast<void (APIENTRYA*)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)>(GET_PROC("glVertexAttribPointer"));
+
+	p_glBindSampler = reinterpret_cast<void (APIENTRYA*)(GLuint, GLuint)>(GET_PROC("glBindSampler"));
+	p_glDeleteSamplers = reinterpret_cast<void (APIENTRYA*)(GLsizei, const GLuint*)>(GET_PROC("glDeleteSamplers"));
+	p_glGenSamplers = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(GET_PROC("glGenSamplers"));
+	p_glSamplerParameteri = reinterpret_cast<void (APIENTRYA*)(GLuint, GLenum, GLint)>(GET_PROC("glSamplerParameteri"));
 
 	int failure_count = 0;
 
 	failure_count += p_glClear == nullptr;
 	failure_count += p_glDepthMask == nullptr;
 	failure_count += p_glEnable == nullptr;
+	failure_count += p_glTexImage2D == nullptr;
 	failure_count += p_glViewport == nullptr;
 
+	failure_count += p_glBindTexture == nullptr;
+	failure_count += p_glDeleteTextures == nullptr;
 	failure_count += p_glDrawArrays == nullptr;
 	failure_count += p_glDrawElements == nullptr;
+	failure_count += p_glGenTextures == nullptr;
+
+	failure_count += p_glActiveTexture == nullptr;
 
 	failure_count += p_glBindVertexArray == nullptr;
 	failure_count += p_glDeleteVertexArrays == nullptr;
@@ -3729,10 +3938,16 @@ static bool ogl_load_functions()
 	failure_count += p_glGetUniformLocation == nullptr;
 	failure_count += p_glLinkProgram == nullptr;
 	failure_count += p_glShaderSource == nullptr;
+	failure_count += p_glUniform1i == nullptr;
 	failure_count += p_glUniform3fv == nullptr;
 	failure_count += p_glUniformMatrix4fv == nullptr;
 	failure_count += p_glUseProgram == nullptr;
 	failure_count += p_glVertexAttribPointer == nullptr;
+
+	failure_count += p_glBindSampler == nullptr;
+	failure_count += p_glDeleteSamplers == nullptr;
+	failure_count += p_glGenSamplers == nullptr;
+	failure_count += p_glSamplerParameteri == nullptr;
 
 	return failure_count == 0;
 }
