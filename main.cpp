@@ -2246,6 +2246,7 @@ void (APIENTRYA *p_glGetShaderiv)(GLuint shader, GLenum pname, GLint* params) = 
 GLint (APIENTRYA *p_glGetUniformLocation)(GLuint program, const GLchar* name) = nullptr;
 void (APIENTRYA *p_glLinkProgram)(GLuint program) = nullptr;
 void (APIENTRYA *p_glShaderSource)(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) = nullptr;
+void (APIENTRYA *p_glUniform1f)(GLint location, GLfloat v0) = nullptr;
 void (APIENTRYA *p_glUniform1i)(GLint location, GLint v0) = nullptr;
 void (APIENTRYA *p_glUniform3fv)(GLint location, GLsizei count, const GLfloat* value) = nullptr;
 void (APIENTRYA *p_glUniformMatrix4fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) = nullptr;
@@ -2297,6 +2298,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 #define glGetUniformLocation p_glGetUniformLocation
 #define glLinkProgram p_glLinkProgram
 #define glShaderSource p_glShaderSource
+#define glUniform1f p_glUniform1f
 #define glUniform1i p_glUniform1i
 #define glUniform3fv p_glUniform3fv
 #define glUniformMatrix4fv p_glUniformMatrix4fv
@@ -2953,6 +2955,9 @@ layout(location = 2) in vec3 colour;
 
 uniform mat4x4 model_view_projection;
 uniform mat4x4 normal_matrix;
+uniform float near;
+uniform float far;
+uniform float fade_distance;
 
 out vec3 surface_normal;
 out vec3 surface_colour;
@@ -2965,12 +2970,9 @@ void main()
 	surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
 	surface_colour = colour;
 
-    float zNear = 0.05f;
-    float zFar = 12.0f;
-    float z_b = position.z / position.w;
-    float z_n = 2.0 * z_b - 1.0;
-    float z_e = 2.0 * zNear * zFar / (zFar + zNear - z_n * (zFar - zNear));
-    distance_to_camera = z_e;
+    float z_ndc = 2.0 * (position.z / position.w) - 1.0;
+    float z_eye = 2.0 * near * far / (far + near - z_ndc * (far - near));
+    distance_to_camera = (1.0 / fade_distance) * z_eye - fade_distance;
 }
 )";
 
@@ -2980,6 +2982,7 @@ const char* fragment_source_camera_fade = R"(
 layout(location = 0) out vec4 output_colour;
 
 uniform sampler2D dither_pattern;
+uniform float dither_pattern_side;
 uniform vec3 light_direction;
 
 in vec3 surface_normal;
@@ -2993,7 +2996,7 @@ float half_lambert(vec3 n, vec3 l)
 
 void main()
 {
-    if(distance_to_camera * 3.0f - 4.0f < texture2D(dither_pattern, gl_FragCoord.xy / 4.0f).r)
+    if(distance_to_camera < texture2D(dither_pattern, gl_FragCoord.xy / dither_pattern_side).r)
     {
         discard;
     }
@@ -3400,6 +3403,9 @@ CallList solid_calls;
 CallList fade_calls;
 bool debug_draw_colliders = false;
 
+const float near_plane = 0.05f;
+const float far_plane = 12.0f;
+
 static bool system_initialise()
 {
 	glEnable(GL_DEPTH_TEST);
@@ -3483,6 +3489,11 @@ static bool system_initialise()
 		glUseProgram(shader_camera_fade);
 		GLint location = glGetUniformLocation(shader_camera_fade, "dither_pattern");
 		glUniform1i(location, 0);
+		location = glGetUniformLocation(shader_camera_fade, "dither_pattern_side");
+		glUniform1f(location, 4.0f);
+		glUniform1f(glGetUniformLocation(shader_camera_fade, "near"), near_plane);
+		glUniform1f(glGetUniformLocation(shader_camera_fade, "far"), far_plane);
+		glUniform1f(glGetUniformLocation(shader_camera_fade, "fade_distance"), 0.3f);
 
 		float pattern[16] =
 		{
@@ -3526,9 +3537,7 @@ static void system_terminate(bool functions_loaded)
 static void resize_viewport(int width, int height)
 {
 	const float fov = PI_OVER_2 * (2.0f / 3.0f);
-	const float near = 0.05f;
-	const float far = 12.0f;
-	projection = perspective_projection_matrix(fov, width, height, near, far);
+	projection = perspective_projection_matrix(fov, width, height, near_plane, far_plane);
 	sky_projection = perspective_projection_matrix(fov, width, height, 0.001f, 1.0f);
 	glViewport(0, 0, width, height);
 }
@@ -3616,7 +3625,7 @@ static void system_update(Vector3 position, World* world)
 		if(intersect_aabb_frustum(&frustum, &objects_bounds[i]))
 		{
 			Vector3 camera = inverse_transform(models[i]) * camera_position;
-			if(distance_point_to_aabb(objects_bounds[i], camera) < 3.5f)
+			if(distance_point_to_aabb(objects_bounds[i], camera) < 0.5f)
 			{
 				fade_calls.indices[fade_calls.count] = i;
 				fade_calls.count += 1;
@@ -3729,6 +3738,7 @@ static void game_create()
 	collider->triangles_count = render::terrain_triangles_count;
 	bool built = bih::build_tree(&collider->tree, collider->triangles, collider->triangles_count);
 	ASSERT(built);
+	position.z = -0.86f;
 }
 
 static void game_destroy()
@@ -3885,6 +3895,7 @@ static bool ogl_load_functions()
 	p_glGetUniformLocation = reinterpret_cast<GLint (APIENTRYA*)(GLuint, const GLchar*)>(GET_PROC("glGetUniformLocation"));
 	p_glLinkProgram = reinterpret_cast<void (APIENTRYA*)(GLuint)>(GET_PROC("glLinkProgram"));
 	p_glShaderSource = reinterpret_cast<void (APIENTRYA*)(GLuint, GLsizei, const GLchar* const*, const GLint*)>(GET_PROC("glShaderSource"));
+	p_glUniform1f = reinterpret_cast<void (APIENTRYA*)(GLint, GLfloat)>(GET_PROC("glUniform1f"));
 	p_glUniform1i = reinterpret_cast<void (APIENTRYA*)(GLint, GLint)>(GET_PROC("glUniform1i"));
 	p_glUniform3fv = reinterpret_cast<void (APIENTRYA*)(GLint, GLsizei, const GLfloat*)>(GET_PROC("glUniform3fv"));
 	p_glUniformMatrix4fv = reinterpret_cast<void (APIENTRYA*)(GLint, GLsizei, GLboolean, const GLfloat*)>(GET_PROC("glUniformMatrix4fv"));
@@ -3938,6 +3949,7 @@ static bool ogl_load_functions()
 	failure_count += p_glGetUniformLocation == nullptr;
 	failure_count += p_glLinkProgram == nullptr;
 	failure_count += p_glShaderSource == nullptr;
+	failure_count += p_glUniform1f == nullptr;
 	failure_count += p_glUniform1i == nullptr;
 	failure_count += p_glUniform3fv == nullptr;
 	failure_count += p_glUniformMatrix4fv == nullptr;
