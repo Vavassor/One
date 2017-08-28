@@ -2081,8 +2081,8 @@ static float signed_one(float x)
 	}
 }
 
-// Matrix m can be a projection or view-projection matrix, and the frustum will be
-// in clip space or world space respectively.
+// Matrix m can be a projection or view-projection matrix, and the frustum will
+// be in eye space or world space respectively.
 Frustum make_frustum(Matrix4 m)
 {
 	Frustum result;
@@ -2972,7 +2972,7 @@ void main()
 
     float z_ndc = 2.0 * (position.z / position.w) - 1.0;
     float z_eye = 2.0 * near * far / (far + near - z_ndc * (far - near));
-    distance_to_camera = (1.0 / fade_distance) * z_eye - fade_distance;
+    distance_to_camera = (1.0 / fade_distance) * (z_eye - fade_distance);
 }
 )";
 
@@ -3493,14 +3493,14 @@ static bool system_initialise()
 		glUniform1f(location, 4.0f);
 		glUniform1f(glGetUniformLocation(shader_camera_fade, "near"), near_plane);
 		glUniform1f(glGetUniformLocation(shader_camera_fade, "far"), far_plane);
-		glUniform1f(glGetUniformLocation(shader_camera_fade, "fade_distance"), 0.3f);
+		glUniform1f(glGetUniformLocation(shader_camera_fade, "fade_distance"), 0.2f);
 
 		float pattern[16] =
 		{
-			1.0f, 0.5f, 1.0f, 0.1f,
-			1.0f, 1.0f, 0.9f, 1.0f,
-			1.0f, 0.3f, 1.0f, 0.7f,
-			1.0f, 1.0f, 1.0f, 1.0f,
+			 0.0f, 0.5f, 0.125f, 0.625f,
+			 0.75f, 0.25f, 0.875f, 0.375f,
+			 0.1875f, 0.6875f, 0.0625f, 0.5625f,
+			 0.9375f, 0.4375f, 0.8125f, 0.3125f,
 		};
 		glGenTextures(1, &camera_fade_dither_pattern);
 		glBindTexture(GL_TEXTURE_2D, camera_fade_dither_pattern);
@@ -3625,7 +3625,7 @@ static void system_update(Vector3 position, World* world)
 		if(intersect_aabb_frustum(&frustum, &objects_bounds[i]))
 		{
 			Vector3 camera = inverse_transform(models[i]) * camera_position;
-			if(distance_point_to_aabb(objects_bounds[i], camera) < 0.5f)
+			if(distance_point_to_aabb(objects_bounds[i], camera) < 1.0f)
 			{
 				fade_calls.indices[fade_calls.count] = i;
 				fade_calls.count += 1;
@@ -3738,7 +3738,6 @@ static void game_create()
 	collider->triangles_count = render::terrain_triangles_count;
 	bool built = bih::build_tree(&collider->tree, collider->triangles, collider->triangles_count);
 	ASSERT(built);
-	position.z = -0.86f;
 }
 
 static void game_destroy()
