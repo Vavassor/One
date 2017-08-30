@@ -3487,10 +3487,8 @@ static bool system_initialise()
 	}
 	{
 		glUseProgram(shader_camera_fade);
-		GLint location = glGetUniformLocation(shader_camera_fade, "dither_pattern");
-		glUniform1i(location, 0);
-		location = glGetUniformLocation(shader_camera_fade, "dither_pattern_side");
-		glUniform1f(location, 4.0f);
+		glUniform1i(glGetUniformLocation(shader_camera_fade, "dither_pattern"), 0);
+		glUniform1f(glGetUniformLocation(shader_camera_fade, "dither_pattern_side"), 4.0f);
 		glUniform1f(glGetUniformLocation(shader_camera_fade, "near"), near_plane);
 		glUniform1f(glGetUniformLocation(shader_camera_fade, "far"), far_plane);
 		glUniform1f(glGetUniformLocation(shader_camera_fade, "fade_distance"), 0.2f);
@@ -3793,13 +3791,6 @@ static void main_update()
 		velocity.y += speed * d.y;
 	}
 
-	// Say any inputs the player is currently pressing.
-	if(key_tapped(UserKey::Left))  speech_system::say_user_key(UserKey::Left);
-	if(key_tapped(UserKey::Up))    speech_system::say_user_key(UserKey::Up);
-	if(key_tapped(UserKey::Right)) speech_system::say_user_key(UserKey::Right);
-	if(key_tapped(UserKey::Down))  speech_system::say_user_key(UserKey::Down);
-	if(key_tapped(UserKey::Space)) speech_system::say_user_key(UserKey::Space);
-
 	Vector3 radius = {0.3f, 0.3f, 0.5f};
 	position = collide_and_slide(position, radius, velocity, -0.096f * vector3_unit_z, &world);
 
@@ -4016,61 +4007,6 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 	clock_nanosleep(CLOCK_MONOTONIC, 0, &requested_time, nullptr);
 }
 
-// Speech Functions.............................................................
-
-#include <libspeechd.h>
-#include <unistd.h>
-
-namespace speech_system {
-
-namespace
-{
-	SPDConnection* connection;
-}
-
-static bool initialise()
-{
-	const char* connection_name = "main";
-	char* username = getlogin();
-	connection = spd_open(app_name, connection_name, username, SPD_MODE_SINGLE);
-	if(!connection)
-	{
-		LOG_ERROR("Speech Dispatcher failed initialisation.");
-		return false;
-	}
-
-	return true;
-}
-
-static void terminate()
-{
-	if(connection)
-	{
-		spd_close(connection);
-	}
-}
-
-static const char* get_user_key_description(UserKey key)
-{
-	switch(key)
-	{
-		case UserKey::Left:  return "left";
-		case UserKey::Up:    return "up";
-		case UserKey::Right: return "right";
-		case UserKey::Down:  return "down";
-		case UserKey::Space: return "space";
-	}
-	return "";
-}
-
-void say_user_key(UserKey key)
-{
-	const char* text = get_user_key_description(key);
-	spd_say(connection, SPD_TEXT, text);
-}
-
-} // namespace speech_system
-
 // Platform Main Functions......................................................
 
 #include <X11/X.h>
@@ -4168,13 +4104,6 @@ static bool main_create()
 	}
 	render::resize_viewport(window_width, window_height);
 
-	initialised = speech_system::initialise();
-	if(!initialised)
-	{
-		LOG_ERROR("Speech system failed initialisation.");
-		return false;
-	}
-
 	game_create();
 
 	return true;
@@ -4183,7 +4112,6 @@ static bool main_create()
 static void main_destroy()
 {
 	game_destroy();
-	speech_system::terminate();
 	render::system_terminate(functions_loaded);
 
 	if(visual_info)
