@@ -15,7 +15,7 @@ For playing, use these commands:
 cl /O2 main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib /link /out:One.exe
 
 -for Linux
-g++ -o One -std=c++0x -O3 main.cpp -lGL -lX11
+g++ -o One -std=c++0x -O3 main.cpp -lGL -lX11 -lpthread -lasound
 
 For debugging, use these commands:
 
@@ -23,7 +23,7 @@ For debugging, use these commands:
 cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib /link /debug /out:One.exe
 
 -for Linux
-g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11
+g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpthread -lasound
 */
 
 #if defined(__linux__)
@@ -3687,17 +3687,204 @@ static void system_update(Vector3 position, World* world)
 
 } // namespace render
 
-// Speech Function Declarations.................................................
+// Audio Functions..............................................................
 
-enum class UserKey {Space, Left, Up, Right, Down};
+namespace audio {
 
-namespace speech_system {
+enum Format
+{
+	FORMAT_U8,  // Unsigned 8-bit Integer
+	FORMAT_S8,  // Signed 8-bit Integer
+	FORMAT_U16, // Unsigned 16-bit Integer
+	FORMAT_S16, // Signed 16-bit Integer
+	FORMAT_U24, // Unsigned 24-bit Integer
+	FORMAT_S24, // Signed 24-bit Integer
+	FORMAT_U32, // Unsigned 32-bit Integer
+	FORMAT_S32, // Signed 32-bit Integer
+	FORMAT_F32, // 32-bit Floating-point
+	FORMAT_F64, // 64-bit Floating-point
+};
 
-void say_user_key(UserKey key);
+static int format_byte_count(Format format)
+{
+	switch(format)
+	{
+		case FORMAT_U8:
+		case FORMAT_S8:
+			return 1;
 
-} // namespace speech_system
+		case FORMAT_U16:
+		case FORMAT_S16:
+			return 2;
+
+		case FORMAT_U24:
+		case FORMAT_S24:
+			return 3;
+
+		case FORMAT_U32:
+		case FORMAT_S32:
+		case FORMAT_F32:
+			return 4;
+
+		case FORMAT_F64:
+			return 8;
+	}
+	return 0;
+}
+
+struct DeviceDescription
+{
+	u64 size;
+	u64 frames;
+	Format format;
+	u32 sample_rate;
+	u8 channels;
+	u8 silence;
+};
+
+static void fill_remaining_device_description(DeviceDescription* description)
+{
+	switch(description->format)
+	{
+		case FORMAT_U8: description->silence = 0x80; break;
+		default:        description->silence = 0x00; break;
+	}
+	description->size = format_byte_count(description->format) * description->channels * description->frames;
+}
+
+struct Int24
+{
+	s32 x;
+};
+typedef Int24 s24; // A 32-bit value pretending to be 24-bits
+
+inline s8 convert_to_s8(float value)
+{
+	return value * 127.5f - 0.5f;
+}
+
+inline s16 convert_to_s16(float value)
+{
+	return value * 32767.5f - 0.5f;
+}
+
+inline s24 convert_to_s24(float value)
+{
+	return {static_cast<s32>(value * 8388607.5f - 0.5f)};
+}
+
+inline s32 convert_to_s32(float value)
+{
+	return value * 2147483647.5f - 0.5f;
+}
+
+inline float convert_to_float(float value)
+{
+	return value;
+}
+
+inline double convert_to_double(float value)
+{
+	return value;
+}
+
+struct ConversionInfo
+{
+	struct
+	{
+		Format format;
+		int stride;
+	} in, out;
+	int channels;
+};
+
+#define DEFINE_CONVERT_BUFFER(type)                                                                    \
+	static void convert_buffer_to_##type(const float* in, type* out, int frames, ConversionInfo* info) \
+	{                                                                                                  \
+		for(int i = 0; i < frames; ++i)                                                                \
+		{                                                                                              \
+			for(int j = 0; j < info->channels; ++j)                                                    \
+			{                                                                                          \
+				out[j] = convert_to_##type(in[j]);                                                     \
+			}                                                                                          \
+			in += info->in.stride;                                                                     \
+			out += info->out.stride;                                                                   \
+		}                                                                                              \
+	}
+
+DEFINE_CONVERT_BUFFER(s8);
+DEFINE_CONVERT_BUFFER(s16);
+DEFINE_CONVERT_BUFFER(s24);
+DEFINE_CONVERT_BUFFER(s32);
+DEFINE_CONVERT_BUFFER(float);
+DEFINE_CONVERT_BUFFER(double);
+
+// This function does format conversion, input/output channel compensation, and
+// data interleaving/deinterleaving.
+static void format_buffer_from_float(float* in_samples, void* out_samples, int frames, ConversionInfo* info)
+{
+	switch(info->in.format)
+	{
+		case FORMAT_S8:
+			convert_buffer_to_s8(in_samples, static_cast<s8*>(out_samples), frames, info);
+			break;
+		case FORMAT_S16:
+			convert_buffer_to_s16(in_samples, static_cast<s16*>(out_samples), frames, info);
+			break;
+		case FORMAT_S24:
+			convert_buffer_to_s24(in_samples, static_cast<s24*>(out_samples), frames, info);
+			break;
+		case FORMAT_S32:
+			convert_buffer_to_s32(in_samples, static_cast<s32*>(out_samples), frames, info);
+			break;
+		case FORMAT_F32:
+			convert_buffer_to_float(in_samples, static_cast<float*>(out_samples), frames, info);
+			break;
+		case FORMAT_F64:
+			convert_buffer_to_double(in_samples, static_cast<double*>(out_samples), frames, info);
+			break;
+	}
+}
+
+static float pitch_to_frequency(int pitch)
+{
+	return 440.0f * pow(2.0f, static_cast<float>(pitch - 69) / 12.0f);
+}
+
+static void generate_sine_samples(void* samples, int count, int channels, u32 sample_rate, double time, int pitch, float amplitude)
+{
+	float frequency = pitch_to_frequency(pitch);
+	float theta = TAU * frequency;
+	float* out = static_cast<float*>(samples);
+	for(int i = 0; i < count; ++i)
+	{
+		for(int j = 0; j < channels; ++j)
+		{
+			float t = static_cast<float>(i) / sample_rate + time;
+			out[i * channels + j] = amplitude * sin(theta * t);
+		}
+	}
+}
+
+static void fill_with_silence(float* samples, u8 silence, u64 count)
+{
+	memset(samples, silence, sizeof(float) * count);
+}
+
+} // namespace audio
+
+// Audio Function Declarations..................................................
+
+namespace audio {
+
+bool system_startup();
+void system_shutdown();
+
+} // namespace audio
 
 // Main Functions...............................................................
+
+enum class UserKey {Space, Left, Up, Right, Down};
 
 namespace
 {
@@ -3954,6 +4141,54 @@ static bool ogl_load_functions()
 	return failure_count == 0;
 }
 
+// Compiler-Specific Implementations============================================
+
+// Atomic Functions.............................................................
+
+#if defined(_MSC_VER)
+#define COMPILER_MSVC
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#include <intrin.h>
+
+#elif defined(__GNUC__)
+#define COMPILER_GCC
+#endif
+
+#if defined(_MSC_VER)
+typedef long AtomicFlag;
+#elif defined(__GNUC__)
+typedef bool AtomicFlag;
+#endif
+
+#if defined(COMPILER_MSVC)
+
+bool atomic_flag_test_and_set(AtomicFlag* flag)
+{
+	return _InterlockedExchange(const_cast<volatile long*>(flag), 1L);
+}
+
+void atomic_flag_clear(AtomicFlag* flag)
+{
+	_InterlockedExchange(const_cast<volatile long*>(flag), 0L);
+}
+
+#elif defined(COMPILER_GCC)
+
+bool atomic_flag_test_and_set(AtomicFlag* flag)
+{
+	return __atomic_test_and_set(flag, __ATOMIC_SEQ_CST);
+}
+
+void atomic_flag_clear(AtomicFlag* flag)
+{
+	__atomic_clear(flag, __ATOMIC_SEQ_CST);
+}
+
+#endif
+
 // Platform-Specific Implementations============================================
 
 #if defined(OS_LINUX)
@@ -4006,6 +4241,366 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 	requested_time.tv_nsec = static_cast<s64>(1.0e9 * amount_to_sleep);
 	clock_nanosleep(CLOCK_MONOTONIC, 0, &requested_time, nullptr);
 }
+
+// Audio Functions..............................................................
+
+#include <alsa/asoundlib.h>
+
+#include <pthread.h>
+
+namespace audio {
+
+static const int test_format_count = 5;
+
+static Format test_formats[test_format_count] =
+{
+	FORMAT_F64,
+	FORMAT_F32,
+	FORMAT_S32,
+	FORMAT_S16,
+	FORMAT_S8,
+};
+
+snd_pcm_format_t get_equivalent_format(Format format)
+{
+	switch(format)
+	{
+		case FORMAT_U8:  return SND_PCM_FORMAT_U8;
+		case FORMAT_S8:  return SND_PCM_FORMAT_S8;
+		case FORMAT_U16: return SND_PCM_FORMAT_U16;
+		case FORMAT_S16: return SND_PCM_FORMAT_S16;
+		case FORMAT_U24: return SND_PCM_FORMAT_U24;
+		case FORMAT_S24: return SND_PCM_FORMAT_S24;
+		case FORMAT_U32: return SND_PCM_FORMAT_U32;
+		case FORMAT_S32: return SND_PCM_FORMAT_S32;
+		case FORMAT_F32: return SND_PCM_FORMAT_FLOAT;
+		case FORMAT_F64: return SND_PCM_FORMAT_FLOAT64;
+	}
+	return SND_PCM_FORMAT_UNKNOWN;
+}
+
+static int finalize_hw_params(snd_pcm_t* pcm_handle, snd_pcm_hw_params_t* hw_params, bool override, u64* frames)
+{
+	int status;
+
+	status = snd_pcm_hw_params(pcm_handle, hw_params);
+	if(status < 0)
+	{
+		return -1;
+	}
+
+	snd_pcm_uframes_t buffer_size;
+	status = snd_pcm_hw_params_get_buffer_size(hw_params, &buffer_size);
+	if(status < 0)
+	{
+		return -1;
+	}
+	if(!override && buffer_size != *frames * 2)
+	{
+		return -1;
+	}
+	*frames = buffer_size / 2;
+
+	return 0;
+}
+
+static int set_period_size(snd_pcm_t* pcm_handle, snd_pcm_hw_params_t* hw_params, bool override, u64* frames)
+{
+	int status;
+
+	snd_pcm_hw_params_t* hw_params_copy;
+	snd_pcm_hw_params_alloca(&hw_params_copy);
+	snd_pcm_hw_params_copy(hw_params_copy, hw_params);
+
+	if(!override)
+	{
+		return -1;
+	}
+
+	snd_pcm_uframes_t nearest_frames = *frames;
+	status = snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params_copy, &nearest_frames, nullptr);
+	if(status < 0)
+	{
+		return -1;
+	}
+
+	unsigned int periods = 2;
+	status = snd_pcm_hw_params_set_periods_near(pcm_handle, hw_params_copy, &periods, nullptr);
+	if(status < 0)
+	{
+		return -1;
+	}
+
+	return finalize_hw_params(pcm_handle, hw_params_copy, override, frames);
+}
+
+static int set_buffer_size(snd_pcm_t* pcm_handle, snd_pcm_hw_params_t* hw_params, bool override, u64* frames)
+{
+	int status;
+
+	snd_pcm_hw_params_t* hw_params_copy;
+	snd_pcm_hw_params_alloca(&hw_params_copy);
+	snd_pcm_hw_params_copy(hw_params_copy, hw_params);
+
+	if(!override)
+	{
+		return -1;
+	}
+
+	snd_pcm_uframes_t nearest_frames;
+	nearest_frames = *frames * 2;
+	status = snd_pcm_hw_params_set_buffer_size_near(pcm_handle, hw_params_copy, &nearest_frames);
+	if(status < 0)
+	{
+		return -1;
+	}
+
+	return finalize_hw_params(pcm_handle, hw_params_copy, override, frames);
+}
+
+static bool open_device(const char* name, DeviceDescription* description, snd_pcm_t** out_pcm_handle)
+{
+	int status;
+
+	snd_pcm_t* pcm_handle;
+	status = snd_pcm_open(&pcm_handle, name, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't open audio device \"%s\". %s", name, snd_strerror(status));
+		return false;
+	}
+	*out_pcm_handle = pcm_handle;
+
+	snd_pcm_hw_params_t* hw_params;
+	snd_pcm_hw_params_alloca(&hw_params);
+	status = snd_pcm_hw_params_any(pcm_handle, hw_params);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't get the hardware configuration. %s", snd_strerror(status));
+		return false;
+	}
+
+	status = snd_pcm_hw_params_set_access(pcm_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't set the hardware to interleaved access. %s", snd_strerror(status));
+		return false;
+	}
+
+	Format test_format;
+	status = -1;
+	for(int i = 0; status < 0 && i < test_format_count; ++i)
+	{
+		test_format = test_formats[i];
+		status = 0;
+		snd_pcm_format_t pcm_format = get_equivalent_format(test_format);
+		if(pcm_format == SND_PCM_FORMAT_UNKNOWN)
+		{
+			status = -1;
+		}
+		else
+		{
+			status = snd_pcm_hw_params_set_format(pcm_handle, hw_params, pcm_format);
+		}
+	}
+	if(status < 0)
+	{
+		LOG_ERROR("Failed to obtain a suitable hardware audio format.");
+		return false;
+	}
+	description->format = test_format;
+
+	unsigned int channels = description->channels;
+	status = snd_pcm_hw_params_set_channels(pcm_handle, hw_params, channels);
+	if(status < 0)
+	{
+		status = snd_pcm_hw_params_get_channels(hw_params, &channels);
+		if(status < 0)
+		{
+			LOG_ERROR("Couldn't set the channel count. %s", snd_strerror(status));
+			return false;
+		}
+		description->channels = channels;
+	}
+
+	unsigned int resample = 1;
+	status = snd_pcm_hw_params_set_rate_resample(pcm_handle, hw_params, resample);
+	if(status < 0)
+	{
+		LOG_ERROR("Failed to enable resampling. %s", snd_strerror(status));
+		return false;
+	}
+
+	unsigned int rate = description->sample_rate;
+	status = snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &rate, nullptr);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't set the sample rate. %s", snd_strerror(status));
+		return false;
+	}
+	if(rate != description->sample_rate)
+	{
+		LOG_ERROR("Couldn't obtain the desired sample rate for the device.");
+		return false;
+	}
+	description->sample_rate = rate;
+
+	if(set_period_size(pcm_handle, hw_params, false, &description->frames) < 0 && set_buffer_size(pcm_handle, hw_params, false, &description->frames) < 0)
+	{
+		if(set_period_size(pcm_handle, hw_params, true, &description->frames) < 0)
+		{
+			LOG_ERROR("Couldn't set the desired period size and buffer size.");
+			return false;
+		}
+	}
+
+	snd_pcm_sw_params_t* sw_params;
+	snd_pcm_sw_params_alloca(&sw_params);
+	status = snd_pcm_sw_params_current(pcm_handle, sw_params);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't obtain the software configuration. %s", snd_strerror(status));
+		return false;
+	}
+
+	status = snd_pcm_sw_params_set_avail_min(pcm_handle, sw_params, description->frames);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't set the minimum available samples. %s", snd_strerror(status));
+		return false;
+	}
+	status = snd_pcm_sw_params_set_start_threshold(pcm_handle, sw_params, 1);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't set the start threshold. %s", snd_strerror(status));
+		return false;
+	}
+	status = snd_pcm_sw_params(pcm_handle, sw_params);
+	if(status < 0)
+	{
+		LOG_ERROR("Couldn't set software audio parameters. %s", snd_strerror(status));
+		return false;
+	}
+
+	fill_remaining_device_description(description);
+
+	return true;
+}
+
+static void close_device(snd_pcm_t* pcm_handle)
+{
+	if(pcm_handle)
+	{
+		snd_pcm_drain(pcm_handle);
+		snd_pcm_close(pcm_handle);
+	}
+}
+
+namespace
+{
+	ConversionInfo conversion_info;
+	DeviceDescription device_description;
+	snd_pcm_t* pcm_handle;
+	pthread_t thread;
+	AtomicFlag quit;
+	float* mixed_samples;
+	void* devicebound_samples;
+	double time;
+}
+
+static void* run_mixer_thread(void* argument)
+{
+	static_cast<void>(argument);
+
+	device_description.channels = 2;
+	device_description.format = FORMAT_S16;
+	device_description.sample_rate = 44100;
+	device_description.frames = 1024;
+	fill_remaining_device_description(&device_description);
+	if(!open_device("default", &device_description, &pcm_handle))
+	{
+		LOG_ERROR("Failed to open audio device.");
+		// @Incomplete: probably should exit?
+	}
+
+	u64 samples = device_description.channels * device_description.frames;
+
+	// Setup mixing.
+	mixed_samples = ALLOCATE(float, samples);
+	devicebound_samples = ALLOCATE(u8, device_description.size);
+	fill_with_silence(mixed_samples, device_description.silence, samples);
+
+	conversion_info.channels = device_description.channels;
+	conversion_info.in.format = FORMAT_F32;
+	conversion_info.in.stride = conversion_info.channels;
+	conversion_info.out.format = device_description.format;
+	conversion_info.out.stride = conversion_info.channels;
+
+	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
+
+	while(atomic_flag_test_and_set(&quit))
+	{
+		generate_sine_samples(mixed_samples, device_description.frames, device_description.channels, device_description.sample_rate, time, 69, 0.25f);
+
+		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
+
+		int stream_ready = snd_pcm_wait(pcm_handle, 150);
+		if(!stream_ready)
+		{
+			LOG_ERROR("ALSA device waiting timed out!");
+		}
+
+		u8* buffer = static_cast<u8*>(devicebound_samples);
+		snd_pcm_uframes_t frames_left = device_description.frames;
+		while(frames_left > 0)
+		{
+			int frames_written = snd_pcm_writei(pcm_handle, buffer, frames_left);
+			if(frames_written < 0)
+			{
+				int status = frames_written;
+				if(status == -EAGAIN)
+				{
+					continue;
+				}
+				status = snd_pcm_recover(pcm_handle, status, 0);
+				if(status < 0)
+				{
+					break;
+				}
+				continue;
+			}
+			buffer += frames_written * frame_size;
+			frames_left -= frames_written;
+		}
+
+		double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
+		time += delta_time;
+	}
+
+	close_device(pcm_handle);
+	SAFE_DEALLOCATE(mixed_samples);
+	SAFE_DEALLOCATE(devicebound_samples);
+
+	LOG_DEBUG("Audio thread shut down.");
+
+	return nullptr;
+}
+
+bool system_startup()
+{
+	atomic_flag_test_and_set(&quit);
+	int result = pthread_create(&thread, nullptr, run_mixer_thread, nullptr);
+	return result == 0;
+}
+
+void system_shutdown()
+{
+	// Signal the mixer thread to quit and wait here for it to finish.
+	atomic_flag_clear(&quit);
+	pthread_join(thread, nullptr);
+}
+
+} // namespace audio
 
 // Platform Main Functions......................................................
 
@@ -4104,6 +4699,12 @@ static bool main_create()
 	}
 	render::resize_viewport(window_width, window_height);
 
+	bool started = audio::system_startup();
+	if(!started)
+	{
+		LOG_ERROR("Audio system failed startup.");
+		return false;
+	}
 	game_create();
 
 	return true;
@@ -4112,6 +4713,7 @@ static bool main_create()
 static void main_destroy()
 {
 	game_destroy();
+	audio::system_shutdown();
 	render::system_terminate(functions_loaded);
 
 	if(visual_info)
