@@ -111,9 +111,10 @@ static int string_size(const char* string)
 	return s - string;
 }
 
-#define TAU       6.28318530717958647692f
-#define PI        3.14159265358979323846f
-#define PI_OVER_2 1.57079632679489661923f
+
+const float tau = 6.28318530717958647692f;
+const float pi = 3.14159265358979323846f;
+const float pi_over_2 = 1.57079632679489661923f;
 
 // Clock Function Declarations..................................................
 
@@ -2645,7 +2646,7 @@ void add_line(Vector3 start, Vector3 end, Vector3 colour)
 // greatest error when the ratio of a to b is largest.
 static float ellipse_perimeter(float a, float b)
 {
-	return TAU * sqrt(((a * a) + (b * b)) / 2.0f);
+	return tau * sqrt(((a * a) + (b * b)) / 2.0f);
 }
 
 static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 radius, Vector3 colour)
@@ -2662,7 +2663,7 @@ static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 rad
 	for(int i = 1; i <= segments; ++i)
 	{
 		Vector3 prior = position;
-		float t = (static_cast<float>(i) / segments) * TAU;
+		float t = (static_cast<float>(i) / segments) * tau;
 		point = {a * cos(t), b * sin(t), 0.0f};
 		position = center + (orientation * point);
 		add_line(prior, position, colour);
@@ -2671,8 +2672,8 @@ static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 rad
 
 static void add_wire_ellipsoid(Vector3 center, Vector3 radius, Vector3 colour)
 {
-	Quaternion q0 = axis_angle_rotation(vector3_unit_y, +PI_OVER_2);
-	Quaternion q1 = axis_angle_rotation(vector3_unit_x, -PI_OVER_2);
+	Quaternion q0 = axis_angle_rotation(vector3_unit_y, +pi_over_2);
+	Quaternion q1 = axis_angle_rotation(vector3_unit_x, -pi_over_2);
 	Quaternion q2 = quaternion_identity;
 	add_wire_ellipse(center, q0, {radius.z, radius.y}, colour);
 	add_wire_ellipse(center, q1, {radius.x, radius.z}, colour);
@@ -3307,11 +3308,11 @@ void object_generate_sky(Object* object)
 	for(int i = 0; i < parallels; ++i)
 	{
 		float step = (i + 1) / static_cast<float>(rings);
-		float theta = step * PI;
+		float theta = step * pi;
 		Vector3 ring_colour = lerp(top_colour, bottom_colour, step);
 		for(int j = 0; j < meridians; ++j)
 		{
-			float phi = (j + 1) / static_cast<float>(meridians) * TAU;
+			float phi = (j + 1) / static_cast<float>(meridians) * tau;
 			float x = radius * sin(theta) * cos(phi);
 			float y = radius * sin(theta) * sin(phi);
 			float z = radius * cos(theta);
@@ -3534,7 +3535,7 @@ static void system_terminate(bool functions_loaded)
 
 static void resize_viewport(int width, int height)
 {
-	const float fov = PI_OVER_2 * (2.0f / 3.0f);
+	const float fov = pi_over_2 * (2.0f / 3.0f);
 	projection = perspective_projection_matrix(fov, width, height, near_plane, far_plane);
 	sky_projection = perspective_projection_matrix(fov, width, height, 0.001f, 1.0f);
 	glViewport(0, 0, width, height);
@@ -3752,12 +3753,6 @@ static void fill_remaining_device_description(DeviceDescription* description)
 	description->size = format_byte_count(description->format) * description->channels * description->frames;
 }
 
-struct Int24
-{
-	s32 x;
-};
-typedef Int24 s24; // A 32-bit value pretending to be 24-bits
-
 inline s8 convert_to_s8(float value)
 {
 	return value * 127.5f - 0.5f;
@@ -3766,11 +3761,6 @@ inline s8 convert_to_s8(float value)
 inline s16 convert_to_s16(float value)
 {
 	return value * 32767.5f - 0.5f;
-}
-
-inline s24 convert_to_s24(float value)
-{
-	return {static_cast<s32>(value * 8388607.5f - 0.5f)};
 }
 
 inline s32 convert_to_s32(float value)
@@ -3814,7 +3804,6 @@ struct ConversionInfo
 
 DEFINE_CONVERT_BUFFER(s8);
 DEFINE_CONVERT_BUFFER(s16);
-DEFINE_CONVERT_BUFFER(s24);
 DEFINE_CONVERT_BUFFER(s32);
 DEFINE_CONVERT_BUFFER(float);
 DEFINE_CONVERT_BUFFER(double);
@@ -3830,9 +3819,6 @@ static void format_buffer_from_float(float* in_samples, void* out_samples, int f
 			break;
 		case FORMAT_S16:
 			convert_buffer_to_s16(in_samples, static_cast<s16*>(out_samples), frames, info);
-			break;
-		case FORMAT_S24:
-			convert_buffer_to_s24(in_samples, static_cast<s24*>(out_samples), frames, info);
 			break;
 		case FORMAT_S32:
 			convert_buffer_to_s32(in_samples, static_cast<s32*>(out_samples), frames, info);
@@ -3851,24 +3837,96 @@ static float pitch_to_frequency(int pitch)
 	return 440.0f * pow(2.0f, static_cast<float>(pitch - 69) / 12.0f);
 }
 
-static void generate_sine_samples(void* samples, int count, int channels, u32 sample_rate, double time, int pitch, float amplitude)
-{
-	float frequency = pitch_to_frequency(pitch);
-	float theta = TAU * frequency;
-	float* out = static_cast<float*>(samples);
-	for(int i = 0; i < count; ++i)
-	{
-		for(int j = 0; j < channels; ++j)
-		{
-			float t = static_cast<float>(i) / sample_rate + time;
-			out[i * channels + j] = amplitude * sin(theta * t);
-		}
-	}
-}
-
 static void fill_with_silence(float* samples, u8 silence, u64 count)
 {
 	memset(samples, silence, sizeof(float) * count);
+}
+
+// Envelope Functions...........................................................
+
+// Attack-Decay-Sustain-Release envelope
+struct ADSR
+{
+	enum class State
+	{
+		Neutral,
+		Attack,
+		Decay,
+		Sustain,
+		Release,
+	};
+
+	State state;
+	float prior;
+	float sustain;
+	float attack_base, attack_coef;
+	float decay_base, decay_coef;
+	float release_base, release_coef;
+};
+
+static void envelope_reset(ADSR* envelope)
+{
+	envelope->state = ADSR::State::Neutral;
+	envelope->prior = 0.0f;
+}
+
+static float envelope_apply(ADSR* envelope)
+{
+	float result;
+	switch(envelope->state)
+	{
+        case ADSR::State::Attack:
+        {
+        	result = envelope->attack_base + envelope->prior * envelope->attack_coef;
+            if(result >= 1.0f)
+            {
+            	result = 1.0f;
+                envelope->state = ADSR::State::Decay;
+            }
+            break;
+        }
+        case ADSR::State::Decay:
+        {
+        	result = envelope->decay_base + envelope->prior * envelope->decay_coef;
+            if(result <= envelope->sustain)
+            {
+            	result = envelope->sustain;
+                envelope->state = ADSR::State::Sustain;
+            }
+            break;
+        }
+        case ADSR::State::Release:
+        {
+        	result = envelope->release_base + envelope->prior * envelope->release_coef;
+            if(result <= 0.0f)
+            {
+            	result = 0.0f;
+                envelope->state = ADSR::State::Neutral;
+            }
+            break;
+        }
+        case ADSR::State::Sustain:
+        case ADSR::State::Neutral:
+        default:
+        {
+        	result = envelope->prior;
+        	break;
+        }
+	}
+	envelope->prior = result;
+	return result;
+}
+
+static void envelope_gate(ADSR* envelope, bool gate)
+{
+	if(gate)
+	{
+		envelope->state = ADSR::State::Attack;
+	}
+	else if(envelope->state != ADSR::State::Neutral)
+	{
+		envelope->state = ADSR::State::Release;
+	}
 }
 
 } // namespace audio
@@ -4250,6 +4308,8 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 
 namespace audio {
 
+// Device Functions.............................................................
+
 static const int test_format_count = 5;
 
 static Format test_formats[test_format_count] =
@@ -4496,6 +4556,8 @@ static void close_device(snd_pcm_t* pcm_handle)
 	}
 }
 
+// Audio System Functions.......................................................
+
 namespace
 {
 	ConversionInfo conversion_info;
@@ -4528,7 +4590,7 @@ static void* run_mixer_thread(void* argument)
 	// Setup mixing.
 	mixed_samples = ALLOCATE(float, samples);
 	devicebound_samples = ALLOCATE(u8, device_description.size);
-	fill_with_silence(mixed_samples, device_description.silence, samples);
+	fill_with_silence(mixed_samples, 0, samples);
 
 	conversion_info.channels = device_description.channels;
 	conversion_info.in.format = FORMAT_F32;
@@ -4537,10 +4599,42 @@ static void* run_mixer_thread(void* argument)
 	conversion_info.out.stride = conversion_info.channels;
 
 	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
+	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
+
+	ADSR envelope;
+	envelope_reset(&envelope);
+	envelope.sustain = 0.25f;
+	envelope.attack_base = 0.01f;
+	envelope.attack_coef = 1.0f;
+	envelope.decay_base = -0.00001f;
+	envelope.decay_coef = 1.0f;
+	envelope.release_base = -0.01f;
+	envelope.release_coef = 1.0f;
+
+	double note_spacing = 0.5;
+	static double note_start = 0.0;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
-		generate_sine_samples(mixed_samples, device_description.frames, device_description.channels, device_description.sample_rate, time, 69, 0.25f);
+		// Generate samples.
+		int pitch = 69;
+		float theta = tau * pitch_to_frequency(pitch);
+		for(int i = 0; i < device_description.frames; ++i)
+		{
+			float amplitude = envelope_apply(&envelope);
+			float t = static_cast<float>(i) / device_description.sample_rate + time;
+			if(t > note_start + note_spacing)
+			{
+				static bool flip = false;
+				flip = !flip;
+				envelope_gate(&envelope, flip);
+				note_start += note_spacing;
+			}
+			for(int j = 0; j < device_description.channels; ++j)
+			{
+				mixed_samples[i * device_description.channels + j] = amplitude * sin(theta * t);
+			}
+		}
 
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
@@ -4573,7 +4667,6 @@ static void* run_mixer_thread(void* argument)
 			frames_left -= frames_written;
 		}
 
-		double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
 		time += delta_time;
 	}
 
