@@ -3842,6 +3842,60 @@ static void fill_with_silence(float* samples, u8 silence, u64 count)
 	memset(samples, silence, sizeof(float) * count);
 }
 
+// ┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐
+// └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └
+float square_wave(float x)
+{
+	return 4.0f * floor(x) - 2.0f * floor(2.0f * x) + 1.0f;
+}
+
+// ┐  ┌┐  ┌┐  ┌┐  ┌┐  ┌┐  ┌┐  ┌┐
+// └──┘└──┘└──┘└──┘└──┘└──┘└──┘└
+float pulse_wave(float x, float t)
+{
+	return 2.0f * static_cast<float>(signbit(x - floor(x) - t)) - 1.0f;
+}
+
+// ╱│ ╱│ ╱│ ╱│ ╱│ ╱│ ╱│ ╱│ ╱│ ╱│
+//  │╱ │╱ │╱ │╱ │╱ │╱ │╱ │╱ │╱
+float sawtooth_wave(float x)
+{
+	return 2.0f * (x - floor(0.5f + x));
+}
+
+// ╲  ╱╲  ╱╲  ╱╲  ╱╲  ╱╲  ╱╲  ╱╲
+//  ╲╱  ╲╱  ╲╱  ╲╱  ╲╱  ╲╱  ╲╱
+float triangle_wave(float x)
+{
+	return abs(4.0f * fmod(x, 1.0f) - 2.0f) - 1.0f;
+}
+
+float rectified_sin(float x)
+{
+	return 2.0f * abs(sin(x / 2.0f)) - 1.0f;
+}
+
+float cycloid(float x)
+{
+	// Use slightly curtate cycloid parameters, so there's no non-differentiable
+	// cusps.
+	const float a = 1.0f;
+	const float b = 0.95f;
+	// Approximates parameter t given the value x by applying the Newton-Raphson
+	// method to the equation f(t) = at - bsin(t) - x.
+	float t = x;
+	for(int i = 0; i < 5; ++i)
+	{
+		float ft = (a * t) - (b * sin(t)) - x;
+		float dft = a - (b * cos(t));
+		t -= ft / dft;
+	}
+	// Now that t is known, insert it into the parametric equation to get y,
+	// then remap y to the range [-1,1].
+	float y = a - (b * cos(t));
+	return y / a - 1.0f;
+}
+
 // Envelope Functions...........................................................
 
 // Attack-Decay-Sustain-Release envelope
@@ -3927,6 +3981,22 @@ static void envelope_gate(ADSR* envelope, bool gate)
 	{
 		envelope->state = ADSR::State::Release;
 	}
+}
+
+// Filter Functions.............................................................
+
+// Low-Pass Filter
+struct LPF
+{
+	float beta;
+	float prior;
+};
+
+static float filter_apply(LPF* filter, float sample)
+{
+	float result = filter->prior - filter->beta * (filter->prior - sample);
+	filter->prior = result;
+	return result;
 }
 
 } // namespace audio
@@ -4604,13 +4674,18 @@ static void* run_mixer_thread(void* argument)
 	ADSR envelope;
 	envelope_reset(&envelope);
 	envelope.sustain = 0.25f;
-	envelope.attack_base = 0.01f;
+	envelope.attack_base = 441.0f / device_description.sample_rate;
 	envelope.attack_coef = 1.0f;
-	envelope.decay_base = -0.00001f;
+	envelope.decay_base = -0.441f / device_description.sample_rate;
 	envelope.decay_coef = 1.0f;
-	envelope.release_base = -0.01f;
+	envelope.release_base = -441.0f / device_description.sample_rate;
 	envelope.release_coef = 1.0f;
 
+	LPF filter;
+	filter.beta = 0.1f;
+	filter.prior = 0.0f;
+
+	double volume = 0.25;
 	double note_spacing = 0.5;
 	static double note_start = 0.0;
 
@@ -4618,8 +4693,9 @@ static void* run_mixer_thread(void* argument)
 	{
 		// Generate samples.
 		int pitch = 69;
-		float theta = tau * pitch_to_frequency(pitch);
-		for(int i = 0; i < device_description.frames; ++i)
+		float theta = pitch_to_frequency(pitch);
+		int frames = device_description.frames;
+		for(int i = 0; i < frames; ++i)
 		{
 			float amplitude = envelope_apply(&envelope);
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
@@ -4630,9 +4706,10 @@ static void* run_mixer_thread(void* argument)
 				envelope_gate(&envelope, flip);
 				note_start += note_spacing;
 			}
+			float value = volume * amplitude * filter_apply(&filter, sawtooth_wave(theta * t));
 			for(int j = 0; j < device_description.channels; ++j)
 			{
-				mixed_samples[i * device_description.channels + j] = amplitude * sin(theta * t);
+				mixed_samples[i * device_description.channels + j] = value;
 			}
 		}
 
