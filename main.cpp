@@ -3999,6 +3999,100 @@ static float filter_apply(LPF* filter, float sample)
 	return result;
 }
 
+// Track Functions..............................................................
+
+#define C  0
+#define CS 1
+#define D  2
+#define DS 3
+#define E  4
+#define F  5
+#define FS 6
+#define G  7
+#define GS 8
+#define A  9
+#define AS 10
+#define B  11
+
+namespace
+{
+	int pentatonic_major[] = {4, 2, 4, 7, 9};
+	int pentatonic_minor[] = {4, 3, 5, 7, 9};
+}
+
+#undef C
+#undef CS
+#undef D
+#undef DS
+#undef E
+#undef F
+#undef FS
+#undef G
+#undef GS
+#undef A
+#undef AS
+#undef B
+
+struct Track
+{
+	struct Note
+	{
+		double start;
+		double end;
+		int pitch;
+	};
+	Note notes[16];
+	int notes_count;
+	int index;
+	bool ended;
+};
+
+void track_generate(Track* track)
+{
+	double note_spacing = 0.3;
+	double note_length = 0.1;
+	track->notes_count = 8;
+	for(int i = 0; i < track->notes_count; ++i)
+	{
+		int degrees = pentatonic_major[0];
+		int degree = arandom::int_range(0, degrees - 1);
+		int pitch_class = pentatonic_major[degree + 1];
+
+		int octave = arandom::int_range(0, 10);
+
+		double note_start = i * note_spacing;
+
+		Track::Note* note = track->notes + i;
+		note->pitch = 12 * octave + pitch_class;
+		note->start = note_start;
+		note->end = note_start + note_length;
+	}
+	track->index = 0;
+	track->ended = true;
+}
+
+void track_render(Track* track, ADSR* envelope, float* frequency, double time)
+{
+	for(int i = track->index; i < track->notes_count; ++i)
+	{
+		Track::Note note = track->notes[i];
+		if(note.start <= time && track->ended)
+		{
+			envelope_gate(envelope, true);
+			*frequency = pitch_to_frequency(note.pitch);
+			track->ended = false;
+			break;
+		}
+		else if(note.end <= time && !track->ended)
+		{
+			envelope_gate(envelope, false);
+			track->index = i + 1;
+			track->ended = true;
+			break;
+		}
+	}
+}
+
 } // namespace audio
 
 // Audio Function Declarations..................................................
@@ -4685,28 +4779,29 @@ static void* run_mixer_thread(void* argument)
 	filter.beta = 0.1f;
 	filter.prior = 0.0f;
 
-	double volume = 0.25;
-	double note_spacing = 0.5;
-	static double note_start = 0.0;
+	Track track;
+	track_generate(&track);
+
+	int pitch = 69;
+	float theta = pitch_to_frequency(pitch);
+	double volume = 0.5;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
 		// Generate samples.
-		int pitch = 69;
-		float theta = pitch_to_frequency(pitch);
 		int frames = device_description.frames;
 		for(int i = 0; i < frames; ++i)
 		{
-			float amplitude = envelope_apply(&envelope);
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
-			if(t > note_start + note_spacing)
-			{
-				static bool flip = false;
-				flip = !flip;
-				envelope_gate(&envelope, flip);
-				note_start += note_spacing;
-			}
-			float value = volume * amplitude * filter_apply(&filter, sawtooth_wave(theta * t));
+			track_render(&track, &envelope, &theta, t);
+			float amplitude = envelope_apply(&envelope);
+#if 0
+			// frequency modulation example
+			float theta2 = theta / 2.0f;
+			float mi = 220.0f / theta2;
+			float fm = sin(tau * theta * t - mi * cos(tau * theta2 * t));
+#endif
+			float value = volume * amplitude * filter_apply(&filter, pulse_wave(theta * t, 0.3f));
 			for(int j = 0; j < device_description.channels; ++j)
 			{
 				mixed_samples[i * device_description.channels + j] = value;
