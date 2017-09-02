@@ -3999,6 +3999,72 @@ static float filter_apply(LPF* filter, float sample)
 	return result;
 }
 
+// All-Pass Filter
+struct APF
+{
+	float buffer[4096];
+	int buffer_capacity;
+	int head;
+	int tail;
+	float gain;
+};
+
+void apf_create(APF* filter, float gain)
+{
+	filter->buffer_capacity = 4096;
+	filter->head = 0;
+	filter->tail = 0;
+	filter->gain = gain;
+}
+
+static void apf_record(APF* filter, float sample)
+{
+	int next = (filter->head + 1) % filter->buffer_capacity;
+	ASSERT(next != filter->tail);
+	if(next != filter->tail)
+	{
+		filter->buffer[filter->head] = sample;
+		filter->head = next;
+	}
+}
+
+static float apf_sample(APF* filter)
+{
+	float result;
+	if(filter->head == filter->tail)
+	{
+		result = 0.0f;
+	}
+	else
+	{
+		result = filter->buffer[filter->tail];
+		filter->tail = (filter->tail + 1) % filter->buffer_capacity;
+	}
+	return result;
+}
+
+static bool apf_is_buffer_full(APF* filter)
+{
+	return (filter->head + 1) % filter->buffer_capacity == filter->tail;
+}
+
+static float apf_apply(APF* filter, float sample)
+{
+	float prior;
+	if(apf_is_buffer_full(filter))
+	{
+		prior = apf_sample(filter);
+	}
+	else
+	{
+		prior = 0.0;
+	}
+
+	float feedback = sample - (filter->gain * prior);
+	apf_record(filter, feedback);
+	return (filter->gain * feedback) + prior;
+}
+
 // Track Functions..............................................................
 
 #define C  0
@@ -4779,6 +4845,9 @@ static void* run_mixer_thread(void* argument)
 	filter.beta = 0.1f;
 	filter.prior = 0.0f;
 
+	APF reverb;
+	apf_create(&reverb, 0.2f);
+
 	Track track;
 	track_generate(&track);
 
@@ -4795,13 +4864,7 @@ static void* run_mixer_thread(void* argument)
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			track_render(&track, &envelope, &theta, t);
 			float amplitude = envelope_apply(&envelope);
-#if 0
-			// frequency modulation example
-			float theta2 = theta / 2.0f;
-			float mi = 220.0f / theta2;
-			float fm = sin(tau * theta * t - mi * cos(tau * theta2 * t));
-#endif
-			float value = volume * amplitude * filter_apply(&filter, pulse_wave(theta * t, 0.3f));
+			float value = volume * apf_apply(&reverb, amplitude * filter_apply(&filter, pulse_wave(theta * t, 0.3f)));
 			for(int j = 0; j < device_description.channels; ++j)
 			{
 				mixed_samples[i * device_description.channels + j] = value;
