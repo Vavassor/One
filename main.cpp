@@ -7,6 +7,7 @@ This software is distributed without any warranty.
 You should have received a copy of the CC0 Public Domain Dedication along with
 this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 
+
 Build Instructions..............................................................
 
 For playing, use these commands:
@@ -24,6 +25,59 @@ cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib /link /debu
 
 -for Linux
 g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpthread -lasound
+
+
+Table Of Contents...............................................................
+
+1. Utility and Math
+  §1.1 Globally-Useful Things
+  §1.2 Clock Declarations
+  §1.3 Logging Declarations
+  §1.4 Immediate Mode Drawing Declarations
+  §1.5 Random Number Generation
+  §1.6 Vectors
+  §1.7 Quaternions
+  §1.8 Matrices
+
+2. Physics
+  §2.1 Geometry Functions
+  §2.2 Bounding Volume Hierarchy
+  §2.3 Bounding Interval Hierarchy
+  §2.4 Collision Functions
+  §2.5 Frustum Functions
+
+3. Video
+  §3.1 OpenGL Function and Type Declarations
+  §3.2 Shader Functions
+  §3.3 Floor Functions
+  §3.4 Immediate Mode Functions
+  §3.5 Render System
+    §3.5.1 Shader Sources
+
+4. Audio
+  §4.1 Format Conversion
+  §4.2 Oscillators
+  §4.3 Envelopes
+  §4.4 Filters
+  §4.5 Track Functions
+  §4.6 Audio System Declarations
+
+5. Game
+  §5.1 Game Functions
+
+6. OpenGL Function Loading
+
+7. Compiler-Specific Implementations
+  §7.1 Atomic Functions
+
+8. Platform-Specific Implementations
+  §8.1 Logging Functions
+  §8.2 Clock Functions
+  §8.3 Audio Functions
+    §8.3.1 Device
+    §8.3.2 Audio System Functions
+  §8.4 Platform Main Functions
+
 */
 
 #if defined(__linux__)
@@ -42,7 +96,7 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpth
 #include <cstring>
 #include <stdint.h>
 
-// Useful Things................................................................
+// §1.1 Globally-Useful Things..................................................
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -111,12 +165,11 @@ static int string_size(const char* string)
 	return s - string;
 }
 
-
 const float tau = 6.28318530717958647692f;
 const float pi = 3.14159265358979323846f;
 const float pi_over_2 = 1.57079632679489661923f;
 
-// Clock Function Declarations..................................................
+// §1.2 Clock Declarations......................................................
 
 struct Clock
 {
@@ -127,7 +180,7 @@ void initialise_clock(Clock* clock);
 double get_time(Clock* clock);
 void go_to_sleep(Clock* clock, double amount_to_sleep);
 
-// Logging Function Declarations................................................
+// §1.3 Logging Declarations....................................................
 
 enum class LogLevel
 {
@@ -147,7 +200,7 @@ void log_add_message(LogLevel level, const char* format, ...);
 	log_add_message(LogLevel::Debug, format, ##__VA_ARGS__)
 #endif
 
-// Immediate Mode Drawing Declarations..........................................
+// §1.4 Immediate Mode Drawing Declarations.....................................
 
 struct Vector3;
 struct AABB;
@@ -162,7 +215,7 @@ void add_triangle(Triangle* triangle, Vector3 colour);
 
 } // namespace immediate
 
-// Random Number Generation.....................................................
+// §1.5 Random Number Generation................................................
 
 namespace arandom {
 
@@ -249,7 +302,7 @@ float float_range(float min, float max)
 
 } // namespace arandom
 
-// Vector Functions.............................................................
+// §1.6 Vectors.................................................................
 
 #include <cmath>
 #include <cfloat>
@@ -438,7 +491,7 @@ Vector3 reciprocal(Vector3 v)
 	return result;
 }
 
-// Quaternion Functions.........................................................
+// §1.7 Quaternions.............................................................
 
 static bool float_almost_one(float x)
 {
@@ -482,7 +535,7 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 	return result;
 }
 
-// Matrix Functions.............................................................
+// §1.8 Matrices................................................................
 
 struct Matrix4
 {
@@ -746,7 +799,7 @@ Matrix4 inverse_transform(const Matrix4& m)
 	}};
 }
 
-// Geometry Functions...........................................................
+// §2.1 Geometry Functions......................................................
 
 struct Triangle
 {
@@ -940,6 +993,7 @@ static bool intersect_aabb_ray(AABB aabb, Ray ray)
 	return th > fmax(tl, 0.0f);
 }
 
+// §2.2 Bounding Volume Hierarchy...............................................
 namespace bvh {
 
 struct Node
@@ -1341,7 +1395,7 @@ s32 update_node(Tree* tree, s32 index, AABB aabb, void* user_data)
 
 } // namespace bvh
 
-// Bounding Interval Hierarchy Functions........................................
+// §2.3 Bounding Interval Hierarchy.............................................
 namespace bih {
 
 enum Flag
@@ -1660,7 +1714,7 @@ bool intersect_tree(Tree* tree, Ray ray, IntersectionResult* result)
 
 } // namespace bih
 
-// Collision Functions..........................................................
+// §2.4 Collision Functions.....................................................
 
 struct Collider
 {
@@ -2051,7 +2105,7 @@ static void collide_ray_triangle(Triangle* triangle, Ray* ray, CollisionPacket* 
 	}
 }
 
-// Frustum Functions............................................................
+// §2.4 Frustum Functions.......................................................
 
 struct Frustum
 {
@@ -2119,7 +2173,7 @@ bool intersect_aabb_frustum(Frustum* frustum, AABB* aabb)
 	return true;
 }
 
-// OpenGL Function and Type Declarations........................................
+// §3.1 OpenGL Function and Type Declarations...................................
 
 #if defined(__gl_h_) || defined(__GL_H__)
 #error gl.h included before this section
@@ -2311,7 +2365,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 #define glGenSamplers p_glGenSamplers
 #define glSamplerParameteri p_glSamplerParameteri
 
-// Shader Functions.............................................................
+// §3.2 Shader Functions........................................................
 
 static GLuint load_shader(GLenum type, const char* source)
 {
@@ -2419,7 +2473,7 @@ static GLuint load_shader_program(const char* vertex_source, const char* fragmen
 	return program;
 }
 
-// Floor Functions..............................................................
+// §3.3 Floor Functions.........................................................
 
 struct VertexPC
 {
@@ -2529,7 +2583,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 	return true;
 }
 
-// Immediate Mode Functions.....................................................
+// §3.4 Immediate Mode Functions................................................
 
 namespace immediate {
 
@@ -2865,9 +2919,11 @@ static void draw_bih_tree(bih::Tree* tree, int target_depth)
 	immediate::draw();
 }
 
-// Render System Functions......................................................
+// §3.5 Render System...........................................................
 
 namespace render {
+
+// §3.5.1 Shader Sources........................................................
 
 const char* default_vertex_source = R"(
 #version 330
@@ -3753,6 +3809,18 @@ static void fill_remaining_device_description(DeviceDescription* description)
 	description->size = format_byte_count(description->format) * description->channels * description->frames;
 }
 
+static void fill_with_silence(float* samples, u8 silence, u64 count)
+{
+	memset(samples, silence, sizeof(float) * count);
+}
+
+static float pitch_to_frequency(int pitch)
+{
+	return 440.0f * pow(2.0f, static_cast<float>(pitch - 69) / 12.0f);
+}
+
+// §4.1 Format Conversion.......................................................
+
 inline s8 convert_to_s8(float value)
 {
 	return value * 127.5f - 0.5f;
@@ -3832,15 +3900,7 @@ static void format_buffer_from_float(float* in_samples, void* out_samples, int f
 	}
 }
 
-static float pitch_to_frequency(int pitch)
-{
-	return 440.0f * pow(2.0f, static_cast<float>(pitch - 69) / 12.0f);
-}
-
-static void fill_with_silence(float* samples, u8 silence, u64 count)
-{
-	memset(samples, silence, sizeof(float) * count);
-}
+// §4.2 Oscillators.............................................................
 
 // ┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐
 // └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └
@@ -3896,7 +3956,7 @@ float cycloid(float x)
 	return y / a - 1.0f;
 }
 
-// Envelope Functions...........................................................
+// §4.3 Envelopes...............................................................
 
 // Attack-Decay-Sustain-Release envelope
 struct ADSR
@@ -3983,7 +4043,7 @@ static void envelope_gate(ADSR* envelope, bool gate)
 	}
 }
 
-// Filter Functions.............................................................
+// §4.4 Filters.................................................................
 
 // Low-Pass Filter
 struct LPF
@@ -4065,7 +4125,7 @@ static float apf_apply(APF* filter, float sample)
 	return (filter->gain * feedback) + prior;
 }
 
-// Track Functions..............................................................
+// §4.5 Track Functions.........................................................
 
 #define C  0
 #define CS 1
@@ -4161,7 +4221,7 @@ void track_render(Track* track, ADSR* envelope, float* frequency, double time)
 
 } // namespace audio
 
-// Audio Function Declarations..................................................
+// §4.6 Audio System Declarations...............................................
 
 namespace audio {
 
@@ -4170,7 +4230,7 @@ void system_shutdown();
 
 } // namespace audio
 
-// Main Functions...............................................................
+// §5.1 Game Functions..........................................................
 
 enum class UserKey {Space, Left, Up, Right, Down};
 
@@ -4278,7 +4338,7 @@ static void main_update()
 	render::system_update(position, &world);
 }
 
-// OpenGL Function Loading......................................................
+// 6. OpenGL Function Loading...................................................
 
 #if defined(OS_LINUX)
 #include <GL/glx.h>
@@ -4429,9 +4489,9 @@ static bool ogl_load_functions()
 	return failure_count == 0;
 }
 
-// Compiler-Specific Implementations============================================
+// 7. Compiler-Specific Implementations=========================================
 
-// Atomic Functions.............................................................
+// §7.1 Atomic Functions........................................................
 
 #if defined(_MSC_VER)
 #define COMPILER_MSVC
@@ -4477,11 +4537,11 @@ void atomic_flag_clear(AtomicFlag* flag)
 
 #endif
 
-// Platform-Specific Implementations============================================
+// 8. Platform-Specific Implementations=========================================
 
 #if defined(OS_LINUX)
 
-// Logging Functions............................................................
+// §8.1 Logging Functions.......................................................
 
 void log_add_message(LogLevel level, const char* format, ...)
 {
@@ -4502,7 +4562,7 @@ void log_add_message(LogLevel level, const char* format, ...)
 	fputc('\n', stream);
 }
 
-// Clock Functions..............................................................
+// §8.2 Clock Functions.........................................................
 
 #include <ctime>
 
@@ -4530,7 +4590,7 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 	clock_nanosleep(CLOCK_MONOTONIC, 0, &requested_time, nullptr);
 }
 
-// Audio Functions..............................................................
+// §8.3 Audio Functions.........................................................
 
 #include <alsa/asoundlib.h>
 
@@ -4538,7 +4598,7 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 
 namespace audio {
 
-// Device Functions.............................................................
+// §8.3.1 Device................................................................
 
 static const int test_format_count = 5;
 
@@ -4786,7 +4846,7 @@ static void close_device(snd_pcm_t* pcm_handle)
 	}
 }
 
-// Audio System Functions.......................................................
+// §8.3.2 Audio System Functions................................................
 
 namespace
 {
@@ -4930,7 +4990,7 @@ void system_shutdown()
 
 } // namespace audio
 
-// Platform Main Functions......................................................
+// §8.4 Platform Main Functions.................................................
 
 #include <X11/X.h>
 #include <X11/Xlib.h>
@@ -5137,7 +5197,7 @@ int main(int argc, char** argv)
 
 #elif defined(OS_WINDOWS)
 
-// Logging Functions............................................................
+// §8.1 Logging Functions.......................................................
 
 void log_add_message(LogLevel level, const char* format, ...)
 {
@@ -5163,7 +5223,7 @@ void log_add_message(LogLevel level, const char* format, ...)
 	OutputDebugStringA(buffer);
 }
 
-// Clock Functions..............................................................
+// §8.2 Clock Functions.........................................................
 
 void initialise_clock(Clock* clock)
 {
@@ -5185,7 +5245,7 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
     Sleep(milliseconds);
 }
 
-// Platform Main Functions......................................................
+// §8.4 Platform Main Functions.................................................
 
 #include <ctime>
 
