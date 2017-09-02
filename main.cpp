@@ -59,8 +59,9 @@ Table Of Contents...............................................................
   §4.2 Oscillators
   §4.3 Envelopes
   §4.4 Filters
-  §4.5 Track Functions
-  §4.6 Audio System Declarations
+  §4.5 Effects
+  §4.6 Track Functions
+  §4.7 Audio System Declarations
 
 5. Game
   §5.1 Game Functions
@@ -4125,7 +4126,65 @@ static float apf_apply(APF* filter, float sample)
 	return (filter->gain * feedback) + prior;
 }
 
-// §4.5 Track Functions.........................................................
+// §4.5 Effects.................................................................
+
+float overdrive(float sample, float factor)
+{
+	return clamp(factor * sample, -1.0f, 1.0f);
+}
+
+struct Bitcrush
+{
+	float buffer[64];
+	float prior;
+	int buffer_count;
+	int depth;
+	int downsampling;
+};
+
+void bitcrush_create(Bitcrush* bitcrush)
+{
+	bitcrush->buffer_count = 0;
+	bitcrush->prior = 0.0f;
+}
+
+float bitcrush_apply(Bitcrush* bitcrush, float sample)
+{
+	int samples_to_buffer = MIN(MAX(bitcrush->downsampling, 1), 64);
+	if(bitcrush->buffer_count < samples_to_buffer)
+	{
+		bitcrush->buffer[bitcrush->buffer_count] = sample;
+		bitcrush->buffer_count += 1;
+		return bitcrush->prior;
+	}
+
+	float sum = 0.0f;
+	for(int i = 0; i < samples_to_buffer; ++i)
+	{
+		sum += bitcrush->buffer[i];
+	}
+	float average = sum / samples_to_buffer;
+
+	float value;
+	if(bitcrush->depth < 32)
+	{
+		int d = MAX(0, bitcrush->depth);
+		s32 s = convert_to_s32(average);
+		s &= ~(0xffffffff >> d);
+		value = 2.0f / 4294967295.0f * (s + 0.5f);
+	}
+	else
+	{
+		value = average;
+	}
+
+	bitcrush->prior = value;
+	bitcrush->buffer_count = 0;
+
+	return value;
+}
+
+// §4.6 Track Functions.........................................................
 
 #define C  0
 #define CS 1
@@ -4184,7 +4243,7 @@ void track_generate(Track* track)
 		int degree = arandom::int_range(0, degrees - 1);
 		int pitch_class = pentatonic_major[degree + 1];
 
-		int octave = arandom::int_range(0, 10);
+		int octave = arandom::int_range(3, 6);
 
 		double note_start = i * note_spacing;
 
@@ -4221,7 +4280,7 @@ void track_render(Track* track, ADSR* envelope, float* frequency, double time)
 
 } // namespace audio
 
-// §4.6 Audio System Declarations...............................................
+// §4.7 Audio System Declarations...............................................
 
 namespace audio {
 
@@ -4908,6 +4967,11 @@ static void* run_mixer_thread(void* argument)
 	APF reverb;
 	apf_create(&reverb, 0.2f);
 
+	Bitcrush bitcrush;
+	bitcrush_create(&bitcrush);
+	bitcrush.depth = 16;
+	bitcrush.downsampling = 12;
+
 	Track track;
 	track_generate(&track);
 
@@ -4923,8 +4987,11 @@ static void* run_mixer_thread(void* argument)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			track_render(&track, &envelope, &theta, t);
-			float amplitude = envelope_apply(&envelope);
-			float value = volume * apf_apply(&reverb, amplitude * filter_apply(&filter, pulse_wave(theta * t, 0.3f)));
+			float value = rectified_sin(tau * theta * t);
+			value = envelope_apply(&envelope) * value;
+			value = filter_apply(&filter, bitcrush_apply(&bitcrush, value));
+			value = overdrive(value, 2.0f);
+			value = volume * apf_apply(&reverb, value);
 			for(int j = 0; j < device_description.channels; ++j)
 			{
 				mixed_samples[i * device_description.channels + j] = value;
