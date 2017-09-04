@@ -800,6 +800,61 @@ Matrix4 inverse_transform(const Matrix4& m)
 	}};
 }
 
+// Complex Numbers..............................................................
+
+struct Complex
+{
+	float r, i;
+};
+
+static const Complex complex_zero = {0.0f, 0.0f};
+
+Complex exp(Complex x)
+{
+	Complex result;
+	float b = exp(x.r);
+	result.r = b * cos(x.i);
+	result.i = b * sin(x.i);
+	return result;
+}
+
+Complex operator * (Complex c0, Complex c1)
+{
+	Complex result;
+	result.r = (c0.r * c1.r) - (c0.i * c1.i);
+	result.i = (c0.r * c1.i) - (c0.i * c1.r);
+	return result;
+}
+
+Complex operator / (Complex c0, Complex c1)
+{
+	float a = c0.r;
+	float b = c0.i;
+	float c = c1.r;
+	float d = c1.i;
+	float z = (c * c) + (d * d);
+
+	Complex result;
+	result.r = ((a * c) + (b * d)) / z;
+	result.i = ((b * c) - (a * d)) / z;
+	return result;
+}
+
+Complex operator / (Complex c0, float r)
+{
+	Complex result;
+	result.r = c0.r / r;
+	result.i = c0.i / r;
+	return result;
+}
+
+Complex& operator += (Complex& v0, Complex v1)
+{
+	v0.r += v1.r;
+	v0.i += v1.i;
+	return v0;
+}
+
 // §2.1 Geometry Functions......................................................
 
 struct Triangle
@@ -4088,6 +4143,34 @@ static float hpf_apply(HPF* filter, float sample)
 	return result;
 }
 
+// Band-Pass Filter
+struct BPF
+{
+	struct
+	{
+		float alpha;
+		float prior;
+	} low, high;
+};
+
+static void bpf_set_passband(BPF* filter, float corner_frequency_low, float corner_frequency_high, double delta_time)
+{
+	ASSERT(corner_frequency_low > 0.0f);
+	float time_constant = 1.0f / (tau * corner_frequency_low);
+	filter->low.alpha = delta_time / (delta_time + time_constant);
+
+	ASSERT(corner_frequency_high > 0.0f);
+	time_constant = 1.0f / (tau * corner_frequency_high);
+	filter->high.alpha = delta_time / (delta_time + time_constant);
+}
+
+static float bpf_apply(BPF* filter, float sample)
+{
+	filter->low.prior = lerp(filter->low.prior, sample, filter->low.alpha);
+	filter->high.prior = lerp(filter->high.prior, sample, filter->high.alpha);
+	return filter->high.prior - filter->low.prior;
+}
+
 // All-Pass Filter
 struct APF
 {
@@ -4193,7 +4276,7 @@ static float convert_from_s32(s32 x)
 	return 2.0f / 4294967295.0f * (x + 0.5f);
 }
 
-// There's two effects in bitcrushing. One is reducing bit depth. But, since the
+// There's two effects in bitcrushing. One is reducing bit depth. Since the
 // output signal has a fixed depth, this is simulated by turning the sample into
 // an integer, reducing the depth, and converting back to a floating-point
 // sample. The reduction step involves zeroing out the d least significant
@@ -4342,6 +4425,40 @@ void system_shutdown();
 
 } // namespace audio
 
+// Discrete Fourier Transform
+namespace dft {
+
+void make_complex(float* samples, Complex* result, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		result[i].r = samples[i];
+		result[i].i = 0.0f;
+	}
+}
+
+void transform(Complex* samples, int count)
+{
+	Complex* x = ALLOCATE(Complex, count);
+	for(int i = 0; i < count; ++i)
+	{
+		Complex sum = complex_zero;
+		for(int j = 0; j < count; ++j)
+		{
+			Complex power = {0.0f, -tau * i * j / count};
+			sum += samples[j] * exp(power);
+		}
+		x[i] = sum;
+	}
+	for(int i = 0; i < count; ++i)
+	{
+		samples[i] = x[i] / count;
+	}
+	DEALLOCATE(x);
+}
+
+} // namespace dft
+
 // §5.1 Game Functions..........................................................
 
 enum class UserKey {Space, Left, Up, Right, Down};
@@ -4454,6 +4571,10 @@ static void main_update()
 
 #if defined(OS_LINUX)
 #include <GL/glx.h>
+#if defined(Complex)
+#undef Complex
+#endif
+
 #define GET_PROC(name) \
 	(*glXGetProcAddress)(reinterpret_cast<const GLubyte*>(name))
 
@@ -5004,6 +5125,30 @@ static void* run_mixer_thread(void* argument)
 	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
 	double delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
 
+	// Setup test effects and filters.
+
+	{
+		float samples[8] =
+		{
+			0.0f,
+			0.707f,
+			1.0f,
+			0.707f,
+			0.0f,
+			-0.707f,
+			-1.0f,
+			-0.707f,
+		};
+		Complex* s = ALLOCATE(Complex, 8);
+		dft::make_complex(samples, s, 8);
+		dft::transform(s, 8);
+		for(int i = 0; i < 8; ++i)
+		{
+			LOG_DEBUG("%f %f", s[i].r, s[i].i);
+		}
+		DEALLOCATE(s);
+	}
+
 	ADSR envelope;
 	envelope_reset(&envelope);
 	envelope.sustain = 0.25f;
@@ -5029,6 +5174,10 @@ static void* run_mixer_thread(void* argument)
 	Track track;
 	track_generate(&track);
 
+	BPF bandpass;
+	bandpass.low.prior = 0.0f;
+	bandpass.high.prior = 0.0f;
+
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
 	double volume = 0.5;
@@ -5037,6 +5186,7 @@ static void* run_mixer_thread(void* argument)
 	{
 		// Generate samples.
 		int frames = device_description.frames;
+#if 1
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
@@ -5053,6 +5203,22 @@ static void* run_mixer_thread(void* argument)
 				mixed_samples[i * device_description.channels + j] = value;
 			}
 		}
+#else
+		for(int i = 0; i < frames; ++i)
+		{
+			float t = static_cast<float>(i) / device_description.sample_rate + time;
+			float value = arandom::float_range(-1.0f, 1.0f);
+			float center_frequency = 50.0f * sin(0.5f * tau * t) + 65.0f;
+			float l = pitch_to_frequency(center_frequency - 5.0f);
+			float h = pitch_to_frequency(center_frequency + 5.0f);
+			bpf_set_passband(&bandpass, l, h, delta_time_per_frame);
+			value = bpf_apply(&bandpass, value);
+			for(int j = 0; j < device_description.channels; ++j)
+			{
+				mixed_samples[i * device_description.channels + j] = value;
+			}
+		}
+#endif
 
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
