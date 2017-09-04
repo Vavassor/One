@@ -4158,22 +4158,17 @@ static float apf_apply(APF* filter, float sample)
 
 float overdrive(float sample, float factor)
 {
-	// This uses a quadratic bezier curve where the endpoints are P0 = (0,0) and
-	// P2 = (1,1). The middle point is determined by the given factor and lies
-	// along the line y = -x + 1. It uses this to curve the sample value away
-	// from zero.
-	float u0 = factor;
-	float u1 = -u0 + 1.0f;
-	// Find t along the curve given x using the quadratic formula.
-	float a = -2.0f * u0 + 1.0f;
-	float b = 2.0f * u0;
-	float c = -abs(sample);
-	float t = -b + sqrt((b * b) - (4.0f * a * c));
-	t /= 2.0f * a;
-	// Compute the output y given t.
-	float to = 1.0f - t;
-	float y = t * (2.0f * to * u1 + t);
-	// Reintroduce the original sign before returning.
+	// This uses a hyperbola of the formula y = -factor / (x + a) + 1 + a.
+	// The quadratic formula is used to find the xy offset, called a, such that
+	// the hyperbola passes through the points (0,0) and (1,1). This makes
+	// the domain and range both [0,1] for the values being input. Only the
+	// magnitude is used so that the sample curves away from zero, and the sign
+	// is reintroduced at the end.
+	ASSERT(factor > 0.0f);
+	factor = fmax(factor, 1e-7f);
+	float a = (-1.0f + sqrt(1.0f + 4.0f * factor)) / 2.0f;
+	float x = abs(sample);
+	float y = -factor / (x + a) + 1.0f + a;
 	return copysign(y, sample);
 }
 
@@ -5050,8 +5045,8 @@ static void* run_mixer_thread(void* argument)
 			value = envelope_apply(&envelope) * value;
 			value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
-			value = overdrive(value, -0.03f);
 			value = apf_apply(&reverb, value);
+			value = overdrive(value, 0.01f);
 			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
 			{
