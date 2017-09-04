@@ -4220,9 +4220,9 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 	float value;
 	if(bitcrush->depth < 32)
 	{
-		int d = MAX(0, bitcrush->depth);
+		int d = 32 - MAX(0, bitcrush->depth);
 		s32 s = convert_to_s32(average);
-		s &= ~(0xffffffff >> d);
+		s &= ~((1 << d) - 1);
 		value = convert_from_s32(s);
 	}
 	else
@@ -5023,7 +5023,7 @@ static void* run_mixer_thread(void* argument)
 
 	Bitcrush bitcrush;
 	bitcrush_reset(&bitcrush);
-	bitcrush.depth = 16;
+	bitcrush.depth = 5;
 	bitcrush.downsampling = 12;
 
 	Track track;
@@ -5041,12 +5041,12 @@ static void* run_mixer_thread(void* argument)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			track_render(&track, &envelope, &theta, t);
-			float value = sawtooth_wave(theta * t);
+			float value = triangle_wave(theta * t);
 			value = envelope_apply(&envelope) * value;
 			value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
+			value = overdrive(value, 0.1f);
 			value = apf_apply(&reverb, value);
-			value = overdrive(value, 0.01f);
 			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
 			{
