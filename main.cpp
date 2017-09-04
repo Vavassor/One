@@ -4053,10 +4053,38 @@ struct LPF
 	float prior;
 };
 
-static float filter_apply(LPF* filter, float sample)
+static void lpf_set_corner_frequency(LPF* filter, float corner_frequency, double delta_time)
+{
+	float time_constant = 1.0f / (tau * corner_frequency);
+	filter->beta = delta_time / (delta_time + time_constant);
+}
+
+static float lpf_apply(LPF* filter, float sample)
 {
 	float result = filter->prior - filter->beta * (filter->prior - sample);
 	filter->prior = result;
+	return result;
+}
+
+// High-Pass Filter
+struct HPF
+{
+	float alpha;
+	float prior_filtered;
+	float prior_raw;
+};
+
+static void hpf_set_corner_frequency(HPF* filter, float corner_frequency, double delta_time)
+{
+	float time_constant = 1.0f / (tau * corner_frequency);
+	filter->alpha = time_constant / (time_constant + delta_time);
+}
+
+static float hpf_apply(HPF* filter, float sample)
+{
+	float result = filter->alpha * (filter->prior_filtered + sample - filter->prior_raw);
+	filter->prior_raw = sample;
+	filter->prior_filtered = result;
 	return result;
 }
 
@@ -4130,40 +4158,69 @@ static float apf_apply(APF* filter, float sample)
 
 float overdrive(float sample, float factor)
 {
-	return clamp(factor * sample, -1.0f, 1.0f);
+	// This uses a quadratic bezier curve where the endpoints are P0 = (0,0) and
+	// P2 = (1,1). The middle point is determined by the given factor and lies
+	// along the line y = -x + 1. It uses this to curve the sample value away
+	// from zero.
+	float u0 = factor;
+	float u1 = -u0 + 1.0f;
+	// Find t along the curve given x using the quadratic formula.
+	float a = -2.0f * u0 + 1.0f;
+	float b = 2.0f * u0;
+	float c = -abs(sample);
+	float t = -b + sqrt((b * b) - (4.0f * a * c));
+	t /= 2.0f * a;
+	// Compute the output y given t.
+	float to = 1.0f - t;
+	float y = t * (2.0f * to * u1 + t);
+	// Reintroduce the original sign before returning.
+	return copysign(y, sample);
 }
 
 struct Bitcrush
 {
-	float buffer[64];
+	float sum;
 	float prior;
-	int buffer_count;
+	int sum_count;
 	int depth;
 	int downsampling;
 };
 
-void bitcrush_create(Bitcrush* bitcrush)
+void bitcrush_reset(Bitcrush* bitcrush)
 {
-	bitcrush->buffer_count = 0;
+	bitcrush->sum = 0.0f;
+	bitcrush->sum_count = 0;
 	bitcrush->prior = 0.0f;
 }
 
+static float convert_from_s32(s32 x)
+{
+	return 2.0f / 4294967295.0f * (x + 0.5f);
+}
+
+// There's two effects in bitcrushing. One is reducing bit depth. But, since the
+// output signal has a fixed depth, this is simulated by turning the sample into
+// an integer, reducing the depth, and converting back to a floating-point
+// sample. The reduction step involves zeroing out the d least significant
+// bits of each sample, leaving 32 - d bits.
+//
+// The second effect is simulating reduced sample rates by taking n samples,
+// averaging them, and then outputting that average n times. Note that to get
+// n samples to do the averaging involves waiting sample_rate / n seconds, so
+// larger amounts of downsampling produces greater latency in the output signal.
+// Also, it takes a running sum and computes the average at the end, rather than
+// actually keeping all n samples.
 float bitcrush_apply(Bitcrush* bitcrush, float sample)
 {
-	int samples_to_buffer = MIN(MAX(bitcrush->downsampling, 1), 64);
-	if(bitcrush->buffer_count < samples_to_buffer)
+	int samples_to_sum = MAX(bitcrush->downsampling, 1);
+	if(bitcrush->sum_count < samples_to_sum)
 	{
-		bitcrush->buffer[bitcrush->buffer_count] = sample;
-		bitcrush->buffer_count += 1;
+		bitcrush->sum += sample;
+		bitcrush->sum_count += 1;
 		return bitcrush->prior;
 	}
 
-	float sum = 0.0f;
-	for(int i = 0; i < samples_to_buffer; ++i)
-	{
-		sum += bitcrush->buffer[i];
-	}
-	float average = sum / samples_to_buffer;
+	float average = bitcrush->sum / samples_to_sum;
 
 	float value;
 	if(bitcrush->depth < 32)
@@ -4171,7 +4228,7 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 		int d = MAX(0, bitcrush->depth);
 		s32 s = convert_to_s32(average);
 		s &= ~(0xffffffff >> d);
-		value = 2.0f / 4294967295.0f * (s + 0.5f);
+		value = convert_from_s32(s);
 	}
 	else
 	{
@@ -4179,7 +4236,8 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 	}
 
 	bitcrush->prior = value;
-	bitcrush->buffer_count = 0;
+	bitcrush->sum = 0.0f;
+	bitcrush->sum_count = 0;
 
 	return value;
 }
@@ -4949,6 +5007,7 @@ static void* run_mixer_thread(void* argument)
 
 	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
 	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
+	double delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
 
 	ADSR envelope;
 	envelope_reset(&envelope);
@@ -4960,15 +5019,15 @@ static void* run_mixer_thread(void* argument)
 	envelope.release_base = -441.0f / device_description.sample_rate;
 	envelope.release_coef = 1.0f;
 
-	LPF filter;
-	filter.beta = 0.1f;
-	filter.prior = 0.0f;
+	LPF lowpass;
+	lpf_set_corner_frequency(&lowpass, 440.0f, delta_time_per_frame);
+	lowpass.prior = 0.0f;
 
 	APF reverb;
 	apf_create(&reverb, 0.2f);
 
 	Bitcrush bitcrush;
-	bitcrush_create(&bitcrush);
+	bitcrush_reset(&bitcrush);
 	bitcrush.depth = 16;
 	bitcrush.downsampling = 12;
 
@@ -4987,11 +5046,13 @@ static void* run_mixer_thread(void* argument)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			track_render(&track, &envelope, &theta, t);
-			float value = rectified_sin(tau * theta * t);
+			float value = sawtooth_wave(theta * t);
 			value = envelope_apply(&envelope) * value;
-			value = filter_apply(&filter, bitcrush_apply(&bitcrush, value));
-			value = overdrive(value, 2.0f);
-			value = volume * apf_apply(&reverb, value);
+			value = bitcrush_apply(&bitcrush, value);
+			value = lpf_apply(&lowpass, value);
+			value = overdrive(value, -0.03f);
+			value = apf_apply(&reverb, value);
+			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
 			{
 				mixed_samples[i * device_description.channels + j] = value;
