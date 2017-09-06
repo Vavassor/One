@@ -3873,12 +3873,16 @@ static void system_terminate(bool functions_loaded)
 		glDeleteSamplers(1, &nearest_repeat);
 		glDeleteProgram(shader);
 		glDeleteProgram(shader_vertex_colour);
+		glDeleteProgram(shader_texture_only);
 		glDeleteProgram(shader_camera_fade);
 		glDeleteTextures(1, &camera_fade_dither_pattern);
+		glDeleteTextures(1, &spectrogram);
+		SAFE_DEALLOCATE(spectrogram_samples);
 		immediate::context_destroy();
 	}
 }
 
+// TODO: This doesn't even synchronize between threads properly.
 static void buffer_a_spectrogram_row(float* samples, int width)
 {
 	const int row_height = 16;
@@ -4704,13 +4708,48 @@ namespace fft {
 struct Table
 {
 	Complex* coefficients;
+	Complex* reorder_space;
+	int* indices;
 };
+
+void table_destroy(Table* table)
+{
+	SAFE_DEALLOCATE(table->coefficients);
+	SAFE_DEALLOCATE(table->reorder_space);
+	SAFE_DEALLOCATE(table->indices);
+}
+
+static int logb(int x)
+{
+	int k = x;
+	int i = 0;
+	while(k)
+	{
+		k >>= 1;
+		i += 1;
+	}
+	return i - 1;
+}
+
+static int reverse(int count, int n)
+{
+	int p = 0;
+	for(int i = 1; i <= logb(count); ++i)
+	{
+		if(n & (1 << (logb(count) - i)))
+		{
+			p |= 1 << (i - 1);
+		}
+	}
+	return p;
+}
 
 void table_compute(Table* table, int count)
 {
 	Complex* w = ALLOCATE(Complex, count / 2);
 	if(!w)
 	{
+		table_destroy(table);
 		return;
 	}
 	w[0] = {1.0f, 0.0f};
@@ -4721,11 +4760,26 @@ void table_compute(Table* table, int count)
 		w[i] = pow(w[1], ci);
 	}
 	table->coefficients = w;
-}
 
-void table_destroy(Table* table)
-{
-	SAFE_DEALLOCATE(table->coefficients);
+	Complex* reorder_space = ALLOCATE(Complex, count);
+	if(!reorder_space)
+	{
+		table_destroy(table);
+		return;
+	}
+	table->reorder_space = reorder_space;
+
+	int* indices = ALLOCATE(int, count);
+	if(!indices)
+	{
+		table_destroy(table);
+		return;
+	}
+	for(int i = 0; i < count; ++i)
+	{
+		indices[i] = reverse(count, i);
+	}
+	table->indices = indices;
 }
 
 void make_complex(float* samples, Complex* result, int count, int channels)
@@ -4762,48 +4816,22 @@ void make_phase_spectrum(Complex* samples, float* result, int count)
 	}
 }
 
-static int logb(int x)
+static void reorder(Table* table, Complex* samples, int count)
 {
-	int k = x;
-	int i = 0;
-	while(k)
-	{
-		k >>= 1;
-		i += 1;
-	}
-	return i - 1;
-}
-
-static int reverse(int count, int n)
-{
-	int p = 0;
-	for(int i = 1; i <= logb(count); ++i)
-	{
-		if(n & (1 << (logb(count) - i)))
-		{
-			p |= 1 << (i - 1);
-		}
-	}
-	return p;
-}
-
-static void reorder(Complex* f1, int count)
-{
-	Complex f2[1024];
 	for(int i = 0; i < count; ++i)
 	{
-		f2[i] = f1[reverse(count, i)];
+		table->reorder_space[i] = samples[table->indices[i]];
 	}
 	for(int i = 0; i < count; ++i)
 	{
-		f1[i] = f2[i];
+		samples[i] = table->reorder_space[i];
 	}
 }
 
 void transform(Table* table, Complex* samples, int count, double delta_time)
 {
 	ASSERT(count >= 0 && is_power_of_two(count));
-	reorder(samples, count);
+	reorder(table, samples, count);
 	int n = 1;
 	int a = count / 2;
 	for(int j = 0; j < logb(count); ++j)
@@ -4812,10 +4840,10 @@ void transform(Table* table, Complex* samples, int count, double delta_time)
 		{
 			if(!(i & n))
 			{
-				Complex temp = samples[i];
-				Complex Temp = table->coefficients[(i * a) % (n * a)] * samples[i + n];
-				samples[i] = temp + Temp;
-				samples[i + n] = temp - Temp;
+				Complex s0 = samples[i];
+				Complex s1 = table->coefficients[(i * a) % (n * a)] * samples[i + n];
+				samples[i] = s0 + s1;
+				samples[i + n] = s0 - s1;
 			}
 		}
 		n *= 2;
