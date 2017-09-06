@@ -38,6 +38,7 @@ Table Of Contents...............................................................
   §1.6 Vectors
   §1.7 Quaternions
   §1.8 Matrices
+  §1.9 Complex Numbers
 
 2. Physics
   §2.1 Geometry Functions
@@ -78,7 +79,6 @@ Table Of Contents...............................................................
     §8.3.1 Device
     §8.3.2 Audio System Functions
   §8.4 Platform Main Functions
-
 */
 
 #if defined(__linux__)
@@ -164,6 +164,11 @@ static int string_size(const char* string)
 	const char* s;
 	for(s = string; *s; ++s);
 	return s - string;
+}
+
+static bool is_power_of_two(unsigned int x)
+{
+	return (x != 0) && !(x & (x - 1));
 }
 
 const float tau = 6.28318530717958647692f;
@@ -832,7 +837,7 @@ Matrix4 inverse_transform(const Matrix4& m)
 	}};
 }
 
-// Complex Numbers..............................................................
+// §1.9 Complex Numbers.........................................................
 
 struct Complex
 {
@@ -841,6 +846,14 @@ struct Complex
 
 static const Complex complex_zero = {0.0f, 0.0f};
 
+Complex operator + (Complex v0, Complex v1)
+{
+	Complex result;
+	result.r = v0.r + v1.r;
+	result.i = v0.i + v1.i;
+	return result;
+}
+
 Complex& operator += (Complex& v0, Complex v1)
 {
 	v0.r += v1.r;
@@ -848,12 +861,51 @@ Complex& operator += (Complex& v0, Complex v1)
 	return v0;
 }
 
+Complex operator - (Complex v0, Complex v1)
+{
+	Complex result;
+	result.r = v0.r - v1.r;
+	result.i = v0.i - v1.i;
+	return result;
+}
+
+Complex& operator -= (Complex& v0, Complex v1)
+{
+	v0.r -= v1.r;
+	v0.i -= v1.i;
+	return v0;
+}
+
 Complex operator * (Complex c0, Complex c1)
 {
 	Complex result;
 	result.r = (c0.r * c1.r) - (c0.i * c1.i);
-	result.i = (c0.r * c1.i) - (c0.i * c1.r);
+	result.i = (c0.r * c1.i) + (c0.i * c1.r);
 	return result;
+}
+
+Complex& operator *= (Complex& c0, Complex c1)
+{
+	float a = c0.r;
+	float b = c0.i;
+	c0.r = (a * c1.r) - (b * c1.i);
+	c0.i = (a * c1.i) + (b * c1.r);
+	return c0;
+}
+
+Complex operator * (Complex c0, float s)
+{
+	Complex result;
+	result.r = c0.r * s;
+	result.i = c0.i * s;
+	return result;
+}
+
+Complex& operator *= (Complex& c0, float s)
+{
+	c0.r *= s;
+	c0.i *= s;
+	return c0;
 }
 
 Complex operator / (Complex c0, Complex c1)
@@ -870,12 +922,42 @@ Complex operator / (Complex c0, Complex c1)
 	return result;
 }
 
+Complex& operator /= (Complex& c0, Complex c1)
+{
+	float a = c0.r;
+	float b = c0.i;
+	float c = c1.r;
+	float d = c1.i;
+	float z = (c * c) + (d * d);
+
+	c0.r = ((a * c) + (b * d)) / z;
+	c0.i = ((b * c) - (a * d)) / z;
+	return c0;
+}
+
 Complex operator / (Complex c0, float r)
 {
 	Complex result;
 	result.r = c0.r / r;
 	result.i = c0.i / r;
 	return result;
+}
+
+Complex& operator /= (Complex& c0, float r)
+{
+	c0.r /= r;
+	c0.i /= r;
+	return c0;
+}
+
+float abs(Complex x)
+{
+	return sqrt((x.r * x.r) + (x.i * x.i));
+}
+
+float complex_angle(Complex x)
+{
+	return atan2(x.i, x.r);
 }
 
 Complex exp(Complex x)
@@ -887,14 +969,42 @@ Complex exp(Complex x)
 	return result;
 }
 
-float norm(Complex x)
+Complex log(Complex x)
 {
-	return sqrt((x.r * x.r) + (x.i * x.i));
+	Complex result;
+	result.r = log(abs(x));
+	result.i = complex_angle(x);
+	return result;
 }
 
-float complex_angle(Complex x)
+Complex pow(Complex x, Complex y)
 {
-	return atan2(x.i, x.r);
+	return exp(y * log(x));
+}
+
+Complex polar(float magnitude, float angle)
+{
+	Complex result;
+	result.r = magnitude * cos(angle);
+	result.i = magnitude * sin(angle);
+	return result;
+}
+
+Complex conjugate(Complex x)
+{
+	Complex result;
+	result.r = x.r;
+	result.i = -x.i;
+	return result;
+}
+
+Complex reciprocal(Complex x)
+{
+	Complex result;
+	float d = abs(x);
+	result.r = x.r / d;
+	result.i = -x.i / d;
+	return result;
 }
 
 // §2.1 Geometry Functions......................................................
@@ -3741,9 +3851,9 @@ static bool system_initialise()
 	{
 		glGenTextures(1, &spectrogram);
 		glBindTexture(GL_TEXTURE_2D, spectrogram);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 768, 1024, 0, GL_RED, GL_FLOAT, nullptr);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 512, 1024, 0, GL_RED, GL_FLOAT, nullptr);
 
-		spectrogram_samples = ALLOCATE(float, 768 * 1024);
+		spectrogram_samples = ALLOCATE(float, 512 * 1024);
 	}
 
 	immediate::context_create();
@@ -3772,7 +3882,7 @@ static void system_terminate(bool functions_loaded)
 static void buffer_a_spectrogram_row(float* samples, int width)
 {
 	const int row_height = 16;
-	const int spectrogram_width = 768;
+	const int spectrogram_width = 512;
 	const int spectrogram_height = 1024;
 	static int row = 0;
 	row = (row + 1) % (spectrogram_height / row_height);
@@ -3781,8 +3891,8 @@ static void buffer_a_spectrogram_row(float* samples, int width)
 		int base = (row_height * row + i) * spectrogram_width;
 		for(int j = 0; j < spectrogram_width; ++j)
 		{
-			int bin = pow(2.0f, j / 74.0f) - 1;
-			spectrogram_samples[base + j] = 100.0f * samples[bin];
+			int bin = pow(2.0f, j / 56.0f) - 1;
+			spectrogram_samples[base + j] = 1000.0f * samples[bin];
 		}
 	}
 }
@@ -3947,7 +4057,7 @@ static void system_update(Vector3 position, World* world)
 		immediate::context->shader = shader_texture_only;
 		immediate::set_matrices(matrix4_identity, screen_projection);
 		glBindTexture(GL_TEXTURE_2D, spectrogram);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 768, 1024, 0, GL_RED, GL_FLOAT, spectrogram_samples);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 512, 1024, 0, GL_RED, GL_FLOAT, spectrogram_samples);
 		Vector3 q0 = {0.0f   ,    0.0f, 0.0f};
 		Vector3 q1 = {+256.0f,    0.0f, 0.0f};
 		Vector3 q2 = {+256.0f, +256.0f, 0.0f};
@@ -4588,8 +4698,8 @@ void system_shutdown();
 
 } // namespace audio
 
-// Discrete Fourier Transform...................................................
-namespace dft {
+// Fast Fourier Transform.......................................................
+namespace fft {
 
 void make_complex(float* samples, Complex* result, int count, int channels)
 {
@@ -4600,48 +4710,106 @@ void make_complex(float* samples, Complex* result, int count, int channels)
 	}
 }
 
-void make_frequencies(Complex* samples, float* result, int count)
+void make_amplitude_spectrum(Complex* samples, float* result, int count)
 {
-#if 0
 	for(int i = 0; i < count; ++i)
 	{
-		result[i] = 0.0f;
+		result[i] = abs(samples[i]);
 	}
-	for(int i = 0; i < count; ++i)
-	{
-		float angle = (complex_angle(samples[i]) + pi) / tau;
-		int bin = angle * (count - 1);
-		result[bin] += norm(samples[i]);
-	}
-#else
-	for(int i = 0; i < count; ++i)
-	{
-		result[i] = norm(samples[i]);
-	}
-#endif
 }
 
-void transform(Complex* samples, int count)
+void make_phase_spectrum(Complex* samples, float* result, int count)
 {
-	Complex* x = ALLOCATE(Complex, count);
+	const float arbitrary_epsilon = 1e-3f;
 	for(int i = 0; i < count; ++i)
 	{
-		Complex sum = complex_zero;
-		for(int j = 0; j < count; ++j)
+		Complex c = samples[i];
+		if(abs(c) > arbitrary_epsilon)
 		{
-			Complex power = {0.0f, -tau * i * j / count};
-			sum += samples[j] * exp(power);
+			result[i] = (complex_angle(c) + pi) / tau;
 		}
-		x[i] = sum;
+		else
+		{
+			result[i] = 0.0f;
+		}
+	}
+}
+
+static int logb(int x)
+{
+	int k = x;
+	int i = 0;
+	while(k)
+	{
+		k >>= 1;
+		i += 1;
+	}
+	return i - 1;
+}
+
+static int reverse(int count, int n)
+{
+	int p = 0;
+	for(int i = 1; i <= logb(count); ++i)
+	{
+		if(n & (1 << (logb(count) - i)))
+		{
+			p |= 1 << (i - 1);
+		}
+	}
+	return p;
+}
+
+static void reorder(Complex* f1, int count)
+{
+	Complex f2[1024];
+	for(int i = 0; i < count; ++i)
+	{
+		f2[i] = f1[reverse(count, i)];
 	}
 	for(int i = 0; i < count; ++i)
 	{
-		samples[i] = x[i] / count;
+		f1[i] = f2[i];
 	}
-	DEALLOCATE(x);
 }
 
-} // namespace dft
+void transform(Complex* samples, int count, double delta_time)
+{
+	ASSERT(count >= 0 && is_power_of_two(count));
+	reorder(samples, count);
+	Complex* w = ALLOCATE(Complex, count / 2);
+	w[0] = {1.0f, 0.0f};
+	w[1] = polar(1.0f, -tau / count);
+	for(int i = 2; i < count / 2; ++i)
+	{
+		Complex ci = {static_cast<float>(i), 0.0f};
+		w[i] = pow(w[1], ci);
+	}
+	int n = 1;
+	int a = count / 2;
+	for(int j = 0; j < logb(count); ++j)
+	{
+		for(int i = 0; i < count; ++i)
+		{
+			if(!(i & n))
+			{
+				Complex temp = samples[i];
+				Complex Temp = w[(i * a) % (n * a)] * samples[i + n];
+				samples[i] = temp + Temp;
+				samples[i + n] = temp - Temp;
+			}
+		}
+		n *= 2;
+		a /= 2;
+	}
+	DEALLOCATE(w);
+	for(int i = 0; i < count; ++i)
+	{
+		samples[i] *= delta_time;
+	}
+}
+
+} // namespace fft
 
 // §5.1 Game Functions..........................................................
 
@@ -5344,8 +5512,9 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
-	Complex* spectrogram_frequencies = ALLOCATE(Complex, device_description.frames);
-	float* spectrogram_samples = ALLOCATE(float, device_description.frames);
+	int spectrogram_count = 1024;
+	Complex* spectrogram_frequencies = ALLOCATE(Complex, spectrogram_count);
+	float* spectrogram_samples = ALLOCATE(float, spectrogram_count);
 
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
@@ -5355,7 +5524,7 @@ static void* run_mixer_thread(void* argument)
 	{
 		// Generate samples.
 		int frames = device_description.frames;
-#if 1
+#if 0
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
@@ -5389,10 +5558,10 @@ static void* run_mixer_thread(void* argument)
 		}
 #endif
 #if 1
-		dft::make_complex(mixed_samples, spectrogram_frequencies, frames, device_description.channels);
-		dft::transform(spectrogram_frequencies, frames);
-		dft::make_frequencies(spectrogram_frequencies, spectrogram_samples, frames);
-		render::buffer_a_spectrogram_row(spectrogram_samples, frames);
+		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
+		fft::transform(spectrogram_frequencies, spectrogram_count, delta_time_per_frame);
+		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
+		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
 #endif
 
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
