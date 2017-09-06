@@ -677,6 +677,38 @@ Matrix4 perspective_projection_matrix(float fovy, float width, float height, flo
 	return result;
 }
 
+// This transforms from a right-handed coordinate system to OpenGL's default
+// clip space. A position will be viewable in this clip space if its x, y,
+// and z components are in the range [-w,w] of its w component.
+Matrix4 orthographic_projection_matrix(float width, float height, float near_plane, float far_plane)
+{
+	float neg_depth = near_plane - far_plane;
+
+	Matrix4 result;
+
+	result[0] = 2.0f / width;
+	result[1] = 0.0f;
+	result[2] = 0.0f;
+	result[3] = 0.0f;
+
+	result[4] = 0.0f;
+	result[5] = 2.0f / height;
+	result[6] = 0.0f;
+	result[7] = 0.0f;
+
+	result[8] = 0.0f;
+	result[9] = 0.0f;
+	result[10] = 2.0f / neg_depth;
+	result[11] = (far_plane + near_plane) / neg_depth;
+
+	result[12] = 0.0f;
+	result[13] = 0.0f;
+	result[14] = 0.0f;
+	result[15] = 1.0f;
+
+	return result;
+}
+
 Matrix4 compose_transform(Vector3 position, Quaternion orientation, Vector3 scale)
 {
 	float w = orientation.w;
@@ -809,13 +841,11 @@ struct Complex
 
 static const Complex complex_zero = {0.0f, 0.0f};
 
-Complex exp(Complex x)
+Complex& operator += (Complex& v0, Complex v1)
 {
-	Complex result;
-	float b = exp(x.r);
-	result.r = b * cos(x.i);
-	result.i = b * sin(x.i);
-	return result;
+	v0.r += v1.r;
+	v0.i += v1.i;
+	return v0;
 }
 
 Complex operator * (Complex c0, Complex c1)
@@ -848,11 +878,23 @@ Complex operator / (Complex c0, float r)
 	return result;
 }
 
-Complex& operator += (Complex& v0, Complex v1)
+Complex exp(Complex x)
 {
-	v0.r += v1.r;
-	v0.i += v1.i;
-	return v0;
+	Complex result;
+	float b = exp(x.r);
+	result.r = b * cos(x.i);
+	result.i = b * sin(x.i);
+	return result;
+}
+
+float norm(Complex x)
+{
+	return sqrt((x.r * x.r) + (x.i * x.i));
+}
+
+float complex_angle(Complex x)
+{
+	return atan2(x.i, x.r);
 }
 
 // §2.1 Geometry Functions......................................................
@@ -2319,6 +2361,7 @@ typedef ptrdiff_t GLsizeiptr;
 
 void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
 void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
+void (APIENTRYA *p_glDisable)(GLenum cap) = nullptr;
 void (APIENTRYA *p_glEnable)(GLenum cap) = nullptr;
 void (APIENTRYA *p_glTexImage2D)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels) = nullptr;
 void (APIENTRYA *p_glViewport)(GLint x, GLint y, GLsizei width, GLsizei height) = nullptr;
@@ -2328,6 +2371,7 @@ void (APIENTRYA *p_glDeleteTextures)(GLsizei n, const GLuint* textures) = nullpt
 void (APIENTRYA *p_glDrawArrays)(GLenum mode, GLint first, GLsizei count) = nullptr;
 void (APIENTRYA *p_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void* indices) = nullptr;
 void (APIENTRYA *p_glGenTextures)(GLsizei n, GLuint* textures) = nullptr;
+void (APIENTRYA *p_glTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void * pixels) = nullptr;
 
 void (APIENTRYA *p_glActiveTexture)(GLenum texture) = nullptr;
 
@@ -2382,6 +2426,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 
 #define glClear p_glClear
 #define glDepthMask p_glDepthMask
+#define glDisable p_glDisable
 #define glEnable p_glEnable
 #define glTexImage2D p_glTexImage2D
 #define glViewport p_glViewport
@@ -2391,6 +2436,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 #define glDrawArrays p_glDrawArrays
 #define glDrawElements p_glDrawElements
 #define glGenTextures p_glGenTextures
+#define glTexSubImage2D p_glTexSubImage2D
 
 #define glActiveTexture p_glActiveTexture
 
@@ -2857,6 +2903,28 @@ void add_quad(Quad* quad, Vector3 colour)
 	c->draw_mode = DrawMode::Triangles;
 }
 
+void add_quad_textured(Quad* quad)
+{
+	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->filled + 6 < context_max_vertices);
+	c->vertices[c->filled + 0].position = quad->vertices[0];
+	c->vertices[c->filled + 1].position = quad->vertices[1];
+	c->vertices[c->filled + 2].position = quad->vertices[2];
+	c->vertices[c->filled + 3].position = quad->vertices[0];
+	c->vertices[c->filled + 4].position = quad->vertices[2];
+	c->vertices[c->filled + 5].position = quad->vertices[3];
+	// The texcoord is stored in the colour attribute because I'm lazy.
+	c->vertices[c->filled + 0].colour = {0.0f, 0.0f, 0.0f};
+	c->vertices[c->filled + 1].colour = {1.0f, 0.0f, 0.0f};
+	c->vertices[c->filled + 2].colour = {1.0f, 1.0f, 0.0f};
+	c->vertices[c->filled + 3].colour = {0.0f, 0.0f, 0.0f};
+	c->vertices[c->filled + 4].colour = {1.0f, 1.0f, 0.0f};
+	c->vertices[c->filled + 5].colour = {0.0f, 1.0f, 0.0f};
+	c->filled += 6;
+	c->draw_mode = DrawMode::Triangles;
+}
+
 void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector3 colour)
 {
 	Matrix4 inverse = inverse_view_matrix(view) * inverse_perspective_matrix(projection);
@@ -3059,6 +3127,39 @@ void main()
 }
 )";
 
+const char* vertex_source_texture_only = R"(
+#version 330
+
+layout(location = 0) in vec3 position;
+layout(location = 2) in vec3 colour;
+
+uniform mat4x4 model_view_projection;
+
+out vec2 surface_texcoord;
+
+void main()
+{
+    gl_Position = model_view_projection * vec4(position, 1.0);
+    // The texcoord is stored as a vertex colour because I'm lazy.
+    surface_texcoord = colour.xy;
+}
+)";
+
+const char* fragment_source_texture_only = R"(
+#version 330
+
+uniform sampler2D texture;
+
+layout(location = 0) out vec4 output_colour;
+
+in vec2 surface_texcoord;
+
+void main()
+{
+    output_colour = vec4(texture2D(texture, surface_texcoord).rgb, 1.0);
+}
+)";
+
 const char* vertex_source_camera_fade = R"(
 #version 330
 
@@ -3116,7 +3217,6 @@ void main()
 	float light = half_lambert(surface_normal, light_direction);
 	output_colour = vec4(surface_colour * vec3(light), 1.0);
 }
-
 )";
 
 struct Object
@@ -3501,11 +3601,14 @@ struct CallList
 
 GLuint shader;
 GLuint shader_vertex_colour;
+GLuint shader_texture_only;
 GLuint shader_camera_fade;
 GLuint camera_fade_dither_pattern;
+GLuint spectrogram;
 GLuint nearest_repeat;
 Matrix4 projection;
 Matrix4 sky_projection;
+Matrix4 screen_projection;
 int objects_count = 4;
 Object objects[4];
 AABB objects_bounds[4];
@@ -3515,6 +3618,7 @@ int terrain_triangles_count;
 CallList solid_calls;
 CallList fade_calls;
 bool debug_draw_colliders = false;
+float* spectrogram_samples;
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
@@ -3592,6 +3696,17 @@ static bool system_initialise()
 		return false;
 	}
 
+	shader_texture_only = load_shader_program(vertex_source_texture_only, fragment_source_texture_only);
+	if(shader_texture_only == 0)
+	{
+		LOG_ERROR("The texture-only shader failed to load.");
+		return false;
+	}
+	{
+		glUseProgram(shader_texture_only);
+		glUniform1i(glGetUniformLocation(shader_camera_fade, "texture"), 0);
+	}
+
 	shader_camera_fade = load_shader_program(vertex_source_camera_fade, fragment_source_camera_fade);
 	if(shader_camera_fade == 0)
 	{
@@ -3622,6 +3737,15 @@ static bool system_initialise()
 		glBindSampler(0, nearest_repeat);
 	}
 
+	// Create the spectrogram
+	{
+		glGenTextures(1, &spectrogram);
+		glBindTexture(GL_TEXTURE_2D, spectrogram);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 768, 1024, 0, GL_RED, GL_FLOAT, nullptr);
+
+		spectrogram_samples = ALLOCATE(float, 768 * 1024);
+	}
+
 	immediate::context_create();
 	immediate::context->shader = shader_vertex_colour;
 
@@ -3645,11 +3769,30 @@ static void system_terminate(bool functions_loaded)
 	}
 }
 
+static void buffer_a_spectrogram_row(float* samples, int width)
+{
+	const int row_height = 16;
+	const int spectrogram_width = 768;
+	const int spectrogram_height = 1024;
+	static int row = 0;
+	row = (row + 1) % (spectrogram_height / row_height);
+	for(int i = 0; i < row_height; ++i)
+	{
+		int base = (row_height * row + i) * spectrogram_width;
+		for(int j = 0; j < spectrogram_width; ++j)
+		{
+			int bin = pow(2.0f, j / 74.0f) - 1;
+			spectrogram_samples[base + j] = 100.0f * samples[bin];
+		}
+	}
+}
+
 static void resize_viewport(int width, int height)
 {
 	const float fov = pi_over_2 * (2.0f / 3.0f);
 	projection = perspective_projection_matrix(fov, width, height, near_plane, far_plane);
 	sky_projection = perspective_projection_matrix(fov, width, height, 0.001f, 1.0f);
+	screen_projection = orthographic_projection_matrix(width, height, -1.0f, 1.0f);
 	glViewport(0, 0, width, height);
 }
 
@@ -3795,6 +3938,26 @@ static void system_update(Vector3 position, World* world)
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 		glDepthMask(GL_TRUE);
+	}
+
+	// Draw debug UI.
+	{
+		glDisable(GL_DEPTH_TEST);
+
+		immediate::context->shader = shader_texture_only;
+		immediate::set_matrices(matrix4_identity, screen_projection);
+		glBindTexture(GL_TEXTURE_2D, spectrogram);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 768, 1024, 0, GL_RED, GL_FLOAT, spectrogram_samples);
+		Vector3 q0 = {0.0f   ,    0.0f, 0.0f};
+		Vector3 q1 = {+256.0f,    0.0f, 0.0f};
+		Vector3 q2 = {+256.0f, +256.0f, 0.0f};
+		Vector3 q3 = {0.0f   , +256.0f, 0.0f};
+		Quad quad = {q0, q1, q2, q3};
+		immediate::add_quad_textured(&quad);
+		immediate::draw();
+
+		immediate::context->shader = shader_vertex_colour;
+		glEnable(GL_DEPTH_TEST);
 	}
 }
 
@@ -4425,16 +4588,37 @@ void system_shutdown();
 
 } // namespace audio
 
-// Discrete Fourier Transform
+// Discrete Fourier Transform...................................................
 namespace dft {
 
-void make_complex(float* samples, Complex* result, int count)
+void make_complex(float* samples, Complex* result, int count, int channels)
 {
 	for(int i = 0; i < count; ++i)
 	{
-		result[i].r = samples[i];
+		result[i].r = samples[channels*i];
 		result[i].i = 0.0f;
 	}
+}
+
+void make_frequencies(Complex* samples, float* result, int count)
+{
+#if 0
+	for(int i = 0; i < count; ++i)
+	{
+		result[i] = 0.0f;
+	}
+	for(int i = 0; i < count; ++i)
+	{
+		float angle = (complex_angle(samples[i]) + pi) / tau;
+		int bin = angle * (count - 1);
+		result[bin] += norm(samples[i]);
+	}
+#else
+	for(int i = 0; i < count; ++i)
+	{
+		result[i] = norm(samples[i]);
+	}
+#endif
 }
 
 void transform(Complex* samples, int count)
@@ -4615,6 +4799,7 @@ static bool ogl_load_functions()
 {
 	p_glClear = reinterpret_cast<void (APIENTRYA*)(GLbitfield)>(GET_PROC("glClear"));
 	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
+	p_glDisable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glDisable"));
 	p_glEnable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glEnable"));
 	p_glTexImage2D = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*)>(GET_PROC("glTexImage2D"));
 	p_glViewport = reinterpret_cast<void (APIENTRYA*)(GLint, GLint, GLsizei, GLsizei)>(GET_PROC("glViewport"));
@@ -4624,6 +4809,7 @@ static bool ogl_load_functions()
 	p_glDrawArrays = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLsizei)>(GET_PROC("glDrawArrays"));
 	p_glDrawElements = reinterpret_cast<void (APIENTRYA*)(GLenum, GLsizei, GLenum, const void*)>(GET_PROC("glDrawElements"));
 	p_glGenTextures = reinterpret_cast<void (APIENTRYA*)(GLsizei, GLuint*)>(GET_PROC("glGenTextures"));
+	p_glTexSubImage2D = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*)>(GET_PROC("glTexSubImage2D"));
 
 	p_glActiveTexture = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glActiveTexture"));
 
@@ -4669,6 +4855,7 @@ static bool ogl_load_functions()
 
 	failure_count += p_glClear == nullptr;
 	failure_count += p_glDepthMask == nullptr;
+	failure_count += p_glDisable == nullptr;
 	failure_count += p_glEnable == nullptr;
 	failure_count += p_glTexImage2D == nullptr;
 	failure_count += p_glViewport == nullptr;
@@ -4678,6 +4865,7 @@ static bool ogl_load_functions()
 	failure_count += p_glDrawArrays == nullptr;
 	failure_count += p_glDrawElements == nullptr;
 	failure_count += p_glGenTextures == nullptr;
+	failure_count += p_glTexSubImage2D == nullptr;
 
 	failure_count += p_glActiveTexture == nullptr;
 
@@ -5127,28 +5315,6 @@ static void* run_mixer_thread(void* argument)
 
 	// Setup test effects and filters.
 
-	{
-		float samples[8] =
-		{
-			0.0f,
-			0.707f,
-			1.0f,
-			0.707f,
-			0.0f,
-			-0.707f,
-			-1.0f,
-			-0.707f,
-		};
-		Complex* s = ALLOCATE(Complex, 8);
-		dft::make_complex(samples, s, 8);
-		dft::transform(s, 8);
-		for(int i = 0; i < 8; ++i)
-		{
-			LOG_DEBUG("%f %f", s[i].r, s[i].i);
-		}
-		DEALLOCATE(s);
-	}
-
 	ADSR envelope;
 	envelope_reset(&envelope);
 	envelope.sustain = 0.25f;
@@ -5178,6 +5344,9 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
+	Complex* spectrogram_frequencies = ALLOCATE(Complex, device_description.frames);
+	float* spectrogram_samples = ALLOCATE(float, device_description.frames);
+
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
 	double volume = 0.5;
@@ -5191,7 +5360,7 @@ static void* run_mixer_thread(void* argument)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			track_render(&track, &envelope, &theta, t);
-			float value = triangle_wave(theta * t);
+			float value = sin(tau * theta * t);
 			value = envelope_apply(&envelope) * value;
 			value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
@@ -5208,7 +5377,7 @@ static void* run_mixer_thread(void* argument)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
 			float value = arandom::float_range(-1.0f, 1.0f);
-			float center_frequency = 50.0f * sin(0.5f * tau * t) + 65.0f;
+			float center_frequency = 50.0f * sin(1.0f * tau * t) + 65.0f;
 			float l = pitch_to_frequency(center_frequency - 5.0f);
 			float h = pitch_to_frequency(center_frequency + 5.0f);
 			bpf_set_passband(&bandpass, l, h, delta_time_per_frame);
@@ -5218,6 +5387,12 @@ static void* run_mixer_thread(void* argument)
 				mixed_samples[i * device_description.channels + j] = value;
 			}
 		}
+#endif
+#if 1
+		dft::make_complex(mixed_samples, spectrogram_frequencies, frames, device_description.channels);
+		dft::transform(spectrogram_frequencies, frames);
+		dft::make_frequencies(spectrogram_frequencies, spectrogram_samples, frames);
+		render::buffer_a_spectrogram_row(spectrogram_samples, frames);
 #endif
 
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
