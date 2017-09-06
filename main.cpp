@@ -3892,7 +3892,7 @@ static void buffer_a_spectrogram_row(float* samples, int width)
 		for(int j = 0; j < spectrogram_width; ++j)
 		{
 			int bin = pow(2.0f, j / 56.0f) - 1;
-			spectrogram_samples[base + j] = 1000.0f * samples[bin];
+			spectrogram_samples[base + j] = 200.0f * samples[bin];
 		}
 	}
 }
@@ -4701,6 +4701,33 @@ void system_shutdown();
 // Fast Fourier Transform.......................................................
 namespace fft {
 
+struct Table
+{
+	Complex* coefficients;
+};
+
+void table_compute(Table* table, int count)
+{
+	Complex* w = ALLOCATE(Complex, count / 2);
+	if(!w)
+	{
+		return;
+	}
+	w[0] = {1.0f, 0.0f};
+	w[1] = polar(1.0f, -tau / count);
+	for(int i = 2; i < count / 2; ++i)
+	{
+		Complex ci = {static_cast<float>(i), 0.0f};
+		w[i] = pow(w[1], ci);
+	}
+	table->coefficients = w;
+}
+
+void table_destroy(Table* table)
+{
+	SAFE_DEALLOCATE(table->coefficients);
+}
+
 void make_complex(float* samples, Complex* result, int count, int channels)
 {
 	for(int i = 0; i < count; ++i)
@@ -4773,18 +4800,10 @@ static void reorder(Complex* f1, int count)
 	}
 }
 
-void transform(Complex* samples, int count, double delta_time)
+void transform(Table* table, Complex* samples, int count, double delta_time)
 {
 	ASSERT(count >= 0 && is_power_of_two(count));
 	reorder(samples, count);
-	Complex* w = ALLOCATE(Complex, count / 2);
-	w[0] = {1.0f, 0.0f};
-	w[1] = polar(1.0f, -tau / count);
-	for(int i = 2; i < count / 2; ++i)
-	{
-		Complex ci = {static_cast<float>(i), 0.0f};
-		w[i] = pow(w[1], ci);
-	}
 	int n = 1;
 	int a = count / 2;
 	for(int j = 0; j < logb(count); ++j)
@@ -4794,7 +4813,7 @@ void transform(Complex* samples, int count, double delta_time)
 			if(!(i & n))
 			{
 				Complex temp = samples[i];
-				Complex Temp = w[(i * a) % (n * a)] * samples[i + n];
+				Complex Temp = table->coefficients[(i * a) % (n * a)] * samples[i + n];
 				samples[i] = temp + Temp;
 				samples[i + n] = temp - Temp;
 			}
@@ -4802,7 +4821,6 @@ void transform(Complex* samples, int count, double delta_time)
 		n *= 2;
 		a /= 2;
 	}
-	DEALLOCATE(w);
 	for(int i = 0; i < count; ++i)
 	{
 		samples[i] *= delta_time;
@@ -5515,6 +5533,8 @@ static void* run_mixer_thread(void* argument)
 	int spectrogram_count = 1024;
 	Complex* spectrogram_frequencies = ALLOCATE(Complex, spectrogram_count);
 	float* spectrogram_samples = ALLOCATE(float, spectrogram_count);
+	fft::Table fft_table;
+	fft::table_compute(&fft_table, spectrogram_count);
 
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
@@ -5524,7 +5544,7 @@ static void* run_mixer_thread(void* argument)
 	{
 		// Generate samples.
 		int frames = device_description.frames;
-#if 0
+#if 1
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
@@ -5559,11 +5579,10 @@ static void* run_mixer_thread(void* argument)
 #endif
 #if 1
 		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
-		fft::transform(spectrogram_frequencies, spectrogram_count, delta_time_per_frame);
+		fft::transform(&fft_table, spectrogram_frequencies, spectrogram_count, delta_time_per_frame);
 		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
 		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
 #endif
-
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
@@ -5598,6 +5617,7 @@ static void* run_mixer_thread(void* argument)
 		time += delta_time;
 	}
 
+	fft::table_destroy(&fft_table);
 	close_device(pcm_handle);
 	SAFE_DEALLOCATE(mixed_samples);
 	SAFE_DEALLOCATE(devicebound_samples);
