@@ -4492,10 +4492,10 @@ static float distort(float sample, float gain, float mix)
 	return lerp(sample, distorted, mix);
 }
 
-static float ring_modulate(float sample, float theta, double time, float blend, float rate)
+static float ring_modulate(float sample, float theta, double time, float mix, float rate)
 {
 	float modulation = sin(rate * theta * tau * time);
-	modulation = (1.0f - blend + blend * modulation);
+	modulation = (1.0f - mix + mix * modulation);
 	return sample * modulation;
 }
 
@@ -4589,11 +4589,11 @@ static void flanger_destroy(Flanger* flanger)
 
 static float flanger_apply(Flanger* flanger, float sample, float time)
 {
-	float modulation = (sin(tau * time * flanger->rate) + 1.0f) / 2.0f;
-	modulation = flanger->depth * modulation + flanger->delay;
-	float prior = tdl_tap(&flanger->delay_line, modulation);
+	float modulation = (sin(flanger->rate * tau * time) + 1.0f) / 2.0f;
+	float delay_time = flanger->depth * modulation + flanger->delay;
+	float past_sample = tdl_tap(&flanger->delay_line, delay_time);
 
-	float feedback = sample + flanger->feedback * prior;
+	float feedback = sample + flanger->feedback * past_sample;
 	tdl_record(&flanger->delay_line, feedback);
 	return feedback;
 }
@@ -4614,13 +4614,50 @@ static void vibrato_create(Vibrato* vibrato)
 	vibrato->delay = 220.0f;
 }
 
+static void vibrato_destroy(Vibrato* vibrato)
+{
+	tdl_destroy(&vibrato->delay_line);
+}
+
 static float vibrato_apply(Vibrato* vibrato, float sample, float time)
 {
 	float modulation = sin(vibrato->rate * tau * time);
 	modulation = (modulation + 1.0f) / 2.0f;
-	modulation = vibrato->depth * modulation + vibrato->delay;
-	float result = tdl_tap(&vibrato->delay_line, modulation);
+	float delay_time = vibrato->depth * modulation + vibrato->delay;
+
+	float result = tdl_tap(&vibrato->delay_line, delay_time);
 	tdl_record(&vibrato->delay_line, sample);
+	return result;
+}
+
+struct Chorus
+{
+	TDL delay_line;
+	float rate;
+	float depth;
+	float delay;
+};
+
+static void chorus_create(Chorus* chorus)
+{
+	tdl_create(&chorus->delay_line, 2048);
+	chorus->delay = 1024.0f;
+	chorus->depth = 40.0f;
+	chorus->rate = 2.0f;
+}
+
+static void chorus_destroy(Chorus* chorus)
+{
+	tdl_destroy(&chorus->delay_line);
+}
+
+static float chorus_apply(Chorus* chorus, float sample, float time)
+{
+	float modulation = sin(tau * chorus->rate * time);
+	modulation = (modulation + 1.0f) / 2.0f;
+	float delay_time = chorus->depth * modulation + chorus->delay;
+	float result = sample + tdl_tap(&chorus->delay_line, delay_time);
+	tdl_record(&chorus->delay_line, sample);
 	return result;
 }
 
@@ -4674,8 +4711,8 @@ struct Track
 
 void track_generate(Track* track)
 {
-	double note_spacing = 0.3;
-	double note_length = 0.1;
+	double note_spacing = 1.0;
+	double note_length = 0.7;
 	track->notes_count = 8;
 	for(int i = 0; i < track->notes_count; ++i)
 	{
@@ -5604,6 +5641,9 @@ static void* run_mixer_thread(void* argument)
 	bitcrush.depth = 5;
 	bitcrush.downsampling = 12;
 
+	Chorus chorus;
+	chorus_create(&chorus);
+
 	Track track;
 	track_generate(&track);
 
@@ -5626,9 +5666,10 @@ static void* run_mixer_thread(void* argument)
 			track_render(&track, &envelope, &theta, t);
 			float value = sin(tau * theta * t);
 			value = envelope_apply(&envelope) * value;
-			value = bitcrush_apply(&bitcrush, value);
+			// value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
-			value = apf_apply(&reverb, value);
+			value = chorus_apply(&chorus, value, t);
+			// value = apf_apply(&reverb, value);
 			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
 			{
