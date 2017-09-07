@@ -3714,7 +3714,6 @@ GLuint shader_vertex_colour;
 GLuint shader_texture_only;
 GLuint shader_camera_fade;
 GLuint camera_fade_dither_pattern;
-GLuint spectrogram;
 GLuint nearest_repeat;
 Matrix4 projection;
 Matrix4 sky_projection;
@@ -3728,7 +3727,6 @@ int terrain_triangles_count;
 CallList solid_calls;
 CallList fade_calls;
 bool debug_draw_colliders = false;
-float* spectrogram_samples;
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
@@ -3847,15 +3845,6 @@ static bool system_initialise()
 		glBindSampler(0, nearest_repeat);
 	}
 
-	// Create the spectrogram
-	{
-		glGenTextures(1, &spectrogram);
-		glBindTexture(GL_TEXTURE_2D, spectrogram);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 512, 1024, 0, GL_RED, GL_FLOAT, nullptr);
-
-		spectrogram_samples = ALLOCATE(float, 512 * 1024);
-	}
-
 	immediate::context_create();
 	immediate::context->shader = shader_vertex_colour;
 
@@ -3876,28 +3865,7 @@ static void system_terminate(bool functions_loaded)
 		glDeleteProgram(shader_texture_only);
 		glDeleteProgram(shader_camera_fade);
 		glDeleteTextures(1, &camera_fade_dither_pattern);
-		glDeleteTextures(1, &spectrogram);
-		SAFE_DEALLOCATE(spectrogram_samples);
 		immediate::context_destroy();
-	}
-}
-
-// TODO: This doesn't even synchronize between threads properly.
-static void buffer_a_spectrogram_row(float* samples, int width)
-{
-	const int row_height = 16;
-	const int spectrogram_width = 512;
-	const int spectrogram_height = 1024;
-	static int row = 0;
-	row = (row + 1) % (spectrogram_height / row_height);
-	for(int i = 0; i < row_height; ++i)
-	{
-		int base = (row_height * row + i) * spectrogram_width;
-		for(int j = 0; j < spectrogram_width; ++j)
-		{
-			int bin = pow(2.0f, j / 56.0f) - 1;
-			spectrogram_samples[base + j] = 200.0f * samples[bin];
-		}
 	}
 }
 
@@ -4052,26 +4020,6 @@ static void system_update(Vector3 position, World* world)
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 		glDepthMask(GL_TRUE);
-	}
-
-	// Draw debug UI.
-	{
-		glDisable(GL_DEPTH_TEST);
-
-		immediate::context->shader = shader_texture_only;
-		immediate::set_matrices(matrix4_identity, screen_projection);
-		glBindTexture(GL_TEXTURE_2D, spectrogram);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 512, 1024, 0, GL_RED, GL_FLOAT, spectrogram_samples);
-		Vector3 q0 = {0.0f   ,    0.0f, 0.0f};
-		Vector3 q1 = {+256.0f,    0.0f, 0.0f};
-		Vector3 q2 = {+256.0f, +256.0f, 0.0f};
-		Vector3 q3 = {0.0f   , +256.0f, 0.0f};
-		Quad quad = {q0, q1, q2, q3};
-		immediate::add_quad_textured(&quad);
-		immediate::draw();
-
-		immediate::context->shader = shader_vertex_colour;
-		glEnable(GL_DEPTH_TEST);
 	}
 }
 
@@ -4597,6 +4545,79 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 	return value;
 }
 
+struct DelayLine
+{
+	float* buffer;
+	int buffer_capacity;
+	int index;
+};
+
+static void delay_line_create(DelayLine* line, int capacity)
+{
+	line->buffer_capacity = capacity;
+	line->buffer = ALLOCATE(float, line->buffer_capacity);
+	line->index = capacity - 1;
+}
+
+static int mod(int x, int n)
+{
+	return (x % n + n) % n;
+}
+
+static void delay_line_record(DelayLine* line, float sample)
+{
+	line->index = mod(line->index - 1, line->buffer_capacity);
+	line->buffer[line->index] = sample;
+}
+
+static float delay_line_sample(DelayLine* line, float delay_time)
+{
+	int delay_int = delay_time;
+	float delay_fraction = delay_time - static_cast<float>(delay_int);
+
+	int next = (line->index + delay_int) % line->buffer_capacity;
+	float a = line->buffer[next];
+	float b = line->buffer[(next + 1) % line->buffer_capacity];
+
+	return lerp(a, b, delay_fraction);
+}
+
+struct Flanger
+{
+	DelayLine delay_line;
+	float rate;
+	float delay;
+	float depth;
+	float feedback;
+};
+
+static void flanger_create(Flanger* flanger, int max_delay)
+{
+	delay_line_create(&flanger->delay_line, max_delay);
+	flanger->rate = 1.0f;
+	flanger->delay = 220.0f;
+	flanger->depth = 220.0f;
+	flanger->feedback = 0.5f;
+}
+
+static float flanger_apply(Flanger* flanger, float sample, float time)
+{
+	float modulation = (sin(tau * time * flanger->rate) + 1.0f) / 2.0f;
+	modulation = flanger->depth * modulation + flanger->delay;
+	float prior = delay_line_sample(&flanger->delay_line, modulation);
+
+	float feedback = sample + flanger->feedback * prior;
+	delay_line_record(&flanger->delay_line, feedback);
+	return feedback;
+}
+
+static float ring_modulate(float sample, float theta, double time, float wetness, float rate)
+{
+	float modulation = sin(rate * theta * tau * time);
+	modulation = (1.0f - wetness + wetness * modulation);
+	return sample * modulation;
+}
+
 // §4.6 Track Functions.........................................................
 
 #define C  0
@@ -4708,6 +4729,7 @@ namespace fft {
 struct Table
 {
 	Complex* coefficients;
+	Complex* inverse_coefficients;
 	Complex* reorder_space;
 	int* indices;
 };
@@ -4715,6 +4737,7 @@ struct Table
 void table_destroy(Table* table)
 {
 	SAFE_DEALLOCATE(table->coefficients);
+	SAFE_DEALLOCATE(table->inverse_coefficients);
 	SAFE_DEALLOCATE(table->reorder_space);
 	SAFE_DEALLOCATE(table->indices);
 }
@@ -4760,6 +4783,21 @@ void table_compute(Table* table, int count)
 		w[i] = pow(w[1], ci);
 	}
 	table->coefficients = w;
+
+	w = ALLOCATE(Complex, count / 2);
+	if(!w)
+	{
+		table_destroy(table);
+		return;
+	}
+	w[0] = {1.0f, 0.0f};
+	w[1] = polar(1.0f, tau / count);
+	for(int i = 2; i < count / 2; ++i)
+	{
+		Complex ci = {static_cast<float>(i), 0.0f};
+		w[i] = pow(w[1], ci);
+	}
+	table->inverse_coefficients = w;
 
 	Complex* reorder_space = ALLOCATE(Complex, count);
 	if(!reorder_space)
@@ -4828,10 +4866,19 @@ static void reorder(Table* table, Complex* samples, int count)
 	}
 }
 
-void transform(Table* table, Complex* samples, int count, double delta_time)
+void transform(Table* table, Complex* samples, int count, double delta_time, bool inverse)
 {
 	ASSERT(count >= 0 && is_power_of_two(count));
 	reorder(table, samples, count);
+	Complex* f;
+	if(inverse)
+	{
+		f = table->inverse_coefficients;
+	}
+	else
+	{
+		f = table->coefficients;
+	}
 	int n = 1;
 	int a = count / 2;
 	for(int j = 0; j < logb(count); ++j)
@@ -4841,7 +4888,7 @@ void transform(Table* table, Complex* samples, int count, double delta_time)
 			if(!(i & n))
 			{
 				Complex s0 = samples[i];
-				Complex s1 = table->coefficients[(i * a) % (n * a)] * samples[i + n];
+				Complex s1 = f[(i * a) % (n * a)] * samples[i + n];
 				samples[i] = s0 + s1;
 				samples[i + n] = s0 - s1;
 			}
@@ -5558,11 +5605,8 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
-	int spectrogram_count = 1024;
-	Complex* spectrogram_frequencies = ALLOCATE(Complex, spectrogram_count);
-	float* spectrogram_samples = ALLOCATE(float, spectrogram_count);
-	fft::Table fft_table;
-	fft::table_compute(&fft_table, spectrogram_count);
+	Flanger flanger;
+	flanger_create(&flanger, 1024);
 
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
@@ -5581,7 +5625,8 @@ static void* run_mixer_thread(void* argument)
 			value = envelope_apply(&envelope) * value;
 			value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
-			value = overdrive(value, 0.1f);
+			value = flanger_apply(&flanger, value, t);
+			// value = overdrive(value, 0.1f);
 			value = apf_apply(&reverb, value);
 			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
@@ -5604,12 +5649,6 @@ static void* run_mixer_thread(void* argument)
 				mixed_samples[i * device_description.channels + j] = value;
 			}
 		}
-#endif
-#if 1
-		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
-		fft::transform(&fft_table, spectrogram_frequencies, spectrogram_count, delta_time_per_frame);
-		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
-		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
 #endif
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
@@ -5645,7 +5684,6 @@ static void* run_mixer_thread(void* argument)
 		time += delta_time;
 	}
 
-	fft::table_destroy(&fft_table);
 	close_device(pcm_handle);
 	SAFE_DEALLOCATE(mixed_samples);
 	SAFE_DEALLOCATE(devicebound_samples);
