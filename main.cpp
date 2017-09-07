@@ -4396,75 +4396,79 @@ static float bpf_apply(BPF* filter, float sample)
 	return filter->high.prior - filter->low.prior;
 }
 
+// Tapped Delay Line
+struct TDL
+{
+	float* buffer;
+	int buffer_capacity;
+	int index;
+};
+
+static void tdl_create(TDL* line, int capacity)
+{
+	line->buffer_capacity = capacity;
+	line->buffer = ALLOCATE(float, line->buffer_capacity);
+	line->index = capacity - 1;
+}
+
+static void tdl_destroy(TDL* line)
+{
+	SAFE_DEALLOCATE(line->buffer);
+}
+
+static void tdl_record(TDL* line, float sample)
+{
+	line->index = (line->index + line->buffer_capacity - 1) % line->buffer_capacity;
+	line->buffer[line->index] = sample;
+}
+
+static float tdl_tap(TDL* line, float delay_time)
+{
+	int delay_int = delay_time;
+	float delay_fraction = delay_time - static_cast<float>(delay_int);
+
+	int next = (line->index + delay_int) % line->buffer_capacity;
+	float a = line->buffer[next];
+	float b = line->buffer[(next + 1) % line->buffer_capacity];
+
+	return lerp(a, b, delay_fraction);
+}
+
+static float tdl_tap_last(TDL* line)
+{
+	int index = (line->index + line->buffer_capacity - 1) % line->buffer_capacity;
+	return line->buffer[index];
+}
+
 // All-Pass Filter
 struct APF
 {
-	float buffer[4096];
-	int buffer_capacity;
-	int head;
-	int tail;
+	TDL delay_line;
 	float gain;
 };
 
 void apf_create(APF* filter, float gain)
 {
-	filter->buffer_capacity = 4096;
-	filter->head = 0;
-	filter->tail = 0;
+	tdl_create(&filter->delay_line, 4096);
 	filter->gain = gain;
 }
 
-static void apf_record(APF* filter, float sample)
+void apf_destroy(APF* filter)
 {
-	int next = (filter->head + 1) % filter->buffer_capacity;
-	ASSERT(next != filter->tail);
-	if(next != filter->tail)
-	{
-		filter->buffer[filter->head] = sample;
-		filter->head = next;
-	}
-}
-
-static float apf_sample(APF* filter)
-{
-	float result;
-	if(filter->head == filter->tail)
-	{
-		result = 0.0f;
-	}
-	else
-	{
-		result = filter->buffer[filter->tail];
-		filter->tail = (filter->tail + 1) % filter->buffer_capacity;
-	}
-	return result;
-}
-
-static bool apf_is_buffer_full(APF* filter)
-{
-	return (filter->head + 1) % filter->buffer_capacity == filter->tail;
+	tdl_destroy(&filter->delay_line);
 }
 
 static float apf_apply(APF* filter, float sample)
 {
-	float prior;
-	if(apf_is_buffer_full(filter))
-	{
-		prior = apf_sample(filter);
-	}
-	else
-	{
-		prior = 0.0;
-	}
-
+	float prior = tdl_tap_last(&filter->delay_line);
 	float feedback = sample - (filter->gain * prior);
-	apf_record(filter, feedback);
+	tdl_record(&filter->delay_line, feedback);
 	return (filter->gain * feedback) + prior;
 }
 
 // §4.5 Effects.................................................................
 
-float overdrive(float sample, float factor)
+static float overdrive(float sample, float factor)
 {
 	// This uses a hyperbola of the formula y = -factor / (x + a) + 1 + a.
 	// The quadratic formula is used to find the xy offset, called a, such that
@@ -4478,6 +4482,21 @@ float overdrive(float sample, float factor)
 	float x = abs(sample);
 	float y = -factor / (x + a) + 1.0f + a;
 	return copysign(y, sample);
+}
+
+static float distort(float sample, float gain, float mix)
+{
+	float x = sample;
+	float a = x / abs(x);
+	float distorted = a * (1.0f - exp(gain * x * a));
+	return lerp(sample, distorted, mix);
+}
+
+static float ring_modulate(float sample, float theta, double time, float blend, float rate)
+{
+	float modulation = sin(rate * theta * tau * time);
+	modulation = (1.0f - blend + blend * modulation);
+	return sample * modulation;
 }
 
 struct Bitcrush
@@ -4545,46 +4564,9 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 	return value;
 }
 
-struct DelayLine
-{
-	float* buffer;
-	int buffer_capacity;
-	int index;
-};
-
-static void delay_line_create(DelayLine* line, int capacity)
-{
-	line->buffer_capacity = capacity;
-	line->buffer = ALLOCATE(float, line->buffer_capacity);
-	line->index = capacity - 1;
-}
-
-static int mod(int x, int n)
-{
-	return (x % n + n) % n;
-}
-
-static void delay_line_record(DelayLine* line, float sample)
-{
-	line->index = mod(line->index - 1, line->buffer_capacity);
-	line->buffer[line->index] = sample;
-}
-
-static float delay_line_sample(DelayLine* line, float delay_time)
-{
-	int delay_int = delay_time;
-	float delay_fraction = delay_time - static_cast<float>(delay_int);
-
-	int next = (line->index + delay_int) % line->buffer_capacity;
-	float a = line->buffer[next];
-	float b = line->buffer[(next + 1) % line->buffer_capacity];
-
-	return lerp(a, b, delay_fraction);
-}
-
 struct Flanger
 {
-	DelayLine delay_line;
+	TDL delay_line;
 	float rate;
 	float delay;
 	float depth;
@@ -4593,29 +4575,53 @@ struct Flanger
 
 static void flanger_create(Flanger* flanger, int max_delay)
 {
-	delay_line_create(&flanger->delay_line, max_delay);
+	tdl_create(&flanger->delay_line, max_delay);
 	flanger->rate = 1.0f;
 	flanger->delay = 220.0f;
 	flanger->depth = 220.0f;
 	flanger->feedback = 0.5f;
 }
 
+static void flanger_destroy(Flanger* flanger)
+{
+	tdl_destroy(&flanger->delay_line);
+}
+
 static float flanger_apply(Flanger* flanger, float sample, float time)
 {
 	float modulation = (sin(tau * time * flanger->rate) + 1.0f) / 2.0f;
 	modulation = flanger->depth * modulation + flanger->delay;
-	float prior = delay_line_sample(&flanger->delay_line, modulation);
+	float prior = tdl_tap(&flanger->delay_line, modulation);
 
 	float feedback = sample + flanger->feedback * prior;
-	delay_line_record(&flanger->delay_line, feedback);
+	tdl_record(&flanger->delay_line, feedback);
 	return feedback;
 }
 
-static float ring_modulate(float sample, float theta, double time, float wetness, float rate)
+struct Vibrato
 {
-	float modulation = sin(rate * theta * tau * time);
-	modulation = (1.0f - wetness + wetness * modulation);
-	return sample * modulation;
+	TDL delay_line;
+	float rate;
+	float depth;
+	float delay;
+};
+
+static void vibrato_create(Vibrato* vibrato)
+{
+	tdl_create(&vibrato->delay_line, 512);
+	vibrato->rate = 8.0f;
+	vibrato->depth = 220.0f;
+	vibrato->delay = 220.0f;
+}
+
+static float vibrato_apply(Vibrato* vibrato, float sample, float time)
+{
+	float modulation = sin(vibrato->rate * tau * time);
+	modulation = (modulation + 1.0f) / 2.0f;
+	modulation = vibrato->depth * modulation + vibrato->delay;
+	float result = tdl_tap(&vibrato->delay_line, modulation);
+	tdl_record(&vibrato->delay_line, sample);
+	return result;
 }
 
 // §4.6 Track Functions.........................................................
@@ -5605,9 +5611,6 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
-	Flanger flanger;
-	flanger_create(&flanger, 1024);
-
 	int pitch = 69;
 	float theta = pitch_to_frequency(pitch);
 	double volume = 0.5;
@@ -5625,8 +5628,6 @@ static void* run_mixer_thread(void* argument)
 			value = envelope_apply(&envelope) * value;
 			value = bitcrush_apply(&bitcrush, value);
 			value = lpf_apply(&lowpass, value);
-			value = flanger_apply(&flanger, value, t);
-			// value = overdrive(value, 0.1f);
 			value = apf_apply(&reverb, value);
 			value = clamp(volume * value, -1.0f, 1.0f);
 			for(int j = 0; j < device_description.channels; ++j)
