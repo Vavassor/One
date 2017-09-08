@@ -325,6 +325,29 @@ struct Vector2
 	float x, y;
 };
 
+Vector2 operator - (Vector2 v0, Vector2 v1)
+{
+	Vector2 result;
+	result.x = v0.x - v1.x;
+	result.y = v0.y - v1.y;
+	return result;
+}
+
+Vector2 perp(Vector2 v)
+{
+	return {v.y, -v.x};
+}
+
+float dot(Vector2 v0, Vector2 v1)
+{
+	return (v0.x * v1.x) + (v0.y * v1.y);
+}
+
+float length(Vector2 v)
+{
+	return sqrt((v.x * v.x) + (v.y * v.y));
+}
+
 struct Vector3
 {
 	float x, y, z;
@@ -3701,6 +3724,51 @@ void object_generate_sky(Object* object)
 	DEALLOCATE(indices);
 }
 
+struct SimplifyResult
+{
+	Vector2* points;
+	int count;
+};
+
+static float distance_to_line(Vector2 point, Vector2 start, Vector2 end)
+{
+	Vector2 v = perp(end - start);
+	Vector2 r = start - point;
+	return abs(dot(v, r)) / length(v);
+}
+
+static void simplify_polyline_innards(Vector2* points, int start, int end, float epsilon, SimplifyResult* result)
+{
+	float max_distance = 0.0f;
+	int pivot = 0;
+	for(int i = start + 1; i < end; ++i)
+	{
+		float d = distance_to_line(points[i], points[start], points[end]);
+		if(d > max_distance)
+		{
+			pivot = i;
+			max_distance = d;
+		}
+	}
+	if(max_distance > epsilon)
+	{
+		simplify_polyline_innards(points, start, pivot - 1, epsilon, result);
+		simplify_polyline_innards(points, pivot, end, epsilon, result);
+	}
+	else
+	{
+		result->points[result->count] = points[end];
+		result->count += 1;
+	}
+}
+
+static void simplify_polyline(Vector2* points, int count, float epsilon, SimplifyResult* result)
+{
+	result->points[result->count] = points[0];
+	result->count = 1;
+	simplify_polyline_innards(points, 0, count - 1, epsilon, result);
+}
+
 // Whole system
 
 struct CallList
@@ -3730,6 +3798,13 @@ bool debug_draw_colliders = false;
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
+
+struct
+{
+	SimplifyResult simplified;
+	Vector2* points;
+	int points_count;
+} spectrogram;
 
 static bool system_initialise()
 {
@@ -3845,6 +3920,14 @@ static bool system_initialise()
 		glBindSampler(0, nearest_repeat);
 	}
 
+	// Spectrogram
+	{
+		spectrogram.points_count = 1024;
+		spectrogram.points = ALLOCATE(Vector2, spectrogram.points_count);
+		spectrogram.simplified.count = 0;
+		spectrogram.simplified.points = ALLOCATE(Vector2, spectrogram.points_count);
+	}
+
 	immediate::context_create();
 	immediate::context->shader = shader_vertex_colour;
 
@@ -3865,6 +3948,11 @@ static void system_terminate(bool functions_loaded)
 		glDeleteProgram(shader_texture_only);
 		glDeleteProgram(shader_camera_fade);
 		glDeleteTextures(1, &camera_fade_dither_pattern);
+
+		// Spectrogram
+		DEALLOCATE(spectrogram.points);
+		DEALLOCATE(spectrogram.simplified.points);
+
 		immediate::context_destroy();
 	}
 }
@@ -3876,6 +3964,19 @@ static void resize_viewport(int width, int height)
 	sky_projection = perspective_projection_matrix(fov, width, height, 0.001f, 1.0f);
 	screen_projection = orthographic_projection_matrix(width, height, -1.0f, 1.0f);
 	glViewport(0, 0, width, height);
+}
+
+static void buffer_a_spectrogram_row(float* samples, int count)
+{
+	count = MIN(count / 2, spectrogram.points_count);
+	for(int i = 0; i < count; ++i)
+	{
+		int bin = pow(2.0f, i / 56.0f) - 1;
+		float x = i / 128.0f - 2.0f;
+		float y = samples[bin] / 2.0f - 0.3f;
+		spectrogram.points[i] = {x, y};
+	}
+	simplify_polyline(spectrogram.points, count, 0.01f, &spectrogram.simplified);
 }
 
 static void system_update(Vector3 position, World* world)
@@ -4020,6 +4121,19 @@ static void system_update(Vector3 position, World* world)
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 		glDepthMask(GL_TRUE);
+	}
+
+	// Spectrogram
+	{
+		SimplifyResult* result = &spectrogram.simplified;
+		for(int i = 0; i < result->count - 1; ++i)
+		{
+			Vector2 a = result->points[i];
+			Vector2 b = result->points[i + 1];
+			Vector3 start = {a.x, 0.0f, a.y};
+			Vector3 end = {b.x, 0.0f, b.y};
+			immediate::add_line(start, end, vector3_one);
+		}
 	}
 }
 
@@ -4257,12 +4371,84 @@ struct ADSR
 	float attack_base, attack_coef;
 	float decay_base, decay_coef;
 	float release_base, release_coef;
+	float attack_rate;
+	float decay_rate;
+	float release_rate;
+	float ratio_attack;
+	float ratio_decay_release;
 };
+
+static float envelope_curve(float ratio, float rate)
+{
+	return exp(-log((1.0f + ratio) / ratio) / rate);
+}
+
+static void envelope_set_attack(ADSR* envelope, float rate)
+{
+	envelope->attack_rate = rate;
+	float ratio = envelope->ratio_attack;
+	float coef = envelope_curve(ratio, rate);
+	envelope->attack_coef = coef;
+	envelope->attack_base = (1.0f + ratio) * (1.0f - coef);
+}
+
+static void envelope_set_decay(ADSR* envelope, float rate)
+{
+	envelope->decay_rate = rate;
+	float ratio = envelope->ratio_decay_release;
+	float coef = envelope_curve(ratio, rate);
+	envelope->decay_coef = coef;
+	envelope->decay_base = (envelope->sustain - ratio) * (1.0f - coef);
+}
+
+static void envelope_set_sustain(ADSR* envelope, float sustain)
+{
+	envelope->sustain = sustain;
+	// Recalculate the decay base, since it's the only value affected by
+	// sustain.
+	envelope->decay_base = (sustain - envelope->ratio_decay_release) * (1.0f - envelope->decay_coef);
+}
+
+static void envelope_set_release(ADSR* envelope, float rate)
+{
+	envelope->release_rate = rate;
+	float ratio = envelope->ratio_decay_release;
+	float coef = envelope_curve(ratio, envelope->release_rate);
+	envelope->release_coef = coef;
+	envelope->release_base = -ratio * (1.0f - coef);
+}
+
+static void envelope_set_ratio_attack(ADSR* envelope, float ratio)
+{
+	envelope->ratio_attack = ratio;
+	// Recalculate the attack curve with the new target ratio.
+	float coef = envelope_curve(ratio, envelope->attack_rate);
+	envelope->attack_coef = coef;
+	envelope->attack_base = (1.0f + ratio) * (1.0f - coef);
+}
+
+static void envelope_set_ratio_decay_release(ADSR* envelope, float ratio)
+{
+	envelope->ratio_decay_release = ratio;
+	// Recalculate the decay and release curves with the new target ratio.
+	float coef = envelope_curve(ratio, envelope->decay_rate);
+	envelope->decay_coef = coef;
+	envelope->decay_base = (envelope->sustain - ratio) * (1.0f - coef);
+	coef = envelope_curve(ratio, envelope->release_rate);
+	envelope->release_coef = coef;
+	envelope->release_base = -ratio * (1.0f - coef);
+}
 
 static void envelope_reset(ADSR* envelope)
 {
 	envelope->state = ADSR::State::Neutral;
 	envelope->prior = 0.0f;
+	envelope->ratio_attack = 0.3f;
+	envelope->ratio_decay_release = 0.0001f;
+	envelope_set_attack(envelope, 0.0f);
+	envelope_set_decay(envelope, 0.0f);
+	envelope_set_sustain(envelope, 1.0f);
+	envelope_set_release(envelope, 0.0f);
 }
 
 static float envelope_apply(ADSR* envelope)
@@ -4711,8 +4897,8 @@ struct Track
 
 void track_generate(Track* track)
 {
-	double note_spacing = 1.0;
-	double note_length = 0.7;
+	double note_spacing = 0.3;
+	double note_length = 0.4;
 	track->notes_count = 8;
 	for(int i = 0; i < track->notes_count; ++i)
 	{
@@ -4733,24 +4919,80 @@ void track_generate(Track* track)
 	track->ended = true;
 }
 
-void track_render(Track* track, ADSR* envelope, float* frequency, double time)
+static int track_find_envelope(int* envelope_notes, int voices, int note)
+{
+	for(int i = 0; i < voices; ++i)
+	{
+		if(envelope_notes[i] == note)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int track_assign_envelope(int* envelope_notes, int voices, int note)
+{
+	for(int i = 0; i < voices; ++i)
+	{
+		if(envelope_notes[i] == -1)
+		{
+			envelope_notes[i] = note;
+			return i;
+		}
+	}
+	// If all envelopes are currently in use, evict the first one.
+	envelope_notes[0] = note;
+	return 0;
+}
+
+struct RenderResult
+{
+	int envelopes[16];
+	float frequencies[16];
+	int envelopes_count;
+};
+
+void track_render(Track* track, ADSR* envelopes, int* envelope_notes, int voices, double time, RenderResult* result)
 {
 	for(int i = track->index; i < track->notes_count; ++i)
 	{
 		Track::Note note = track->notes[i];
-		if(note.start <= time && track->ended)
+		if(note.start <= time)
 		{
-			envelope_gate(envelope, true);
-			*frequency = pitch_to_frequency(note.pitch);
-			track->ended = false;
-			break;
+			int index = track_find_envelope(envelope_notes, voices, i);
+			if(index == -1)
+			{
+				index = track_assign_envelope(envelope_notes, voices, i);
+				envelope_gate(envelopes + index, true);
+			}
+			else if(note.end <= time)
+			{
+				if(index != -1)
+				{
+					envelope_gate(envelopes + index, false);
+				}
+				track->index = i + 1;
+			}
 		}
-		else if(note.end <= time && !track->ended)
+	}
+
+	for(int i = 0; i < voices; ++i)
+	{
+		int note_index = envelope_notes[i];
+		if(note_index != -1)
 		{
-			envelope_gate(envelope, false);
-			track->index = i + 1;
-			track->ended = true;
-			break;
+			if(envelopes[i].state == ADSR::State::Neutral)
+			{
+				envelope_notes[i] = -1;
+			}
+			else
+			{
+				Track::Note note = track->notes[note_index];
+				result->envelopes[result->envelopes_count] = i;
+				result->frequencies[result->envelopes_count] = pitch_to_frequency(note.pitch);
+				result->envelopes_count += 1;
+			}
 		}
 	}
 }
@@ -5619,15 +5861,23 @@ static void* run_mixer_thread(void* argument)
 
 	// Setup test effects and filters.
 
-	ADSR envelope;
-	envelope_reset(&envelope);
-	envelope.sustain = 0.25f;
-	envelope.attack_base = 441.0f / device_description.sample_rate;
-	envelope.attack_coef = 1.0f;
-	envelope.decay_base = -0.441f / device_description.sample_rate;
-	envelope.decay_coef = 1.0f;
-	envelope.release_base = -441.0f / device_description.sample_rate;
-	envelope.release_coef = 1.0f;
+	int envelopes_count = 16;
+	ADSR envelopes[envelopes_count];
+	for(int i = 0; i < envelopes_count; ++i)
+	{
+		ADSR* envelope = envelopes + i;
+		envelope_reset(envelope);
+		envelope_set_attack(envelope, 0.1f * device_description.sample_rate);
+		envelope_set_decay(envelope, 0.3f * device_description.sample_rate);
+		envelope_set_sustain(envelope, 0.7f);
+		envelope_set_release(envelope, 0.5f * device_description.sample_rate);
+	}
+
+	int envelope_notes[envelopes_count];
+	for(int i = 0; i < envelopes_count; ++i)
+	{
+		envelope_notes[i] = -1;
+	}
 
 	LPF lowpass;
 	lpf_set_corner_frequency(&lowpass, 440.0f, delta_time_per_frame);
@@ -5651,31 +5901,48 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
-	int pitch = 69;
-	float theta = pitch_to_frequency(pitch);
+	int spectrogram_count = 1024;
+	Complex* spectrogram_frequencies = ALLOCATE(Complex, spectrogram_count);
+	float* spectrogram_samples = ALLOCATE(float, spectrogram_count);
+	fft::Table fft_table;
+	fft::table_compute(&fft_table, spectrogram_count);
+
 	double volume = 0.5;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
 		// Generate samples.
 		int frames = device_description.frames;
+
+		fill_with_silence(mixed_samples, 0, samples);
 #if 1
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / device_description.sample_rate + time;
-			track_render(&track, &envelope, &theta, t);
-			float value = sin(tau * theta * t);
-			value = envelope_apply(&envelope) * value;
-			// value = bitcrush_apply(&bitcrush, value);
-			value = lpf_apply(&lowpass, value);
-			value = chorus_apply(&chorus, value, t);
-			// value = apf_apply(&reverb, value);
-			value = clamp(volume * value, -1.0f, 1.0f);
-			for(int j = 0; j < device_description.channels; ++j)
+			RenderResult result = {};
+			track_render(&track, envelopes, envelope_notes, envelopes_count, t, &result);
+			for(int j = 0; j < result.envelopes_count; ++j)
 			{
-				mixed_samples[i * device_description.channels + j] = value;
+				ADSR* envelope = &envelopes[result.envelopes[j]];
+				float theta = result.frequencies[j];
+				float value = sawtooth_wave(theta * t);
+				value = envelope_apply(envelope) * value;
+				// value = bitcrush_apply(&bitcrush, value);
+				// value = lpf_apply(&lowpass, value);
+				// value = chorus_apply(&chorus, value, t);
+				// value = apf_apply(&reverb, value);
+				value = clamp(volume * value, -1.0f, 1.0f);
+				for(int k = 0; k < device_description.channels; ++k)
+				{
+					mixed_samples[i * device_description.channels + k] += value;
+				}
 			}
 		}
+
+		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
+		fft::transform(&fft_table, spectrogram_frequencies, spectrogram_count, delta_time, false);
+		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
+		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
 #else
 		for(int i = 0; i < frames; ++i)
 		{
