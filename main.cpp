@@ -2931,6 +2931,17 @@ void add_line(Vector3 start, Vector3 end, Vector3 colour)
 	c->draw_mode = DrawMode::Lines;
 }
 
+void add_line_gradient(Vector3 start, Vector3 end, Vector3 colour0, Vector3 colour1)
+{
+	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
+	ASSERT(c->filled + 2 < context_max_vertices);
+	c->vertices[c->filled] = {start, colour0};
+	c->vertices[c->filled+1] = {end, colour1};
+	c->filled += 2;
+	c->draw_mode = DrawMode::Lines;
+}
+
 // This is an approximate formula for an ellipse's perimeter. It has the
 // greatest error when the ratio of a to b is largest.
 static float ellipse_perimeter(float a, float b)
@@ -3757,16 +3768,43 @@ static void simplify_polyline_innards(Vector2* points, int start, int end, float
 	}
 	else
 	{
-		result->points[result->count] = points[end];
+		result->points[result->count] = points[start];
 		result->count += 1;
 	}
 }
 
 static void simplify_polyline(Vector2* points, int count, float epsilon, SimplifyResult* result)
 {
-	result->points[result->count] = points[0];
-	result->count = 1;
+	result->count = 0;
 	simplify_polyline_innards(points, 0, count - 1, epsilon, result);
+	result->points[result->count] = points[count - 1];
+	result->count += 1;
+}
+
+// Based on Dave Green's public domain (Unlicense license) Fortran 77
+// implementation for cube helix colour table generation.
+static void cube_helix(Vector3* colours, int levels, float start_hue, float rotations, float saturation_min, float saturation_max, float lightness_min, float lightness_max, float gamma)
+{
+	for(int i = 0; i < levels; ++i)
+	{
+		float fraction = lerp(lightness_min, lightness_max, i / static_cast<float>(levels));
+		float saturation = lerp(saturation_min, saturation_max, fraction);
+		float angle = tau * (start_hue / 3.0f + 1.0f + rotations * fraction);
+		fraction = pow(fraction, gamma);
+		float amplitude = saturation * fraction * (1.0f - fraction) / 2.0f;
+		float r = -0.14861f * cos(angle) + 1.78277f * sin(angle);
+		float g = -0.29227f * cos(angle) - 0.90649f * sin(angle);
+		float b = 1.97294f * cos(angle);
+		r = fraction + amplitude * r;
+		g = fraction + amplitude * g;
+		b = fraction + amplitude * b;
+		r = clamp(r, 0.0f, 1.0f);
+		g = clamp(g, 0.0f, 1.0f);
+		b = clamp(b, 0.0f, 1.0f);
+		colours[i].x = r;
+		colours[i].y = g;
+		colours[i].z = b;
+	}
 }
 
 // Whole system
@@ -3801,9 +3839,12 @@ const float far_plane = 12.0f;
 
 struct
 {
-	SimplifyResult simplified;
+	Vector2* row_points;
+	int row_points_count;
 	Vector2* points;
-	int points_count;
+	int* row_widths;
+	int height;
+	int row;
 } spectrogram;
 
 static bool system_initialise()
@@ -3922,10 +3963,14 @@ static bool system_initialise()
 
 	// Spectrogram
 	{
-		spectrogram.points_count = 1024;
-		spectrogram.points = ALLOCATE(Vector2, spectrogram.points_count);
-		spectrogram.simplified.count = 0;
-		spectrogram.simplified.points = ALLOCATE(Vector2, spectrogram.points_count);
+		int width = 1024;
+		int height = 256;
+		spectrogram.row = 0;
+		spectrogram.row_points_count = width;
+		spectrogram.row_points = ALLOCATE(Vector2, width);
+		spectrogram.points = ALLOCATE(Vector2, width * height);
+		spectrogram.row_widths = ALLOCATE(int, height);
+		spectrogram.height = height;
 	}
 
 	immediate::context_create();
@@ -3950,8 +3995,9 @@ static void system_terminate(bool functions_loaded)
 		glDeleteTextures(1, &camera_fade_dither_pattern);
 
 		// Spectrogram
+		DEALLOCATE(spectrogram.row_points);
 		DEALLOCATE(spectrogram.points);
-		DEALLOCATE(spectrogram.simplified.points);
+		DEALLOCATE(spectrogram.row_widths);
 
 		immediate::context_destroy();
 	}
@@ -3968,15 +4014,21 @@ static void resize_viewport(int width, int height)
 
 static void buffer_a_spectrogram_row(float* samples, int count)
 {
-	count = MIN(count / 2, spectrogram.points_count);
+	count = MIN(count / 2, spectrogram.row_points_count);
 	for(int i = 0; i < count; ++i)
 	{
 		int bin = pow(2.0f, i / 56.0f) - 1;
-		float x = i / 128.0f - 2.0f;
-		float y = samples[bin] / 2.0f - 0.3f;
-		spectrogram.points[i] = {x, y};
+		float sample = (samples[bin] + 1.0f) / 2.0f;
+		float decibels = 10.0f * log(1.0f + sample) / log(10.0f);
+		float x = i / 128.0f;
+		float y = decibels / 5.0f;
+		spectrogram.row_points[i] = {x, y};
 	}
-	simplify_polyline(spectrogram.points, count, 0.01f, &spectrogram.simplified);
+	SimplifyResult result;
+	result.points = spectrogram.points + spectrogram.row_points_count * spectrogram.row;
+	simplify_polyline(spectrogram.row_points, count, 0.02f, &result);
+	spectrogram.row_widths[spectrogram.row] = result.count;
+	spectrogram.row = (spectrogram.row + 1) % spectrogram.height;
 }
 
 static void system_update(Vector3 position, World* world)
@@ -4125,15 +4177,36 @@ static void system_update(Vector3 position, World* world)
 
 	// Spectrogram
 	{
-		SimplifyResult* result = &spectrogram.simplified;
-		for(int i = 0; i < result->count - 1; ++i)
+		glDisable(GL_DEPTH_TEST);
+
+		Vector3 palette[16];
+		cube_helix(palette, 16, 1.5f, -1.5f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f);
+
+		Matrix4 view = look_at_matrix({-3.0f, 5.0f, 3.0f}, {0.0f, 2.0f, 0.0f}, vector3_unit_z);
+		immediate::context->view_projection = projection * view;
+
+		int full_width = spectrogram.row_points_count;
+		for(int i = 0; i < spectrogram.height; ++i)
 		{
-			Vector2 a = result->points[i];
-			Vector2 b = result->points[i + 1];
-			Vector3 start = {a.x, 0.0f, a.y};
-			Vector3 end = {b.x, 0.0f, b.y};
-			immediate::add_line(start, end, vector3_one);
+			float y = i / 64.0f;
+			for(int j = 0; j < spectrogram.row_widths[i] - 1; ++j)
+			{
+				Vector2 a = spectrogram.points[full_width * i + j];
+				Vector2 b = spectrogram.points[full_width * i + j + 1];
+				Vector3 start = {a.x - 2.0f, y, a.y};
+				Vector3 end = {b.x - 2.0f, y, b.y};
+				int index = a.y * 8.0f;
+				index = index % 15;
+				Vector3 colour0 = palette[index];
+				index = b.y * 8.0f;
+				index = index % 15;
+				Vector3 colour1 = palette[index];
+				immediate::add_line_gradient(start, end, colour0, colour1);
+			}
+			immediate::draw();
 		}
+
+		glEnable(GL_DEPTH_TEST);
 	}
 }
 
@@ -4889,17 +4962,16 @@ struct Track
 		double end;
 		int pitch;
 	};
-	Note notes[16];
+	Note notes[32];
 	int notes_count;
 	int index;
-	bool ended;
 };
 
 void track_generate(Track* track)
 {
 	double note_spacing = 0.3;
 	double note_length = 0.4;
-	track->notes_count = 8;
+	track->notes_count = 32;
 	for(int i = 0; i < track->notes_count; ++i)
 	{
 		int degrees = pentatonic_major[0];
@@ -4916,7 +4988,6 @@ void track_generate(Track* track)
 		note->end = note_start + note_length;
 	}
 	track->index = 0;
-	track->ended = true;
 }
 
 static int track_find_envelope(int* envelope_notes, int voices, int note)
@@ -5925,7 +5996,7 @@ static void* run_mixer_thread(void* argument)
 			{
 				ADSR* envelope = &envelopes[result.envelopes[j]];
 				float theta = result.frequencies[j];
-				float value = sawtooth_wave(theta * t);
+				float value = square_wave(theta * t);
 				value = envelope_apply(envelope) * value;
 				// value = bitcrush_apply(&bitcrush, value);
 				// value = lpf_apply(&lowpass, value);
@@ -5938,11 +6009,10 @@ static void* run_mixer_thread(void* argument)
 				}
 			}
 		}
-
-		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
-		fft::transform(&fft_table, spectrogram_frequencies, spectrogram_count, delta_time, false);
-		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
-		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
+		for(int i = 0; i < samples; ++i)
+		{
+			mixed_samples[i] = clamp(mixed_samples[i], -1.0f, 1.0f);
+		}
 #else
 		for(int i = 0; i < frames; ++i)
 		{
@@ -5959,6 +6029,11 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 #endif
+		fft::make_complex(mixed_samples, spectrogram_frequencies, spectrogram_count, device_description.channels);
+		fft::transform(&fft_table, spectrogram_frequencies, spectrogram_count, delta_time, false);
+		fft::make_amplitude_spectrum(spectrogram_frequencies, spectrogram_samples, spectrogram_count);
+		render::buffer_a_spectrogram_row(spectrogram_samples, spectrogram_count);
+
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
