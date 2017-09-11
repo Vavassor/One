@@ -33,12 +33,13 @@ Table Of Contents...............................................................
   §1.1 Globally-Useful Things
   §1.2 Clock Declarations
   §1.3 Logging Declarations
-  §1.4 Immediate Mode Drawing Declarations
-  §1.5 Random Number Generation
-  §1.6 Vectors
-  §1.7 Quaternions
-  §1.8 Matrices
-  §1.9 Complex Numbers
+  §1.4 Atomic Declarations
+  §1.5 Immediate Mode Drawing Declarations
+  §1.6 Random Number Generation
+  §1.7 Vectors
+  §1.8 Quaternions
+  §1.9 Matrices
+  §1.10 Complex Numbers
 
 2. Physics
   §2.1 Geometry Functions
@@ -87,6 +88,14 @@ Table Of Contents...............................................................
 #define OS_WINDOWS
 #else
 #error Failed to figure out what operating system this is.
+#endif
+
+#if defined(_MSC_VER)
+#define COMPILER_MSVC
+#elif defined(__GNUC__)
+#define COMPILER_GCC
+#else
+#error Failed to figure out the compiler used.
 #endif
 
 #include <cstdarg>
@@ -206,7 +215,25 @@ void log_add_message(LogLevel level, const char* format, ...);
 	log_add_message(LogLevel::Debug, format, ##__VA_ARGS__)
 #endif
 
-// §1.4 Immediate Mode Drawing Declarations.....................................
+// §1.4 Atomic Declarations.....................................................
+
+#if defined(COMPILER_MSVC)
+typedef long AtomicFlag;
+#elif defined(COMPILER_GCC)
+typedef bool AtomicFlag;
+#endif
+
+typedef long AtomicInt;
+
+bool atomic_flag_test_and_set(AtomicFlag* flag);
+void atomic_flag_clear(AtomicFlag* flag);
+
+void atomic_int_store(AtomicInt* i, long value);
+long atomic_int_load(AtomicInt* i);
+long atomic_int_add(AtomicInt* augend, long addend);
+long atomic_int_subtract(AtomicInt* minuend, long subtrahend);
+
+// §1.5 Immediate Mode Drawing Declarations.....................................
 
 struct Vector3;
 struct AABB;
@@ -221,7 +248,7 @@ void add_triangle(Triangle* triangle, Vector3 colour);
 
 } // namespace immediate
 
-// §1.5 Random Number Generation................................................
+// §1.6 Random Number Generation................................................
 
 namespace arandom {
 
@@ -308,7 +335,7 @@ float float_range(float min, float max)
 
 } // namespace arandom
 
-// §1.6 Vectors.................................................................
+// §1.7 Vectors.................................................................
 
 #include <cmath>
 #include <cfloat>
@@ -520,7 +547,7 @@ Vector3 reciprocal(Vector3 v)
 	return result;
 }
 
-// §1.7 Quaternions.............................................................
+// §1.8 Quaternions.............................................................
 
 static bool float_almost_one(float x)
 {
@@ -564,7 +591,7 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 	return result;
 }
 
-// §1.8 Matrices................................................................
+// §1.9 Matrices................................................................
 
 struct Matrix4
 {
@@ -860,7 +887,7 @@ Matrix4 inverse_transform(const Matrix4& m)
 	}};
 }
 
-// §1.9 Complex Numbers.........................................................
+// §1.10 Complex Numbers........................................................
 
 struct Complex
 {
@@ -4975,7 +5002,6 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 		{
 			if(voices[i].envelope.state == ADSR::State::Neutral)
 			{
-				voice_reset(voices + i);
 				voice_map[i] = -1;
 			}
 			else
@@ -4995,12 +5021,14 @@ struct Stream
 {
 	float* samples;
 	int samples_count;
+	float volume;
 };
 
 static void stream_create(Stream* stream, int capacity)
 {
 	stream->samples = ALLOCATE(float, capacity);
 	stream->samples_count = capacity;
+	stream->volume = 1.0f;
 }
 
 static void stream_destroy(Stream* stream)
@@ -5016,15 +5044,80 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 	fill_with_silence(mixed_samples, 0, samples);
 	for(int i = 0; i < streams_count; ++i)
 	{
+		Stream* stream = streams + i;
 		for(int j = 0; j < samples; ++j)
 		{
-			mixed_samples[j] += streams[i].samples[j];
+			mixed_samples[j] += stream->volume * stream->samples[j];
 		}
 	}
 	for(int i = 0; i < samples; ++i)
 	{
 		mixed_samples[i] = clamp(volume * mixed_samples[i], -1.0f, 1.0f);
 	}
+}
+
+// Message Queue................................................................
+
+struct Message
+{
+	enum class Code
+	{
+		Boop,
+	} code;
+
+	union
+	{
+		struct
+		{
+			bool on;
+		} boop;
+	};
+};
+
+static const int max_messages = 32;
+
+struct MessageQueue
+{
+	Message messages[max_messages];
+	AtomicInt head;
+	AtomicInt tail;
+};
+
+static bool was_empty(MessageQueue* queue)
+{
+	return atomic_int_load(&queue->head) == atomic_int_load(&queue->tail);
+}
+
+static bool was_full(MessageQueue* queue)
+{
+	int next_tail = atomic_int_load(&queue->tail);
+	next_tail = (next_tail + 1) % max_messages;
+	return next_tail == atomic_int_load(&queue->head);
+}
+
+static bool enqueue_message(MessageQueue* queue, Message* message)
+{
+	int current_tail = atomic_int_load(&queue->tail);
+	int next_tail = (current_tail + 1) % max_messages;
+	if(next_tail != atomic_int_load(&queue->head))
+	{
+		queue->messages[current_tail] = *message;
+		atomic_int_store(&queue->tail, next_tail);
+		return true;
+	}
+	return false;
+}
+
+static bool dequeue_message(MessageQueue* queue, Message* message)
+{
+	int current_head = atomic_int_load(&queue->head);
+	if(current_head == atomic_int_load(&queue->tail))
+	{
+		return false;
+	}
+	*message = queue->messages[current_head];
+	atomic_int_store(&queue->head, (current_head + 1) % max_messages);
+	return true;
 }
 
 } // namespace audio
@@ -5035,6 +5128,7 @@ namespace audio {
 
 bool system_startup();
 void system_shutdown();
+void system_send_message(Message* message);
 
 } // namespace audio
 
@@ -5246,6 +5340,12 @@ static bool key_tapped(UserKey key)
 	return keys_pressed[which] && edge_counts[which] == 0;
 }
 
+static bool key_released(UserKey key)
+{
+	int which = static_cast<int>(key);
+	return !keys_pressed[which] && edge_counts[which] == 0;
+}
+
 static bool key_pressed(UserKey key)
 {
 	int which = static_cast<int>(key);
@@ -5313,6 +5413,20 @@ static void main_update()
 		const float speed = 0.08f;
 		velocity.x += speed * d.x;
 		velocity.y += speed * d.y;
+	}
+	if(key_tapped(UserKey::Space))
+	{
+		audio::Message message;
+		message.code = audio::Message::Code::Boop;
+		message.boop.on = true;
+		audio::system_send_message(&message);
+	}
+	if(key_released(UserKey::Space))
+	{
+		audio::Message message;
+		message.code = audio::Message::Code::Boop;
+		message.boop.on = false;
+		audio::system_send_message(&message);
 	}
 
 	Vector3 radius = {0.3f, 0.3f, 0.5f};
@@ -5490,22 +5604,12 @@ static bool ogl_load_functions()
 
 // §7.1 Atomic Functions........................................................
 
-#if defined(_MSC_VER)
-#define COMPILER_MSVC
+#if defined(COMPILER_MSVC)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
 #include <intrin.h>
-
-#elif defined(__GNUC__)
-#define COMPILER_GCC
-#endif
-
-#if defined(_MSC_VER)
-typedef long AtomicFlag;
-#elif defined(__GNUC__)
-typedef bool AtomicFlag;
 #endif
 
 #if defined(COMPILER_MSVC)
@@ -5520,6 +5624,26 @@ void atomic_flag_clear(AtomicFlag* flag)
 	_InterlockedExchange(const_cast<volatile long*>(flag), 0L);
 }
 
+void atomic_int_store(AtomicInt* i, long value)
+{
+	_InterlockedExchange(const_cast<volatile long*>(i), value);
+}
+
+long atomic_int_load(AtomicInt* i)
+{
+	return _InterlockedOr(const_cast<volatile long*>(i), 0L);
+}
+
+long atomic_int_add(AtomicInt* augend, long addend)
+{
+	return _InterlockedAdd(const_cast<volatile long*>(augend), addend);
+}
+
+long atomic_int_subtract(AtomicInt* minuend, long subtrahend)
+{
+	return _InterlockedAdd(const_cast<volatile long*>(minuend), -subtrahend);
+}
+
 #elif defined(COMPILER_GCC)
 
 bool atomic_flag_test_and_set(AtomicFlag* flag)
@@ -5530,6 +5654,26 @@ bool atomic_flag_test_and_set(AtomicFlag* flag)
 void atomic_flag_clear(AtomicFlag* flag)
 {
 	__atomic_clear(flag, __ATOMIC_SEQ_CST);
+}
+
+void atomic_int_store(AtomicInt* i, long value)
+{
+	__atomic_store_n(const_cast<volatile long*>(i), value, __ATOMIC_SEQ_CST);
+}
+
+long atomic_int_load(AtomicInt* i)
+{
+	return __atomic_load_n(const_cast<volatile long*>(i), __ATOMIC_SEQ_CST);
+}
+
+long atomic_int_add(AtomicInt* augend, long addend)
+{
+	return __atomic_add_fetch(const_cast<volatile long*>(augend), addend, __ATOMIC_SEQ_CST);
+}
+
+long atomic_int_subtract(AtomicInt* minuend, long subtrahend)
+{
+	return __atomic_sub_fetch(const_cast<volatile long*>(minuend), subtrahend, __ATOMIC_SEQ_CST);
 }
 
 #endif
@@ -5852,9 +5996,27 @@ namespace
 	snd_pcm_t* pcm_handle;
 	pthread_t thread;
 	AtomicFlag quit;
+	MessageQueue message_queue;
 	float* mixed_samples;
 	void* devicebound_samples;
 	double time;
+	bool boop_on;
+}
+
+static void process_messages_from_main_thread()
+{
+	Message message;
+	while(dequeue_message(&message_queue, &message))
+	{
+		switch(message.code)
+		{
+			case Message::Code::Boop:
+			{
+				boop_on = message.boop.on;
+				break;
+			}
+		}
+	}
 }
 
 static void* run_mixer_thread(void* argument)
@@ -5939,7 +6101,7 @@ static void* run_mixer_thread(void* argument)
 	bandpass.low.prior = 0.0f;
 	bandpass.high.prior = 0.0f;
 
-	int streams_count = 2;
+	int streams_count = 3;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
@@ -5952,6 +6114,8 @@ static void* run_mixer_thread(void* argument)
 
 	while(atomic_flag_test_and_set(&quit))
 	{
+		process_messages_from_main_thread();
+
 		// Generate samples.
 		int frames = device_description.frames;
 		Stream* stream = streams;
@@ -6000,6 +6164,25 @@ static void* run_mixer_thread(void* argument)
 			for(int j = 0; j < device_description.channels; ++j)
 			{
 				stream->samples[i * device_description.channels + j] = value;
+			}
+		}
+
+		stream = streams + 2;
+		{
+			stream->volume = 0.0f;
+			if(boop_on)
+			{
+				stream->volume = 1.0f;
+			}
+			const float theta = 440.0f;
+			for(int i = 0; i < frames; ++i)
+			{
+				float t = static_cast<float>(i) / device_description.sample_rate + time;
+				float value = sin(tau * theta * t);
+				for(int j = 0; j < device_description.channels; ++j)
+				{
+					stream->samples[device_description.channels * i + j] = value;
+				}
 			}
 		}
 
@@ -6064,6 +6247,11 @@ void system_shutdown()
 	// Signal the mixer thread to quit and wait here for it to finish.
 	atomic_flag_clear(&quit);
 	pthread_join(thread, nullptr);
+}
+
+void system_send_message(Message* message)
+{
+	enqueue_message(&message_queue, message);
 }
 
 } // namespace audio
