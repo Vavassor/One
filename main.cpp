@@ -4855,17 +4855,6 @@ static void voice_reset(Voice* voice)
 	envelope_reset(&voice->pitch_envelope);
 }
 
-enum class LFO
-{
-	Sine,
-	Square,
-	Pulse,
-	Sawtooth,
-	Triangle,
-	Rectified_Sine,
-	Cycloid,
-};
-
 // §4.6 Track Functions.........................................................
 
 #define C  0
@@ -5021,14 +5010,16 @@ struct Stream
 {
 	float* samples;
 	int samples_count;
+	int channels;
 	float volume;
 };
 
-static void stream_create(Stream* stream, int capacity)
+static void stream_create(Stream* stream, int capacity, int channels)
 {
 	stream->samples = ALLOCATE(float, capacity);
 	stream->samples_count = capacity;
 	stream->volume = 1.0f;
+	stream->channels = 1;
 }
 
 static void stream_destroy(Stream* stream)
@@ -5039,15 +5030,42 @@ static void stream_destroy(Stream* stream)
 	}
 }
 
-static void mix_streams(Stream* streams, int streams_count, float* mixed_samples, int samples, float volume)
+static void mix_streams(Stream* streams, int streams_count, float* mixed_samples, int frames, int channels, float volume)
 {
+	int samples = frames * channels;
 	fill_with_silence(mixed_samples, 0, samples);
 	for(int i = 0; i < streams_count; ++i)
 	{
 		Stream* stream = streams + i;
-		for(int j = 0; j < samples; ++j)
+		if(channels < stream->channels)
 		{
-			mixed_samples[j] += stream->volume * stream->samples[j];
+			for(int j = 0; j < frames; ++j)
+			{
+				for(int k = 0; k < channels; ++k)
+				{
+					mixed_samples[j * channels + k] += stream->volume * stream->samples[j * stream->channels];
+				}
+			}
+		}
+		else if(channels > stream->channels)
+		{
+			// This doesn't handle stereo-to-surround mixing.
+			ASSERT(stream->channels == 1);
+			for(int j = 0; j < frames; ++j)
+			{
+				float sample = stream->volume * stream->samples[j * stream->channels];
+				for(int k = 0; k < channels; ++k)
+				{
+					mixed_samples[j * channels + k] += sample;
+				}
+			}
+		}
+		else
+		{
+			for(int j = 0; j < samples; ++j)
+			{
+				mixed_samples[j] += stream->volume * stream->samples[j];
+			}
 		}
 	}
 	for(int i = 0; i < samples; ++i)
@@ -5118,6 +5136,230 @@ static bool dequeue_message(MessageQueue* queue, Message* message)
 	*message = queue->messages[current_head];
 	atomic_int_store(&queue->head, (current_head + 1) % max_messages);
 	return true;
+}
+
+// Render Oscillations
+
+enum class Oscillator
+{
+	Sine,
+	Square,
+	Pulse,
+	Sawtooth,
+	Triangle,
+	Rectified_Sine,
+	Cycloid,
+	Noise,
+};
+
+struct Instrument
+{
+	Oscillator oscillator;
+	struct
+	{
+		int semitones;
+		bool use;
+	} pitch_envelope;
+	float pulse_width;
+};
+
+static float oscillate_sine(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return sin(tau * x);
+}
+
+static float oscillate_square(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return square_wave(x);
+}
+
+static float oscillate_pulse(float x, float pulse_width)
+{
+	return pulse_wave(x, pulse_width);
+}
+
+static float oscillate_triangle(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return triangle_wave(x);
+}
+
+static float oscillate_sawtooth(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return sawtooth_wave(x);
+}
+
+static float oscillate_rectified_sine(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return rectified_sin(tau * x);
+}
+
+static float oscillate_cycloid(float x, float ignored)
+{
+	static_cast<void>(ignored);
+	return cycloid(tau * x);
+}
+
+static float oscillate_noise(float ignored, float also_ignored)
+{
+	static_cast<void>(ignored);
+	static_cast<void>(also_ignored);
+	return arandom::float_range(-1.0f, 1.0f);
+}
+
+static void generate_oscillation(Stream* stream, Track* track, Instrument* instrument, Voice* voices, int* voice_map, int voices_count, int sample_rate, double time)
+{
+#define JUST_OSCILLATOR(wave, pulse_width)                                       \
+	for(int i = 0; i < frames; ++i)                                              \
+	{                                                                            \
+		float t = static_cast<float>(i) / sample_rate + time;                    \
+		RenderResult result = {};                                                \
+		track_render(track, voices, voice_map, voices_count, t, false, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                             \
+		{                                                                        \
+			Voice* voice = &voices[result.voices[j]];                            \
+			int pitch = result.pitches[j];                                       \
+			float theta = pitch_to_frequency(pitch);                             \
+			float value = wave(theta * t, pulse_width);                          \
+			value = envelope_apply(&voice->envelope) * value;                    \
+			for(int k = 0; k < stream->channels; ++k)                            \
+			{                                                                    \
+				stream->samples[stream->channels * i + k] += value;              \
+			}                                                                    \
+		}                                                                        \
+	}
+
+#define OSCILLATOR_WITH_PITCH_ENVELOPE(wave, pulse_width)                       \
+	for(int i = 0; i < frames; ++i)                                             \
+	{                                                                           \
+		float t = static_cast<float>(i) / sample_rate + time;                   \
+		RenderResult result = {};                                               \
+		track_render(track, voices, voice_map, voices_count, t, true, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                            \
+		{                                                                       \
+			Voice* voice = &voices[result.voices[j]];                           \
+			int pitch = result.pitches[j];                                      \
+			float theta = pitch_to_frequency(pitch);                            \
+			float pitched_theta = pitch_to_frequency(pitch + semitones);        \
+			float modulation = envelope_apply(&voice->pitch_envelope);          \
+			theta = lerp(theta, pitched_theta, modulation);                     \
+			float value = wave(theta * t, pulse_width);                         \
+			value = envelope_apply(&voice->envelope) * value;                   \
+			for(int k = 0; k < stream->channels; ++k)                           \
+			{                                                                   \
+				stream->samples[stream->channels * i + k] += value;             \
+			}                                                                   \
+		}                                                                       \
+	}
+
+	int frames = stream->samples_count / stream->channels;
+	int semitones = instrument->pitch_envelope.semitones;
+
+	fill_with_silence(stream->samples, 0, stream->samples_count);
+
+	switch(instrument->oscillator)
+	{
+		case Oscillator::Sine:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_sine, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_sine, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Square:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_square, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_square, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Pulse:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_pulse, instrument->pulse_width);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_pulse, instrument->pulse_width);
+			}
+			break;
+		}
+		case Oscillator::Triangle:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_triangle, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_triangle, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Sawtooth:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_sawtooth, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_sawtooth, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Rectified_Sine:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_rectified_sine, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_rectified_sine, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Cycloid:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_cycloid, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_cycloid, 0.0f);
+			}
+			break;
+		}
+		case Oscillator::Noise:
+		{
+			if(instrument->pitch_envelope.use)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_noise, 0.0f);
+			}
+			else
+			{
+				JUST_OSCILLATOR(oscillate_noise, 0.0f);
+			}
+			break;
+		}
+	}
 }
 
 } // namespace audio
@@ -5692,11 +5934,15 @@ void log_add_message(LogLevel level, const char* format, ...)
 	switch(level)
 	{
 		case LogLevel::Error:
+		{
 			stream = stderr;
 			break;
+		}
 		case LogLevel::Debug:
+		{
 			stream = stdout;
 			break;
+		}
 	}
 	vfprintf(stream, format, arguments);
 	va_end(arguments);
@@ -6105,12 +6351,16 @@ static void* run_mixer_thread(void* argument)
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
-		stream_create(streams + i, samples);
+		stream_create(streams + i, device_description.frames, 1);
 	}
 
 	float volume = 0.75f;
-	bool use_pitch_envelope = true;
-	int semitones = 36;
+
+	Instrument kick;
+	kick.oscillator = Oscillator::Sine;
+	kick.pitch_envelope.use = true;
+	kick.pitch_envelope.semitones = 36;
+	kick.pulse_width = 0.0f;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
@@ -6118,36 +6368,20 @@ static void* run_mixer_thread(void* argument)
 
 		// Generate samples.
 		int frames = device_description.frames;
-		Stream* stream = streams;
-		fill_with_silence(stream->samples, 0, stream->samples_count);
 
+		Stream* stream = streams;
+		generate_oscillation(stream, &track, &kick, voices, voice_map, voice_count, device_description.sample_rate, time);
 		for(int i = 0; i < frames; ++i)
 		{
-			float t = static_cast<float>(i) / device_description.sample_rate + time;
-			RenderResult result = {};
-			track_render(&track, voices, voice_map, voice_count, t, use_pitch_envelope, &result);
-			for(int j = 0; j < result.voices_count; ++j)
+			float value = stream->samples[stream->channels * i];
+			value = lpf_apply(&lowpass, value);
+			value = distort(value, 5.0f, 0.8f);
+			// value = bitcrush_apply(&bitcrush, value);
+			// value = chorus_apply(&chorus, value, t);
+			// value = apf_apply(&reverb, value);
+			for(int j = 0; j < stream->channels; ++j)
 			{
-				Voice* voice = &voices[result.voices[j]];
-				int pitch = result.pitches[j];
-				float theta = pitch_to_frequency(pitch);
-				if(use_pitch_envelope)
-				{
-					float pitched_theta = pitch_to_frequency(pitch + semitones);
-					float modulation = envelope_apply(&voice->pitch_envelope);
-					theta = lerp(theta, pitched_theta, modulation);
-				}
-				float value = sin(tau * theta * t);
-				value = envelope_apply(&voice->envelope) * value;
-				value = lpf_apply(&lowpass, value);
-				value = distort(value, 5.0f, 0.8f);
-				// value = bitcrush_apply(&bitcrush, value);
-				// value = chorus_apply(&chorus, value, t);
-				// value = apf_apply(&reverb, value);
-				for(int k = 0; k < device_description.channels; ++k)
-				{
-					stream->samples[i * device_description.channels + k] += value;
-				}
+				stream->samples[stream->channels * i + j] = value;
 			}
 		}
 
@@ -6161,9 +6395,9 @@ static void* run_mixer_thread(void* argument)
 			float h = pitch_to_frequency(center_frequency + 5.0f);
 			bpf_set_passband(&bandpass, l, h, delta_time_per_frame);
 			value = bpf_apply(&bandpass, value);
-			for(int j = 0; j < device_description.channels; ++j)
+			for(int j = 0; j < stream->channels; ++j)
 			{
-				stream->samples[i * device_description.channels + j] = value;
+				stream->samples[i * stream->channels + j] = value;
 			}
 		}
 
@@ -6179,14 +6413,14 @@ static void* run_mixer_thread(void* argument)
 			{
 				float t = static_cast<float>(i) / device_description.sample_rate + time;
 				float value = sin(tau * theta * t);
-				for(int j = 0; j < device_description.channels; ++j)
+				for(int j = 0; j < stream->channels; ++j)
 				{
-					stream->samples[device_description.channels * i + j] = value;
+					stream->samples[stream->channels * i + j] = value;
 				}
 			}
 		}
 
-		mix_streams(streams, streams_count, mixed_samples, samples, volume);
+		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
 
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
