@@ -4840,6 +4840,11 @@ struct Voice
 	ADSR pitch_envelope;
 };
 
+static bool voice_is_unused(Voice* voice)
+{
+	return voice->envelope.state == ADSR::State::Neutral;
+}
+
 static void voice_gate(Voice* voice, bool gate, bool use_pitch_envelope)
 {
 	envelope_gate(&voice->envelope, gate);
@@ -4872,6 +4877,8 @@ static void voice_reset(Voice* voice)
 
 namespace
 {
+	const int no_voice = -1;
+
 	int pentatonic_major[] = {4, 2, 4, 7, 9};
 	int pentatonic_minor[] = {4, 3, 5, 7, 9};
 }
@@ -4893,15 +4900,37 @@ struct Track
 {
 	struct Note
 	{
-		double start;
-		double end;
 		int pitch;
 		float velocity;
 	};
+	struct Event
+	{
+		double time;
+		int note;
+	};
 	Note notes[32];
+	Event start_events[32];
+	Event stop_events[32];
 	int notes_count;
-	int index;
+	int start_index;
+	int stop_index;
 };
+
+static void sort_events(Track::Event* events, int events_count)
+{
+	// Just do insertion sort, because events are likely to be mostly sorted
+	// and very small in number.
+	for(int i = 1; i < events_count; ++i)
+	{
+		Track::Event temp = events[i];
+		int j;
+		for(j = i - 1; j >= 0 && events[j].time > temp.time; --j)
+		{
+			events[j + 1] = events[j];
+		}
+		events[j + 1] = temp;
+	}
+}
 
 void track_generate(Track* track)
 {
@@ -4920,13 +4949,25 @@ void track_generate(Track* track)
 
 		Track::Note* note = track->notes + i;
 		note->pitch = 12 * octave + pitch_class;
-		note->start = note_start;
-		note->end = note_start + note_length;
+		note->velocity = 1.0f;
+
+		Track::Event* start_event = track->start_events + i;
+		start_event->note = i;
+		start_event->time = note_start;
+
+		Track::Event* stop_event = track->stop_events + i;
+		stop_event->note = i;
+		stop_event->time = note_start + note_length;
 	}
-	track->index = 0;
+
+	sort_events(track->start_events, track->notes_count);
+	sort_events(track->stop_events, track->notes_count);
+
+	track->start_index = 0;
+	track->stop_index = 0;
 }
 
-static int track_find_voice(int* voice_map, int voices, int note)
+static int find_voice(int* voice_map, int voices, int note)
 {
 	for(int i = 0; i < voices; ++i)
 	{
@@ -4935,14 +4976,14 @@ static int track_find_voice(int* voice_map, int voices, int note)
 			return i;
 		}
 	}
-	return -1;
+	return no_voice;
 }
 
-static int track_assign_voice(int* voice_map, int voices, int note)
+static int assign_voice(int* voice_map, int voices, int note)
 {
 	for(int i = 0; i < voices; ++i)
 	{
-		if(voice_map[i] == -1)
+		if(voice_map[i] == no_voice)
 		{
 			voice_map[i] = note;
 			return i;
@@ -4962,36 +5003,57 @@ struct RenderResult
 
 void track_render(Track* track, Voice* voices, int* voice_map, int count, double time, bool use_pitch_envelope, RenderResult* result)
 {
-	for(int i = track->index; i < track->notes_count; ++i)
+	// Gate any start events in this time slice.
+	for(int i = track->start_index; i < track->notes_count; ++i)
 	{
-		Track::Note note = track->notes[i];
-		if(note.start <= time)
+		Track::Event* start = track->start_events + i;
+		if(start->time > time)
 		{
-			int index = track_find_voice(voice_map, count, i);
-			if(index == -1)
+			// This event is in the future, so all events after it are also.
+			break;
+		}
+		else
+		{
+			int index = find_voice(voice_map, count, start->note);
+			if(index == no_voice)
 			{
-				index = track_assign_voice(voice_map, count, i);
+				index = assign_voice(voice_map, count, start->note);
 				voice_gate(voices + index, true, use_pitch_envelope);
 			}
-			else if(note.end <= time)
-			{
-				if(index != -1)
-				{
-					voice_gate(voices + index, false, use_pitch_envelope);
-				}
-				track->index = i + 1;
-			}
+			track->start_index = i + 1;
 		}
 	}
 
+	// Gate any stop events.
+	for(int i = track->stop_index; i < track->notes_count; ++i)
+	{
+		Track::Event* stop = track->stop_events + i;
+		if(stop->time > time)
+		{
+			// This event is in the future, so all events after it are also.
+			break;
+		}
+		else
+		{
+			int index = find_voice(voice_map, count, stop->note);
+			if(index != no_voice)
+			{
+				voice_gate(voices + index, false, use_pitch_envelope);
+			}
+			track->stop_index = i + 1;
+		}
+	}
+
+	// Fill the result given the new status of the voices. In the same cycle,
+	// free up any voices that have finished sounding out their note.
 	for(int i = 0; i < count; ++i)
 	{
 		int note_index = voice_map[i];
-		if(note_index != -1)
+		if(note_index != no_voice)
 		{
-			if(voices[i].envelope.state == ADSR::State::Neutral)
+			if(voice_is_unused(voices + i))
 			{
-				voice_map[i] = -1;
+				voice_map[i] = no_voice;
 			}
 			else
 			{
