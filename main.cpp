@@ -4644,6 +4644,11 @@ static float apf_apply(APF* filter, float sample)
 
 // §4.5 Effects.................................................................
 
+struct Overdrive
+{
+	float factor;
+};
+
 static float overdrive(float sample, float factor)
 {
 	// This uses a hyperbola of the formula y = -factor / (x + a) + 1 + a.
@@ -4660,6 +4665,12 @@ static float overdrive(float sample, float factor)
 	return copysign(y, sample);
 }
 
+struct Distortion
+{
+	float gain;
+	float mix;
+};
+
 static float distort(float sample, float gain, float mix)
 {
 	float x = sample;
@@ -4667,6 +4678,12 @@ static float distort(float sample, float gain, float mix)
 	float distorted = a * (1.0f - exp(gain * x * a));
 	return lerp(sample, distorted, mix);
 }
+
+struct RingModulator
+{
+	float mix;
+	float rate;
+};
 
 static float ring_modulate(float sample, float theta, double time, float mix, float rate)
 {
@@ -4873,11 +4890,8 @@ struct VoiceEntry
 	u32 note : 29;
 };
 
-namespace
-{
-	const u32 no_note = 0x1fffffff;
-	const u32 no_track = 0x7;
-}
+static const u32 no_note = 0x1fffffff;
+static const u32 no_track = 0x7;
 
 static void voice_map_setup(VoiceEntry* voice_map, int count)
 {
@@ -5286,6 +5300,206 @@ static bool dequeue_message(MessageQueue* queue, Message* message)
 	return true;
 }
 
+// Effect.......................................................................
+
+enum class EffectType
+{
+	Low_Pass_Filter,
+	Band_Pass_Filter,
+	High_Pass_Filter,
+	Reverb,
+	Overdrive,
+	Distortion,
+	Ring_Modulator,
+	Bitcrush,
+	Flanger,
+	Vibrato,
+	Chorus,
+};
+
+struct Effect
+{
+	union
+	{
+		LPF lowpass;
+		BPF bandpass;
+		HPF highpass;
+		APF reverb;
+		Overdrive overdrive;
+		Distortion distortion;
+		RingModulator ring_modulator;
+		Bitcrush bitcrush;
+		Flanger flanger;
+		Vibrato vibrato;
+		Chorus chorus;
+	};
+	EffectType type;
+};
+
+static void apply_effects(Effect* effects, int count, Stream* stream, int sample_rate, double time)
+{
+	int frames = stream->samples_count / stream->channels;
+	for(int i = 0; i < count; ++i)
+	{
+		Effect* effect = effects + i;
+		switch(effect->type)
+		{
+			case EffectType::Low_Pass_Filter:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = lpf_apply(&effect->lowpass, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Band_Pass_Filter:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = bpf_apply(&effect->bandpass, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::High_Pass_Filter:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = hpf_apply(&effect->highpass, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Reverb:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = apf_apply(&effect->reverb, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Overdrive:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = overdrive(value, effect->overdrive.factor);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Distortion:
+			{
+				float gain = effect->distortion.gain;
+				float mix = effect->distortion.mix;
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = distort(value, gain, mix);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Ring_Modulator:
+			{
+				float mix = effect->ring_modulator.mix;
+				float rate = effect->ring_modulator.rate;
+				float theta = 440.0f;
+				for(int i = 0; i < frames; ++i)
+				{
+					float t = static_cast<float>(i) / sample_rate + time;
+					float value = stream->samples[stream->channels * i];
+					value = ring_modulate(value, theta, t, mix, rate);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Bitcrush:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = bitcrush_apply(&effect->bitcrush, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Flanger:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float t = static_cast<float>(i) / sample_rate + time;
+					float value = stream->samples[stream->channels * i];
+					value = flanger_apply(&effect->flanger, value, t);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Vibrato:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float t = static_cast<float>(i) / sample_rate + time;
+					float value = stream->samples[stream->channels * i];
+					value = vibrato_apply(&effect->vibrato, value, t);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Chorus:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float t = static_cast<float>(i) / sample_rate + time;
+					float value = stream->samples[stream->channels * i];
+					value = chorus_apply(&effect->chorus, value, t);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+		}
+	}
+}
+
 // §4.11 Generate Oscillation...................................................
 
 enum class Oscillator
@@ -5300,16 +5514,32 @@ enum class Oscillator
 	Noise,
 };
 
+static const int instrument_effects_max = 8;
+
 struct Instrument
 {
-	Oscillator oscillator;
+	Effect effects[instrument_effects_max];
+
 	struct
 	{
 		int semitones;
 		bool use;
 	} pitch_envelope;
+
+	Oscillator oscillator;
+	int effects_count;
 	float pulse_width;
 };
+
+static Effect* instrument_allocate_effect(Instrument* instrument, EffectType type)
+{
+	int index = instrument->effects_count;
+	ASSERT(instrument->effects_count + 1 < instrument_effects_max);
+	instrument->effects_count = (index + 1) % instrument_effects_max;
+	Effect* effect = instrument->effects + index;
+	effect->type = type;
+	return effect;
+}
 
 // These oscillate functions are just for making a uniform interface to the
 // available types of oscillation.
@@ -6473,21 +6703,6 @@ static void* run_mixer_thread(void* argument)
 	VoiceEntry voice_map[voice_count];
 	voice_map_setup(voice_map, voice_count);
 
-	LPF lowpass;
-	lpf_set_corner_frequency(&lowpass, 440.0f, delta_time_per_frame);
-	lowpass.prior = 0.0f;
-
-	APF reverb;
-	apf_create(&reverb, 0.2f);
-
-	Bitcrush bitcrush;
-	bitcrush_reset(&bitcrush);
-	bitcrush.depth = 5;
-	bitcrush.downsampling = 12;
-
-	Chorus chorus;
-	chorus_create(&chorus);
-
 	Track track;
 	track_setup(&track);
 	track_generate(&track, 0.0);
@@ -6511,33 +6726,32 @@ static void* run_mixer_thread(void* argument)
 	kick.pitch_envelope.semitones = 36;
 	kick.pulse_width = 0.0f;
 
+	Effect* effect = instrument_allocate_effect(&kick, EffectType::Low_Pass_Filter);
+	LPF* lowpass = &effect->lowpass;
+	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
+	lowpass->prior = 0.0f;
+
+	effect = instrument_allocate_effect(&kick, EffectType::Distortion);
+	Distortion* distortion = &effect->distortion;
+	distortion->gain = 5.0f;
+	distortion->mix = 0.8f;
+
 	while(atomic_flag_test_and_set(&quit))
 	{
 		process_messages_from_main_thread();
 
 		// Generate samples.
 		int frames = device_description.frames;
+		int sample_rate = device_description.sample_rate;
 
 		Stream* stream = streams;
-		generate_oscillation(stream, &track, 0, &kick, voices, voice_map, voice_count, device_description.sample_rate, time);
-		for(int i = 0; i < frames; ++i)
-		{
-			float value = stream->samples[stream->channels * i];
-			value = lpf_apply(&lowpass, value);
-			value = distort(value, 5.0f, 0.8f);
-			// value = bitcrush_apply(&bitcrush, value);
-			// value = chorus_apply(&chorus, value, t);
-			// value = apf_apply(&reverb, value);
-			for(int j = 0; j < stream->channels; ++j)
-			{
-				stream->samples[stream->channels * i + j] = value;
-			}
-		}
+		generate_oscillation(stream, &track, 0, &kick, voices, voice_map, voice_count, sample_rate, time);
+		apply_effects(kick.effects, kick.effects_count, stream, sample_rate, time);
 
 		stream = streams + 1;
 		for(int i = 0; i < frames; ++i)
 		{
-			float t = static_cast<float>(i) / device_description.sample_rate + time;
+			float t = static_cast<float>(i) / sample_rate + time;
 			float value = arandom::float_range(-1.0f, 1.0f);
 			float center_frequency = 50.0f * sin(1.0f * tau * t) + 65.0f;
 			float l = pitch_to_frequency(center_frequency - 5.0f);
@@ -6560,7 +6774,7 @@ static void* run_mixer_thread(void* argument)
 			const float theta = 440.0f;
 			for(int i = 0; i < frames; ++i)
 			{
-				float t = static_cast<float>(i) / device_description.sample_rate + time;
+				float t = static_cast<float>(i) / sample_rate + time;
 				float value = sin(tau * theta * t);
 				for(int j = 0; j < stream->channels; ++j)
 				{
