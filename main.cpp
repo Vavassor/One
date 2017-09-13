@@ -4877,6 +4877,7 @@ static void voice_reset(Voice* voice)
 
 namespace
 {
+	const int no_note = -1;
 	const int no_voice = -1;
 
 	int pentatonic_major[] = {4, 2, 4, 7, 9};
@@ -4903,15 +4904,19 @@ struct Track
 		int pitch;
 		float velocity;
 	};
+
 	struct Event
 	{
 		double time;
 		int note;
 	};
+
 	Note notes[32];
 	Event start_events[32];
 	Event stop_events[32];
+	double finish_time;
 	int notes_count;
+	int notes_capacity;
 	int start_index;
 	int stop_index;
 };
@@ -4932,12 +4937,19 @@ static void sort_events(Track::Event* events, int events_count)
 	}
 }
 
-void track_generate(Track* track)
+void track_setup(Track* track)
+{
+	track->notes_count = 0;
+	track->notes_capacity = 8;
+	track->start_index = 0;
+	track->stop_index = 0;
+}
+
+void track_generate(Track* track, double origin_time)
 {
 	double note_spacing = 0.6;
 	double note_length = 0.3;
-	track->notes_count = 32;
-	for(int i = 0; i < track->notes_count; ++i)
+	for(int i = track->notes_count; i < track->notes_capacity; ++i)
 	{
 		int degrees = pentatonic_major[0];
 		int degree = arandom::int_range(0, degrees - 1);
@@ -4945,7 +4957,7 @@ void track_generate(Track* track)
 
 		int octave = arandom::int_range(1, 2);
 
-		double note_start = i * note_spacing;
+		double note_start = note_spacing * i + origin_time;
 
 		Track::Note* note = track->notes + i;
 		note->pitch = 12 * octave + pitch_class;
@@ -4960,11 +4972,43 @@ void track_generate(Track* track)
 		stop_event->time = note_start + note_length;
 	}
 
+	int generated = track->notes_capacity - track->notes_count - 1;
+	track->notes_count = track->notes_capacity;
+
 	sort_events(track->start_events, track->notes_count);
 	sort_events(track->stop_events, track->notes_count);
 
-	track->start_index = 0;
+	track->finish_time = note_spacing * generated + origin_time;
+}
+
+static void transfer_unfinished_notes(Track* track)
+{
+	const int transfer_max = 8;
+	Track::Note notes_to_transfer[transfer_max];
+	Track::Event stops_to_transfer[transfer_max];
+	int transferred = 0;
+	for(int i = track->stop_index; i < track->notes_count && transferred < transfer_max; ++i)
+	{
+		Track::Event stop = track->stop_events[i];
+		stops_to_transfer[transferred] = stop;
+		notes_to_transfer[transferred] = track->notes[stop.note];
+		transferred += 1;
+	}
+
+	for(int i = 0; i < transferred; ++i)
+	{
+		track->notes[i] = notes_to_transfer[i];
+		track->stop_events[i] = stops_to_transfer[i];
+	}
+
+	track->notes_count = transferred;
+	track->start_index = transferred;
 	track->stop_index = 0;
+}
+
+static bool should_regenerate(Track* track)
+{
+	return track->start_index == track->notes_count;
 }
 
 static int find_voice(int* voice_map, int voices, int note)
@@ -4983,7 +5027,7 @@ static int assign_voice(int* voice_map, int voices, int note)
 {
 	for(int i = 0; i < voices; ++i)
 	{
-		if(voice_map[i] == no_voice)
+		if(voice_map[i] == no_note)
 		{
 			voice_map[i] = note;
 			return i;
@@ -5049,11 +5093,11 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 	for(int i = 0; i < count; ++i)
 	{
 		int note_index = voice_map[i];
-		if(note_index != no_voice)
+		if(note_index != no_note)
 		{
 			if(voice_is_unused(voices + i))
 			{
-				voice_map[i] = no_voice;
+				voice_map[i] = no_note;
 			}
 			else
 			{
@@ -5063,6 +5107,12 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 				result->voices_count += 1;
 			}
 		}
+	}
+
+	if(should_regenerate(track))
+	{
+		transfer_unfinished_notes(track);
+		track_generate(track, track->finish_time);
 	}
 }
 
@@ -5111,7 +5161,8 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 		}
 		else if(channels > stream->channels)
 		{
-			// This doesn't handle stereo-to-surround mixing.
+			// This only handles mixing monaural to multiple channels, not
+			// stereo-to-surround mixing.
 			ASSERT(stream->channels == 1);
 			for(int j = 0; j < frames; ++j)
 			{
@@ -5200,7 +5251,7 @@ static bool dequeue_message(MessageQueue* queue, Message* message)
 	return true;
 }
 
-// Render Oscillations
+// Generate Oscillation.........................................................
 
 enum class Oscillator
 {
@@ -5224,6 +5275,9 @@ struct Instrument
 	} pitch_envelope;
 	float pulse_width;
 };
+
+// These oscillate functions are just for making a uniform interface to the
+// available types of oscillation.
 
 static float oscillate_sine(float x, float ignored)
 {
@@ -6403,7 +6457,8 @@ static void* run_mixer_thread(void* argument)
 	chorus_create(&chorus);
 
 	Track track;
-	track_generate(&track);
+	track_setup(&track);
+	track_generate(&track, 0.0);
 
 	BPF bandpass;
 	bandpass.low.prior = 0.0f;
