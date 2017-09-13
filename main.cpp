@@ -62,8 +62,13 @@ Table Of Contents...............................................................
   §4.3 Envelopes
   §4.4 Filters
   §4.5 Effects
-  §4.6 Track Functions
-  §4.7 Audio System Declarations
+  §4.6 Voice
+  §4.7 Voice Map
+  §4.8 Track
+  §4.9 Stream
+  §4.10 Message Queue
+  §4.11 Generate Oscillation
+  §4.12 Audio System Declarations
 
 5. Game
   §5.1 Game Functions
@@ -4832,7 +4837,7 @@ static float chorus_apply(Chorus* chorus, float sample, float time)
 	return result;
 }
 
-// Voice........................................................................
+// §4.6 Voice...................................................................
 
 struct Voice
 {
@@ -4860,7 +4865,7 @@ static void voice_reset(Voice* voice)
 	envelope_reset(&voice->pitch_envelope);
 }
 
-// Voice Map....................................................................
+// §4.7 Voice Map...............................................................
 
 struct VoiceEntry
 {
@@ -4913,7 +4918,7 @@ static int assign_voice(VoiceEntry* voice_map, int voices, int track, int note)
 	return 0;
 }
 
-// §4.6 Track Functions.........................................................
+// §4.8 Track...................................................................
 
 #define C  0
 #define CS 1
@@ -5146,7 +5151,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 	}
 }
 
-// Stream Functions.............................................................
+// §4.9 Stream..................................................................
 
 struct Stream
 {
@@ -5217,7 +5222,7 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 	}
 }
 
-// Message Queue................................................................
+// §4.10 Message Queue..........................................................
 
 struct Message
 {
@@ -5281,7 +5286,7 @@ static bool dequeue_message(MessageQueue* queue, Message* message)
 	return true;
 }
 
-// Generate Oscillation.........................................................
+// §4.11 Generate Oscillation...................................................
 
 enum class Oscillator
 {
@@ -5510,7 +5515,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 
 } // namespace audio
 
-// §4.7 Audio System Declarations...............................................
+// §4.12 Audio System Declarations..............................................
 
 namespace audio {
 
