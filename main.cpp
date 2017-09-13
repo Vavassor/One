@@ -4832,7 +4832,7 @@ static float chorus_apply(Chorus* chorus, float sample, float time)
 	return result;
 }
 
-// Voices
+// Voice........................................................................
 
 struct Voice
 {
@@ -4860,6 +4860,59 @@ static void voice_reset(Voice* voice)
 	envelope_reset(&voice->pitch_envelope);
 }
 
+// Voice Map....................................................................
+
+struct VoiceEntry
+{
+	u32 track : 3;
+	u32 note : 29;
+};
+
+namespace
+{
+	const u32 no_note = 0x1fffffff;
+	const u32 no_track = 0x7;
+}
+
+static void voice_map_setup(VoiceEntry* voice_map, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		voice_map[i].track = no_track;
+		voice_map[i].note = no_note;
+	}
+}
+
+static bool find_voice(VoiceEntry* voice_map, int voices, int track, int note, int* voice)
+{
+	for(int i = 0; i < voices; ++i)
+	{
+		if(voice_map[i].track == track && voice_map[i].note == note)
+		{
+			*voice = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+static int assign_voice(VoiceEntry* voice_map, int voices, int track, int note)
+{
+	for(int i = 0; i < voices; ++i)
+	{
+		if(voice_map[i].note == no_note)
+		{
+			voice_map[i].track = track;
+			voice_map[i].note = note;
+			return i;
+		}
+	}
+	// If all voices are currently in use, evict the first one.
+	voice_map[0].track = track;
+	voice_map[0].note = note;
+	return 0;
+}
+
 // §4.6 Track Functions.........................................................
 
 #define C  0
@@ -4877,9 +4930,6 @@ static void voice_reset(Voice* voice)
 
 namespace
 {
-	const int no_note = -1;
-	const int no_voice = -1;
-
 	int pentatonic_major[] = {4, 2, 4, 7, 9};
 	int pentatonic_minor[] = {4, 3, 5, 7, 9};
 }
@@ -5011,33 +5061,6 @@ static bool should_regenerate(Track* track)
 	return track->start_index == track->notes_count;
 }
 
-static int find_voice(int* voice_map, int voices, int note)
-{
-	for(int i = 0; i < voices; ++i)
-	{
-		if(voice_map[i] == note)
-		{
-			return i;
-		}
-	}
-	return no_voice;
-}
-
-static int assign_voice(int* voice_map, int voices, int note)
-{
-	for(int i = 0; i < voices; ++i)
-	{
-		if(voice_map[i] == no_note)
-		{
-			voice_map[i] = note;
-			return i;
-		}
-	}
-	// If all voices are currently in use, evict the first one.
-	voice_map[0] = note;
-	return 0;
-}
-
 struct RenderResult
 {
 	int voices[16];
@@ -5045,7 +5068,7 @@ struct RenderResult
 	int voices_count;
 };
 
-void track_render(Track* track, Voice* voices, int* voice_map, int count, double time, bool use_pitch_envelope, RenderResult* result)
+void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voice_map, int count, double time, bool use_pitch_envelope, RenderResult* result)
 {
 	// Gate any start events in this time slice.
 	for(int i = track->start_index; i < track->notes_count; ++i)
@@ -5058,10 +5081,11 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 		}
 		else
 		{
-			int index = find_voice(voice_map, count, start->note);
-			if(index == no_voice)
+			int index;
+			bool found = find_voice(voice_map, count, track_index, start->note, &index);
+			if(!found)
 			{
-				index = assign_voice(voice_map, count, start->note);
+				index = assign_voice(voice_map, count, track_index, start->note);
 				voice_gate(voices + index, true, use_pitch_envelope);
 			}
 			track->start_index = i + 1;
@@ -5079,8 +5103,9 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 		}
 		else
 		{
-			int index = find_voice(voice_map, count, stop->note);
-			if(index != no_voice)
+			int index;
+			bool found = find_voice(voice_map, count, track_index, stop->note, &index);
+			if(found)
 			{
 				voice_gate(voices + index, false, use_pitch_envelope);
 			}
@@ -5092,12 +5117,17 @@ void track_render(Track* track, Voice* voices, int* voice_map, int count, double
 	// free up any voices that have finished sounding out their note.
 	for(int i = 0; i < count; ++i)
 	{
-		int note_index = voice_map[i];
+		if(voice_map[i].track != track_index)
+		{
+			continue;
+		}
+		int note_index = voice_map[i].note;
 		if(note_index != no_note)
 		{
 			if(voice_is_unused(voices + i))
 			{
-				voice_map[i] = no_note;
+				voice_map[i].track = no_track;
+				voice_map[i].note = no_note;
 			}
 			else
 			{
@@ -5327,49 +5357,49 @@ static float oscillate_noise(float ignored, float also_ignored)
 	return arandom::float_range(-1.0f, 1.0f);
 }
 
-static void generate_oscillation(Stream* stream, Track* track, Instrument* instrument, Voice* voices, int* voice_map, int voices_count, int sample_rate, double time)
+static void generate_oscillation(Stream* stream, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time)
 {
-#define JUST_OSCILLATOR(wave, pulse_width)                                       \
-	for(int i = 0; i < frames; ++i)                                              \
-	{                                                                            \
-		float t = static_cast<float>(i) / sample_rate + time;                    \
-		RenderResult result = {};                                                \
-		track_render(track, voices, voice_map, voices_count, t, false, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                             \
-		{                                                                        \
-			Voice* voice = &voices[result.voices[j]];                            \
-			int pitch = result.pitches[j];                                       \
-			float theta = pitch_to_frequency(pitch);                             \
-			float value = wave(theta * t, pulse_width);                          \
-			value = envelope_apply(&voice->envelope) * value;                    \
-			for(int k = 0; k < stream->channels; ++k)                            \
-			{                                                                    \
-				stream->samples[stream->channels * i + k] += value;              \
-			}                                                                    \
-		}                                                                        \
+#define JUST_OSCILLATOR(wave, pulse_width)                                                    \
+	for(int i = 0; i < frames; ++i)                                                           \
+	{                                                                                         \
+		float t = static_cast<float>(i) / sample_rate + time;                                 \
+		RenderResult result = {};                                                             \
+		track_render(track, track_index, voices, voice_map, voices_count, t, false, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                          \
+		{                                                                                     \
+			Voice* voice = &voices[result.voices[j]];                                         \
+			int pitch = result.pitches[j];                                                    \
+			float theta = pitch_to_frequency(pitch);                                          \
+			float value = wave(theta * t, pulse_width);                                       \
+			value = envelope_apply(&voice->envelope) * value;                                 \
+			for(int k = 0; k < stream->channels; ++k)                                         \
+			{                                                                                 \
+				stream->samples[stream->channels * i + k] += value;                           \
+			}                                                                                 \
+		}                                                                                     \
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE(wave, pulse_width)                       \
-	for(int i = 0; i < frames; ++i)                                             \
-	{                                                                           \
-		float t = static_cast<float>(i) / sample_rate + time;                   \
-		RenderResult result = {};                                               \
-		track_render(track, voices, voice_map, voices_count, t, true, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                            \
-		{                                                                       \
-			Voice* voice = &voices[result.voices[j]];                           \
-			int pitch = result.pitches[j];                                      \
-			float theta = pitch_to_frequency(pitch);                            \
-			float pitched_theta = pitch_to_frequency(pitch + semitones);        \
-			float modulation = envelope_apply(&voice->pitch_envelope);          \
-			theta = lerp(theta, pitched_theta, modulation);                     \
-			float value = wave(theta * t, pulse_width);                         \
-			value = envelope_apply(&voice->envelope) * value;                   \
-			for(int k = 0; k < stream->channels; ++k)                           \
-			{                                                                   \
-				stream->samples[stream->channels * i + k] += value;             \
-			}                                                                   \
-		}                                                                       \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE(wave, pulse_width)                                    \
+	for(int i = 0; i < frames; ++i)                                                          \
+	{                                                                                        \
+		float t = static_cast<float>(i) / sample_rate + time;                                \
+		RenderResult result = {};                                                            \
+		track_render(track, track_index, voices, voice_map, voices_count, t, true, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                         \
+		{                                                                                    \
+			Voice* voice = &voices[result.voices[j]];                                        \
+			int pitch = result.pitches[j];                                                   \
+			float theta = pitch_to_frequency(pitch);                                         \
+			float pitched_theta = pitch_to_frequency(pitch + semitones);                     \
+			float modulation = envelope_apply(&voice->pitch_envelope);                       \
+			theta = lerp(theta, pitched_theta, modulation);                                  \
+			float value = wave(theta * t, pulse_width);                                      \
+			value = envelope_apply(&voice->envelope) * value;                                \
+			for(int k = 0; k < stream->channels; ++k)                                        \
+			{                                                                                \
+				stream->samples[stream->channels * i + k] += value;                          \
+			}                                                                                \
+		}                                                                                    \
 	}
 
 	int frames = stream->samples_count / stream->channels;
@@ -6435,11 +6465,8 @@ static void* run_mixer_thread(void* argument)
 		envelope_set_release(pitch_envelope, 0.0f * device_description.sample_rate);
 	}
 
-	int voice_map[voice_count];
-	for(int i = 0; i < voice_count; ++i)
-	{
-		voice_map[i] = -1;
-	}
+	VoiceEntry voice_map[voice_count];
+	voice_map_setup(voice_map, voice_count);
 
 	LPF lowpass;
 	lpf_set_corner_frequency(&lowpass, 440.0f, delta_time_per_frame);
@@ -6487,7 +6514,7 @@ static void* run_mixer_thread(void* argument)
 		int frames = device_description.frames;
 
 		Stream* stream = streams;
-		generate_oscillation(stream, &track, &kick, voices, voice_map, voice_count, device_description.sample_rate, time);
+		generate_oscillation(stream, &track, 0, &kick, voices, voice_map, voice_count, device_description.sample_rate, time);
 		for(int i = 0; i < frames; ++i)
 		{
 			float value = stream->samples[stream->channels * i];
