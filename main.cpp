@@ -4673,6 +4673,10 @@ struct Distortion
 
 static float distort(float sample, float gain, float mix)
 {
+	if(sample == 0.0f)
+	{
+		return 0.0f;
+	}
 	float x = sample;
 	float a = x / abs(x);
 	float distorted = a * (1.0f - exp(gain * x * a));
@@ -4685,9 +4689,9 @@ struct RingModulator
 	float rate;
 };
 
-static float ring_modulate(float sample, float theta, double time, float mix, float rate)
+static float ring_modulate(float sample, double time, float mix, float rate)
 {
-	float modulation = sin(rate * theta * tau * time);
+	float modulation = sin(tau * rate * time);
 	modulation = (1.0f - mix + mix * modulation);
 	return sample * modulation;
 }
@@ -5428,12 +5432,11 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			{
 				float mix = effect->ring_modulator.mix;
 				float rate = effect->ring_modulator.rate;
-				float theta = 440.0f;
 				for(int i = 0; i < frames; ++i)
 				{
 					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = ring_modulate(value, theta, t, mix, rate);
+					value = ring_modulate(value, t, mix, rate);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5531,7 +5534,7 @@ struct Instrument
 	float pulse_width;
 };
 
-static Effect* instrument_allocate_effect(Instrument* instrument, EffectType type)
+static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 {
 	int index = instrument->effects_count;
 	ASSERT(instrument->effects_count + 1 < instrument_effects_max);
@@ -6726,12 +6729,12 @@ static void* run_mixer_thread(void* argument)
 	kick.pitch_envelope.semitones = 36;
 	kick.pulse_width = 0.0f;
 
-	Effect* effect = instrument_allocate_effect(&kick, EffectType::Low_Pass_Filter);
+	Effect* effect = instrument_add_effect(&kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
 	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
 	lowpass->prior = 0.0f;
 
-	effect = instrument_allocate_effect(&kick, EffectType::Distortion);
+	effect = instrument_add_effect(&kick, EffectType::Distortion);
 	Distortion* distortion = &effect->distortion;
 	distortion->gain = 5.0f;
 	distortion->mix = 0.8f;
