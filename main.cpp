@@ -4192,6 +4192,11 @@ static float pitch_to_frequency(int pitch)
 	return 440.0f * pow(2.0f, static_cast<float>(pitch - 69) / 12.0f);
 }
 
+static float frequency_given_interval(float frequency, int semitones)
+{
+	return frequency * exp(semitones * log(2.0f) / 12.0f);
+}
+
 // §4.1 Format Conversion.......................................................
 
 inline s8 convert_to_s8(float value)
@@ -5034,6 +5039,36 @@ struct Track
 	bool staccato;
 };
 
+static const int history_events_max = 32;
+
+struct History
+{
+	struct Event
+	{
+		double time;
+		int track;
+		bool started;
+	};
+
+	Event events[history_events_max];
+	int count;
+};
+
+static void history_erase(History* history)
+{
+	history->count = 0;
+}
+
+static void history_record(History* history, int track_index, Track::Event* event, bool started)
+{
+	History::Event* record = history->events + history->count;
+	record->time = event->time;
+	record->track = track_index;
+	record->started = started;
+	ASSERT(history->count + 1 < history_events_max);
+	history->count = (history->count + 1) % history_events_max;
+}
+
 static void sort_events(Track::Event* events, int events_count)
 {
 	// Just do insertion sort, because events are likely to be mostly sorted
@@ -5144,7 +5179,7 @@ struct RenderResult
 	int voices_count;
 };
 
-void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voice_map, int count, double time, bool use_pitch_envelope, RenderResult* result)
+void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voice_map, int count, double time, bool use_pitch_envelope, History* history, RenderResult* result)
 {
 	// Gate any start events in this time slice.
 	for(int i = track->start_index; i < track->notes_count; ++i)
@@ -5164,6 +5199,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 				index = assign_voice(voice_map, count, track_index, start->note);
 				voice_gate(voices + index, true, use_pitch_envelope);
 			}
+			history_record(history, track_index, start, true);
 			track->start_index = i + 1;
 		}
 	}
@@ -5185,6 +5221,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			{
 				voice_gate(voices + index, false, use_pitch_envelope);
 			}
+			history_record(history, track_index, stop, false);
 			track->stop_index = i + 1;
 		}
 	}
@@ -5300,6 +5337,7 @@ struct Message
 	enum class Code
 	{
 		Boop,
+		Note,
 	} code;
 
 	union
@@ -5308,6 +5346,11 @@ struct Message
 		{
 			bool on;
 		} boop;
+		struct
+		{
+			int track;
+			bool start;
+		} note;
 	};
 };
 
@@ -5705,7 +5748,7 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 	return effect;
 }
 
-static void generate_oscillation(Stream* stream, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time)
+static void generate_oscillation(Stream* stream, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time, History* history)
 {
 	// These are some pretty absurd macros. Basically, most of the oscillators
 	// have identical loops, but the function called to generate the next sample
@@ -5717,17 +5760,17 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	// every frame, it's easiest to split that into its own loop and just check
 	// once and enter the appropriate loop.
 
-#define JUST_OSCILLATOR_TOP_PART()                                                            \
-	for(int i = 0; i < frames; ++i)                                                           \
-	{                                                                                         \
-		float t = static_cast<float>(i) / sample_rate + time;                                 \
-		RenderResult result = {};                                                             \
-		track_render(track, track_index, voices, voice_map, voices_count, t, false, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                          \
-		{                                                                                     \
-			Voice* voice = &voices[result.voices[j]];                                         \
-			int pitch = result.pitches[j];                                                    \
-			float theta = pitch_to_frequency(pitch);                                          \
+#define JUST_OSCILLATOR_TOP_PART()                                                                     \
+	for(int i = 0; i < frames; ++i)                                                                    \
+	{                                                                                                  \
+		float t = static_cast<float>(i) / sample_rate + time;                                          \
+		RenderResult result = {};                                                                      \
+		track_render(track, track_index, voices, voice_map, voices_count, t, false, history, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                                   \
+		{                                                                                              \
+			Voice* voice = &voices[result.voices[j]];                                                  \
+			int pitch = result.pitches[j];                                                             \
+			float theta = pitch_to_frequency(pitch);                                                   \
 
 #define JUST_OSCILLATOR_BOTTOM_PART()                               \
 			value = envelope_apply(&voice->envelope) * value;       \
@@ -5738,20 +5781,20 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}                                                           \
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                            \
-	for(int i = 0; i < frames; ++i)                                                          \
-	{                                                                                        \
-		float t = static_cast<float>(i) / sample_rate + time;                                \
-		RenderResult result = {};                                                            \
-		track_render(track, track_index, voices, voice_map, voices_count, t, true, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                         \
-		{                                                                                    \
-			Voice* voice = &voices[result.voices[j]];                                        \
-			int pitch = result.pitches[j];                                                   \
-			float theta = pitch_to_frequency(pitch);                                         \
-			float pitched_theta = pitch_to_frequency(pitch + semitones);                     \
-			float modulation = envelope_apply(&voice->pitch_envelope);                       \
-			theta = lerp(theta, pitched_theta, modulation);                                  \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                                     \
+	for(int i = 0; i < frames; ++i)                                                                   \
+	{                                                                                                 \
+		float t = static_cast<float>(i) / sample_rate + time;                                         \
+		RenderResult result = {};                                                                     \
+		track_render(track, track_index, voices, voice_map, voices_count, t, true, history, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                                  \
+		{                                                                                             \
+			Voice* voice = &voices[result.voices[j]];                                                 \
+			int pitch = result.pitches[j];                                                            \
+			float theta = pitch_to_frequency(pitch);                                                  \
+			float pitched_theta = pitch_to_frequency(pitch + semitones);                              \
+			float modulation = envelope_apply(&voice->pitch_envelope);                                \
+			theta = lerp(theta, pitched_theta, modulation);                                           \
 
 #define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()                \
 			value = envelope_apply(&voice->envelope) * value;       \
@@ -5889,26 +5932,25 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			int passband_extent = instrument->noise.passband;
 			BPF filter;
 			bpf_reset(&filter);
-			for(int i = 0; i < frames; ++i)
+			if(instrument->pitch_envelope.use)
 			{
-				float t = static_cast<float>(i) / sample_rate + time;
-				RenderResult result = {};
-				track_render(track, track_index, voices, voice_map, voices_count, t, false, &result);
-				for(int j = 0; j < result.voices_count; ++j)
-				{
-					Voice* voice = &voices[result.voices[j]];
-					int pitch = result.pitches[j];
-					float low = fmax(pitch_to_frequency(pitch - passband_extent), 0.0f);
-					float high = pitch_to_frequency(pitch + passband_extent);
-					bpf_set_passband(&filter, low, high, delta_time);
-					float value = arandom::float_range(-1.0f, 1.0f);
-					value = bpf_apply(&filter, value);
-					value = envelope_apply(&voice->envelope) * value;
-					for(int k = 0; k < stream->channels; ++k)
-					{
-						stream->samples[stream->channels * i + k] += value;
-					}
-				}
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.0f);
+				float high = frequency_given_interval(theta, passband_extent);
+				bpf_set_passband(&filter, low, high, delta_time);
+				float value = arandom::float_range(-1.0f, 1.0f);
+				value = bpf_apply(&filter, value);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+			}
+			else
+			{
+				JUST_OSCILLATOR_TOP_PART();
+				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.0f);
+				float high = frequency_given_interval(theta, passband_extent);
+				bpf_set_passband(&filter, low, high, delta_time);
+				float value = arandom::float_range(-1.0f, 1.0f);
+				value = bpf_apply(&filter, value);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -6131,6 +6173,7 @@ namespace
 
 	Vector3 position;
 	World world;
+	audio::MessageQueue message_queue;
 }
 
 static bool key_tapped(UserKey key)
@@ -6169,8 +6212,45 @@ static void game_destroy()
 	}
 }
 
+static void game_send_message(audio::Message* message)
+{
+	enqueue_message(&message_queue, message);
+}
+
+static void process_messages_from_the_audio_thread()
+{
+	audio::Message message;
+	while(dequeue_message(&message_queue, &message))
+	{
+		switch(message.code)
+		{
+			case audio::Message::Code::Note:
+			{
+				if(message.note.start)
+				{
+					LOG_DEBUG("note started track %d", message.note.track);
+				}
+				else
+				{
+					LOG_DEBUG("note stopped track %d", message.note.track);
+				}
+				break;
+			}
+			default:
+			{
+				// Any other message types are meant for the audio thread. So,
+				// if they're received here, something's gone wrong.
+				ASSERT(false);
+				break;
+			}
+		}
+	}
+}
+
 static void main_update()
 {
+	process_messages_from_the_audio_thread();
+
 	// Update input states.
 	for(int i = 0; i < key_count; ++i)
 	{
@@ -6806,6 +6886,20 @@ namespace
 	bool boop_on;
 }
 
+static void send_history_to_main_thread(History* history)
+{
+	for(int i = 0; i < history->count; ++i)
+	{
+		History::Event* event = history->events + i;
+		Message message;
+		message.code = Message::Code::Note;
+		message.note.start = event->started;
+		message.note.track = event->track;
+		game_send_message(&message);
+	}
+	history_erase(history);
+}
+
 static void process_messages_from_main_thread()
 {
 	Message message;
@@ -6816,6 +6910,13 @@ static void process_messages_from_main_thread()
 			case Message::Code::Boop:
 			{
 				boop_on = message.boop.on;
+				break;
+			}
+			default:
+			{
+				// Any other message types should be ones sent to the main
+				// thread. So, if they're received here, something's gone wrong.
+				ASSERT(false);
 				break;
 			}
 		}
@@ -6901,6 +7002,9 @@ static void* run_mixer_thread(void* argument)
 		stream_create(streams + i, device_description.frames, 1);
 	}
 
+	History history;
+	history_erase(&history);
+
 	float volume = 0.75f;
 
 	Instrument instruments[tracks_count];
@@ -6926,6 +7030,7 @@ static void* run_mixer_thread(void* argument)
 
 	while(atomic_flag_test_and_set(&quit))
 	{
+		send_history_to_main_thread(&history);
 		process_messages_from_main_thread();
 
 		// Generate samples.
@@ -6937,7 +7042,7 @@ static void* run_mixer_thread(void* argument)
 			Stream* stream = streams + i;
 			Track* track = tracks + i;
 			Instrument* instrument = instruments + i;
-			generate_oscillation(stream, track, i, instrument, voices, voice_map, voice_count, sample_rate, time);
+			generate_oscillation(stream, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
 			apply_effects(instrument->effects, instrument->effects_count, stream, sample_rate, time);
 		}
 
