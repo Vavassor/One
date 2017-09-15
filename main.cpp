@@ -4270,6 +4270,9 @@ static void format_buffer_from_float(float* in_samples, void* out_samples, int f
 		case FORMAT_F64:
 			convert_buffer_to_double(in_samples, static_cast<double*>(out_samples), frames, info);
 			break;
+		default:
+			ASSERT(false);
+			break;
 	}
 }
 
@@ -4514,7 +4517,7 @@ static void lpf_reset(LPF* filter)
 	filter->prior = 0.0f;
 }
 
-static void lpf_set_corner_frequency(LPF* filter, float corner_frequency, double delta_time)
+static void lpf_set_corner_frequency(LPF* filter, float corner_frequency, float delta_time)
 {
 	float time_constant = 1.0f / (tau * corner_frequency);
 	filter->beta = delta_time / (delta_time + time_constant);
@@ -4541,7 +4544,7 @@ static void hpf_reset(HPF* filter)
 	filter->prior_raw = 0.0f;
 }
 
-static void hpf_set_corner_frequency(HPF* filter, float corner_frequency, double delta_time)
+static void hpf_set_corner_frequency(HPF* filter, float corner_frequency, float delta_time)
 {
 	float time_constant = 1.0f / (tau * corner_frequency);
 	filter->alpha = time_constant / (time_constant + delta_time);
@@ -4571,7 +4574,7 @@ static void bpf_reset(BPF* filter)
 	filter->high.prior = 0.0f;
 }
 
-static void bpf_set_passband(BPF* filter, float corner_frequency_low, float corner_frequency_high, double delta_time)
+static void bpf_set_passband(BPF* filter, float corner_frequency_low, float corner_frequency_high, float delta_time)
 {
 	ASSERT(corner_frequency_low > 0.0f);
 	float time_constant = 1.0f / (tau * corner_frequency_low);
@@ -5026,6 +5029,9 @@ struct Track
 	int notes_capacity;
 	int start_index;
 	int stop_index;
+	double timing_offset;
+	int octave;
+	bool staccato;
 };
 
 static void sort_events(Track::Event* events, int events_count)
@@ -5050,21 +5056,34 @@ void track_setup(Track* track)
 	track->notes_capacity = 8;
 	track->start_index = 0;
 	track->stop_index = 0;
+	track->timing_offset = 0.0;
+	track->octave = 1;
+	track->staccato = false;
 }
 
 void track_generate(Track* track, double origin_time)
 {
-	double note_spacing = 0.6;
-	double note_length = 0.3;
+	double note_spacing;
+	double note_length;
+	if(track->staccato)
+	{
+		note_spacing = 0.6;
+		note_length = 0.2;
+	}
+	else
+	{
+		note_spacing = 1.2;
+		note_length = 0.3;
+	}
 	for(int i = track->notes_count; i < track->notes_capacity; ++i)
 	{
 		int degrees = pentatonic_major[0];
 		int degree = arandom::int_range(0, degrees - 1);
 		int pitch_class = pentatonic_major[degree + 1];
 
-		int octave = arandom::int_range(1, 2);
+		int octave = arandom::int_range(track->octave, track->octave + 1);
 
-		double note_start = note_spacing * i + origin_time;
+		double note_start = note_spacing * i + track->timing_offset + origin_time;
 
 		Track::Note* note = track->notes + i;
 		note->pitch = 12 * octave + pitch_class;
@@ -5563,6 +5582,18 @@ struct Instrument
 		bool use;
 	} pitch_envelope;
 
+	union
+	{
+		struct
+		{
+			float width;
+		} pulse;
+		struct
+		{
+			int passband;
+		} noise;
+	};
+
 	Oscillator oscillator;
 	int effects_count;
 	float pulse_width;
@@ -5647,6 +5678,11 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 		case EffectType::Ring_Modulator:
 		{
 			ring_modulator_default(&effect->ring_modulator);
+			break;
+		}
+		case EffectType::Bitcrush:
+		{
+			bitcrush_reset(&effect->bitcrush);
 			break;
 		}
 		case EffectType::Flanger:
@@ -5770,13 +5806,13 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(instrument->pitch_envelope.use)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = pulse_wave(theta * t, instrument->pulse_width);
+				float value = pulse_wave(theta * t, instrument->pulse.width);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = pulse_wave(theta * t, instrument->pulse_width);
+				float value = pulse_wave(theta * t, instrument->pulse.width);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -5848,8 +5884,11 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		case Oscillator::Noise:
 		{
 			// Since noise is uniform across the frequency spectrum, it can't
-			// be pitched as is. So, the pitch of notes and the pitch envelope
-			// is ignored.
+			// be pitched as is, so a band-pass filter is used.
+			float delta_time = 1.0f / sample_rate;
+			int passband_extent = instrument->noise.passband;
+			BPF filter;
+			bpf_reset(&filter);
 			for(int i = 0; i < frames; ++i)
 			{
 				float t = static_cast<float>(i) / sample_rate + time;
@@ -5858,7 +5897,12 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 				for(int j = 0; j < result.voices_count; ++j)
 				{
 					Voice* voice = &voices[result.voices[j]];
+					int pitch = result.pitches[j];
+					float low = fmax(pitch_to_frequency(pitch - passband_extent), 0.0f);
+					float high = pitch_to_frequency(pitch + passband_extent);
+					bpf_set_passband(&filter, low, high, delta_time);
 					float value = arandom::float_range(-1.0f, 1.0f);
+					value = bpf_apply(&filter, value);
 					value = envelope_apply(&voice->envelope) * value;
 					for(int k = 0; k < stream->channels; ++k)
 					{
@@ -6807,7 +6851,7 @@ static void* run_mixer_thread(void* argument)
 
 	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
 	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
-	double delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
+	float delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
 
 	// Setup test effects and filters.
 
@@ -6835,14 +6879,22 @@ static void* run_mixer_thread(void* argument)
 	VoiceEntry voice_map[voice_count];
 	voice_map_setup(voice_map, voice_count);
 
-	Track track;
-	track_setup(&track);
-	track_generate(&track, 0.0);
+	const int tracks_count = 2;
+	Track tracks[tracks_count];
+
+	track_setup(&tracks[0]);
+	track_generate(&tracks[0], 0.0);
+
+	track_setup(&tracks[1]);
+	tracks[1].timing_offset = 0.4;
+	tracks[1].octave = 4;
+	tracks[1].staccato = true;
+	track_generate(&tracks[1], 0.0);
 
 	BPF bandpass;
 	bpf_reset(&bandpass);
 
-	int streams_count = 3;
+	int streams_count = 4;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
@@ -6851,20 +6903,26 @@ static void* run_mixer_thread(void* argument)
 
 	float volume = 0.75f;
 
-	Instrument kick;
-	kick.oscillator = Oscillator::Sine;
-	kick.pitch_envelope.use = true;
-	kick.pitch_envelope.semitones = 36;
-	kick.pulse_width = 0.0f;
+	Instrument instruments[tracks_count];
 
-	Effect* effect = instrument_add_effect(&kick, EffectType::Low_Pass_Filter);
+	Instrument* kick = instruments;
+	kick->oscillator = Oscillator::Sine;
+	kick->pitch_envelope.use = true;
+	kick->pitch_envelope.semitones = 36;
+
+	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
 	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
 
-	effect = instrument_add_effect(&kick, EffectType::Distortion);
+	effect = instrument_add_effect(kick, EffectType::Distortion);
 	Distortion* distortion = &effect->distortion;
 	distortion->gain = 5.0f;
 	distortion->mix = 0.8f;
+
+	Instrument* snare = instruments + 1;
+	snare->oscillator = Oscillator::Noise;
+	snare->pitch_envelope.use = false;
+	snare->noise.passband = 48;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
@@ -6874,11 +6932,16 @@ static void* run_mixer_thread(void* argument)
 		int frames = device_description.frames;
 		int sample_rate = device_description.sample_rate;
 
-		Stream* stream = streams;
-		generate_oscillation(stream, &track, 0, &kick, voices, voice_map, voice_count, sample_rate, time);
-		apply_effects(kick.effects, kick.effects_count, stream, sample_rate, time);
+		for(int i = 0; i < tracks_count; ++i)
+		{
+			Stream* stream = streams + i;
+			Track* track = tracks + i;
+			Instrument* instrument = instruments + i;
+			generate_oscillation(stream, track, i, instrument, voices, voice_map, voice_count, sample_rate, time);
+			apply_effects(instrument->effects, instrument->effects_count, stream, sample_rate, time);
+		}
 
-		stream = streams + 1;
+		Stream* stream = streams + 2;
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / sample_rate + time;
@@ -6894,7 +6957,7 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
-		stream = streams + 2;
+		stream = streams + 3;
 		{
 			stream->volume = 0.0f;
 			if(boop_on)
@@ -6914,7 +6977,6 @@ static void* run_mixer_thread(void* argument)
 		}
 
 		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
-
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
@@ -6956,7 +7018,10 @@ static void* run_mixer_thread(void* argument)
 	{
 		stream_destroy(streams + i);
 	}
-	instrument_destroy(&kick);
+	for(int i = 0; i < tracks_count; ++i)
+	{
+		instrument_destroy(instruments + i);
+	}
 
 	LOG_DEBUG("Audio thread shut down.");
 
