@@ -5268,6 +5268,7 @@ struct Stream
 	int samples_count;
 	int channels;
 	float volume;
+	float pan;
 };
 
 static void stream_create(Stream* stream, int capacity, int channels)
@@ -5276,6 +5277,7 @@ static void stream_create(Stream* stream, int capacity, int channels)
 	stream->samples_count = capacity;
 	stream->volume = 1.0f;
 	stream->channels = 1;
+	stream->pan = 0.0f;
 }
 
 static void stream_destroy(Stream* stream)
@@ -5308,12 +5310,27 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 			// This only handles mixing monaural to multiple channels, not
 			// stereo-to-surround mixing.
 			ASSERT(stream->channels == 1);
-			for(int j = 0; j < frames; ++j)
+			if(channels == 2)
 			{
-				float sample = stream->volume * stream->samples[j * stream->channels];
-				for(int k = 0; k < channels; ++k)
+				float theta = (-stream->pan / 2.0f + 0.5f) * pi_over_2;
+				float pan_left = sin(theta);
+				float pan_right = cos(theta);
+				for(int j = 0; j < frames; ++j)
 				{
-					mixed_samples[j * channels + k] += sample;
+					float sample = stream->volume * stream->samples[j * stream->channels];
+					mixed_samples[j * channels] += pan_left * sample;
+					mixed_samples[j * channels + 1] += pan_right * sample;
+				}
+			}
+			else
+			{
+				for(int j = 0; j < frames; ++j)
+				{
+					float sample = stream->volume * stream->samples[j * stream->channels];
+					for(int k = 0; k < channels; ++k)
+					{
+						mixed_samples[j * channels + k] += sample;
+					}
 				}
 			}
 		}
@@ -7032,6 +7049,11 @@ static void* run_mixer_thread(void* argument)
 	snare->oscillator = Oscillator::Noise;
 	snare->pitch_envelope.use = false;
 	snare->noise.passband = 48;
+
+	streams[1].pan = 0.4f;
+
+	streams[2].pan = -0.6f;
+	streams[2].volume = 0.6f;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
