@@ -4509,6 +4509,11 @@ struct LPF
 	float prior;
 };
 
+static void lpf_reset(LPF* filter)
+{
+	filter->prior = 0.0f;
+}
+
 static void lpf_set_corner_frequency(LPF* filter, float corner_frequency, double delta_time)
 {
 	float time_constant = 1.0f / (tau * corner_frequency);
@@ -4529,6 +4534,12 @@ struct HPF
 	float prior_filtered;
 	float prior_raw;
 };
+
+static void hpf_reset(HPF* filter)
+{
+	filter->prior_filtered = 0.0f;
+	filter->prior_raw = 0.0f;
+}
 
 static void hpf_set_corner_frequency(HPF* filter, float corner_frequency, double delta_time)
 {
@@ -4553,6 +4564,12 @@ struct BPF
 		float prior;
 	} low, high;
 };
+
+static void bpf_reset(BPF* filter)
+{
+	filter->low.prior = 0.0f;
+	filter->high.prior = 0.0f;
+}
 
 static void bpf_set_passband(BPF* filter, float corner_frequency_low, float corner_frequency_high, double delta_time)
 {
@@ -4623,10 +4640,10 @@ struct APF
 	float gain;
 };
 
-void apf_create(APF* filter, float gain)
+void apf_create(APF* filter, int max_delay)
 {
-	tdl_create(&filter->delay_line, 4096);
-	filter->gain = gain;
+	tdl_create(&filter->delay_line, max_delay);
+	filter->gain = 0.2f;
 }
 
 void apf_destroy(APF* filter)
@@ -4648,6 +4665,11 @@ struct Overdrive
 {
 	float factor;
 };
+
+static void overdrive_default(Overdrive* overdrive)
+{
+	overdrive->factor = 1.0f;
+}
 
 static float overdrive(float sample, float factor)
 {
@@ -4671,6 +4693,12 @@ struct Distortion
 	float mix;
 };
 
+static void distortion_default(Distortion* distortion)
+{
+	distortion->gain = 1.0f;
+	distortion->mix = 1.0f;
+}
+
 static float distort(float sample, float gain, float mix)
 {
 	if(sample == 0.0f)
@@ -4688,6 +4716,12 @@ struct RingModulator
 	float mix;
 	float rate;
 };
+
+static void ring_modulator_default(RingModulator* ring_modulator)
+{
+	ring_modulator->mix = 1.0f;
+	ring_modulator->rate = 1.0f;
+}
 
 static float ring_modulate(float sample, double time, float mix, float rate)
 {
@@ -5534,6 +5568,42 @@ struct Instrument
 	float pulse_width;
 };
 
+static void instrument_destroy(Instrument* instrument)
+{
+	for(int i = 0; i < instrument->effects_count; ++i)
+	{
+		Effect* effect = instrument->effects + i;
+		switch(effect->type)
+		{
+			case EffectType::Reverb:
+			{
+				apf_destroy(&effect->reverb);
+				break;
+			}
+			case EffectType::Flanger:
+			{
+				flanger_destroy(&effect->flanger);
+				break;
+			}
+			case EffectType::Vibrato:
+			{
+				vibrato_destroy(&effect->vibrato);
+				break;
+			}
+			case EffectType::Chorus:
+			{
+				chorus_destroy(&effect->chorus);
+				break;
+			}
+			default:
+			{
+				// All other effects have no need for a destroy routine.
+				break;
+			}
+		}
+	}
+}
+
 static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 {
 	int index = instrument->effects_count;
@@ -5541,63 +5611,77 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 	instrument->effects_count = (index + 1) % instrument_effects_max;
 	Effect* effect = instrument->effects + index;
 	effect->type = type;
+
+	switch(type)
+	{
+		case EffectType::Low_Pass_Filter:
+		{
+			lpf_reset(&effect->lowpass);
+			break;
+		}
+		case EffectType::High_Pass_Filter:
+		{
+			hpf_reset(&effect->highpass);
+			break;
+		}
+		case EffectType::Band_Pass_Filter:
+		{
+			bpf_reset(&effect->bandpass);
+			break;
+		}
+		case EffectType::Reverb:
+		{
+			apf_create(&effect->reverb, 4096);
+			break;
+		}
+		case EffectType::Overdrive:
+		{
+			overdrive_default(&effect->overdrive);
+			break;
+		}
+		case EffectType::Distortion:
+		{
+			distortion_default(&effect->distortion);
+			break;
+		}
+		case EffectType::Ring_Modulator:
+		{
+			ring_modulator_default(&effect->ring_modulator);
+			break;
+		}
+		case EffectType::Flanger:
+		{
+			flanger_create(&effect->flanger, 2048);
+			break;
+		}
+		case EffectType::Vibrato:
+		{
+			vibrato_create(&effect->vibrato);
+			break;
+		}
+		case EffectType::Chorus:
+		{
+			chorus_create(&effect->chorus);
+			break;
+		}
+	}
+
 	return effect;
-}
-
-// These oscillate functions are just for making a uniform interface to the
-// available types of oscillation.
-
-static float oscillate_sine(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return sin(tau * x);
-}
-
-static float oscillate_square(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return square_wave(x);
-}
-
-static float oscillate_pulse(float x, float pulse_width)
-{
-	return pulse_wave(x, pulse_width);
-}
-
-static float oscillate_triangle(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return triangle_wave(x);
-}
-
-static float oscillate_sawtooth(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return sawtooth_wave(x);
-}
-
-static float oscillate_rectified_sine(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return rectified_sin(tau * x);
-}
-
-static float oscillate_cycloid(float x, float ignored)
-{
-	static_cast<void>(ignored);
-	return cycloid(tau * x);
-}
-
-static float oscillate_noise(float ignored, float also_ignored)
-{
-	static_cast<void>(ignored);
-	static_cast<void>(also_ignored);
-	return arandom::float_range(-1.0f, 1.0f);
 }
 
 static void generate_oscillation(Stream* stream, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time)
 {
-#define JUST_OSCILLATOR(wave, pulse_width)                                                    \
+	// These are some pretty absurd macros. Basically, most of the oscillators
+	// have identical loops, but the function called to generate the next sample
+	// is different and may have slightly different parameters. So, the loop is
+	// split to the part before the call that needs to be different, and the
+	// part after. Then the line that needs to be different is placed between them.
+	//
+	// Also, to prevent having to check whether the pitch envelope is needed for
+	// every frame, it's easiest to split that into its own loop and just check
+	// once and enter the appropriate loop.
+
+#define JUST_OSCILLATOR_TOP_PART()                                                            \
 	for(int i = 0; i < frames; ++i)                                                           \
 	{                                                                                         \
 		float t = static_cast<float>(i) / sample_rate + time;                                 \
@@ -5608,16 +5692,17 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			Voice* voice = &voices[result.voices[j]];                                         \
 			int pitch = result.pitches[j];                                                    \
 			float theta = pitch_to_frequency(pitch);                                          \
-			float value = wave(theta * t, pulse_width);                                       \
-			value = envelope_apply(&voice->envelope) * value;                                 \
-			for(int k = 0; k < stream->channels; ++k)                                         \
-			{                                                                                 \
-				stream->samples[stream->channels * i + k] += value;                           \
-			}                                                                                 \
-		}                                                                                     \
+
+#define JUST_OSCILLATOR_BOTTOM_PART()                               \
+			value = envelope_apply(&voice->envelope) * value;       \
+			for(int k = 0; k < stream->channels; ++k)               \
+			{                                                       \
+				stream->samples[stream->channels * i + k] += value; \
+			}                                                       \
+		}                                                           \
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE(wave, pulse_width)                                    \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                            \
 	for(int i = 0; i < frames; ++i)                                                          \
 	{                                                                                        \
 		float t = static_cast<float>(i) / sample_rate + time;                                \
@@ -5631,13 +5716,14 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			float pitched_theta = pitch_to_frequency(pitch + semitones);                     \
 			float modulation = envelope_apply(&voice->pitch_envelope);                       \
 			theta = lerp(theta, pitched_theta, modulation);                                  \
-			float value = wave(theta * t, pulse_width);                                      \
-			value = envelope_apply(&voice->envelope) * value;                                \
-			for(int k = 0; k < stream->channels; ++k)                                        \
-			{                                                                                \
-				stream->samples[stream->channels * i + k] += value;                          \
-			}                                                                                \
-		}                                                                                    \
+
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()                \
+			value = envelope_apply(&voice->envelope) * value;       \
+			for(int k = 0; k < stream->channels; ++k)               \
+			{                                                       \
+				stream->samples[stream->channels * i + k] += value; \
+			}                                                       \
+		}                                                           \
 	}
 
 	int frames = stream->samples_count / stream->channels;
@@ -5651,11 +5737,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_sine, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = sin(tau * theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_sine, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = sin(tau * theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5663,11 +5753,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_square, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = square_wave(theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_square, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = square_wave(theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5675,11 +5769,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_pulse, instrument->pulse_width);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = pulse_wave(theta * t, instrument->pulse_width);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_pulse, instrument->pulse_width);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = pulse_wave(theta * t, instrument->pulse_width);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5687,11 +5785,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_triangle, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = triangle_wave(theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_triangle, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = triangle_wave(theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5699,11 +5801,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_sawtooth, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = sawtooth_wave(theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_sawtooth, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = sawtooth_wave(theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5711,11 +5817,15 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_rectified_sine, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = rectified_sin(tau * theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_rectified_sine, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = rectified_sin(tau * theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
@@ -5723,27 +5833,46 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{
 			if(instrument->pitch_envelope.use)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_cycloid, 0.0f);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float value = cycloid(tau * theta * t);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
 			{
-				JUST_OSCILLATOR(oscillate_cycloid, 0.0f);
+				JUST_OSCILLATOR_TOP_PART();
+				float value = cycloid(tau * theta * t);
+				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
 		}
 		case Oscillator::Noise:
 		{
-			if(instrument->pitch_envelope.use)
+			// Since noise is uniform across the frequency spectrum, it can't
+			// be pitched as is. So, the pitch of notes and the pitch envelope
+			// is ignored.
+			for(int i = 0; i < frames; ++i)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE(oscillate_noise, 0.0f);
-			}
-			else
-			{
-				JUST_OSCILLATOR(oscillate_noise, 0.0f);
+				float t = static_cast<float>(i) / sample_rate + time;
+				RenderResult result = {};
+				track_render(track, track_index, voices, voice_map, voices_count, t, false, &result);
+				for(int j = 0; j < result.voices_count; ++j)
+				{
+					Voice* voice = &voices[result.voices[j]];
+					float value = arandom::float_range(-1.0f, 1.0f);
+					value = envelope_apply(&voice->envelope) * value;
+					for(int k = 0; k < stream->channels; ++k)
+					{
+						stream->samples[stream->channels * i + k] += value;
+					}
+				}
 			}
 			break;
 		}
 	}
+#undef OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART
+#undef OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART
+#undef JUST_OSCILLATOR_TOP_PART
+#undef JUST_OSCILLATOR_BOTTOM_PART
 }
 
 } // namespace audio
@@ -6711,8 +6840,7 @@ static void* run_mixer_thread(void* argument)
 	track_generate(&track, 0.0);
 
 	BPF bandpass;
-	bandpass.low.prior = 0.0f;
-	bandpass.high.prior = 0.0f;
+	bpf_reset(&bandpass);
 
 	int streams_count = 3;
 	Stream streams[streams_count];
@@ -6732,7 +6860,6 @@ static void* run_mixer_thread(void* argument)
 	Effect* effect = instrument_add_effect(&kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
 	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
-	lowpass->prior = 0.0f;
 
 	effect = instrument_add_effect(&kick, EffectType::Distortion);
 	Distortion* distortion = &effect->distortion;
@@ -6829,6 +6956,7 @@ static void* run_mixer_thread(void* argument)
 	{
 		stream_destroy(streams + i);
 	}
+	instrument_destroy(&kick);
 
 	LOG_DEBUG("Audio thread shut down.");
 
