@@ -3970,7 +3970,7 @@ static void resize_viewport(int width, int height)
 	glViewport(0, 0, width, height);
 }
 
-static void system_update(Vector3 position, World* world)
+static void system_update(Vector3 position, Vector3 dancer_position, World* world)
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -3989,6 +3989,7 @@ static void system_update(Vector3 position, World* world)
 			angle += 0.02f;
 
 			Vector3 where = {0.0f, 2.0f, 0.0f};
+			where += dancer_position;
 			Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
 			model0 = compose_transform(where, orientation, scale);
 		}
@@ -6173,6 +6174,7 @@ namespace
 
 	Vector3 position;
 	World world;
+	Vector3 dancer_position;
 	audio::MessageQueue message_queue;
 }
 
@@ -6226,13 +6228,16 @@ static void process_messages_from_the_audio_thread()
 		{
 			case audio::Message::Code::Note:
 			{
-				if(message.note.start)
+				if(message.note.track == 0)
 				{
-					LOG_DEBUG("note started track %d", message.note.track);
-				}
-				else
-				{
-					LOG_DEBUG("note stopped track %d", message.note.track);
+					if(message.note.start)
+					{
+						dancer_position = {1.0f, 1.0f, 1.0f};
+					}
+					else
+					{
+						dancer_position = vector3_zero;
+					}
 				}
 				break;
 			}
@@ -6317,7 +6322,7 @@ static void main_update()
 		position = vector3_zero;
 	}
 
-	render::system_update(position, &world);
+	render::system_update(position, dancer_position, &world);
 }
 
 // 6. OpenGL Function Loading...................................................
