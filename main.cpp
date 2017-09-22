@@ -167,6 +167,7 @@ static bool ensure_array_size(void** array, int* capacity, int item_size, int ex
 #define ARRAY_COUNT(array) \
 	static_cast<int>(sizeof(array) / sizeof(*(array)))
 
+// Prefer these for integers and fmax() and fmin() for floating-point numbers.
 #define MAX(a, b) \
 	(((a) > (b)) ? (a) : (b))
 #define MIN(a, b) \
@@ -509,8 +510,7 @@ Vector3 cross(Vector3 v0, Vector3 v1)
 	return result;
 }
 
-// isotropic scale is just operator *
-Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
+Vector3 pointwise_multiply(Vector3 v0, Vector3 v1)
 {
 	Vector3 result;
 	result.x = v0.x * v1.x;
@@ -519,7 +519,7 @@ Vector3 anisotropic_scale(Vector3 v0, Vector3 v1)
 	return result;
 }
 
-Vector3 scale_reciprocal(Vector3 v0, Vector3 v1)
+Vector3 pointwise_divide(Vector3 v0, Vector3 v1)
 {
 	Vector3 result;
 	result.x = v0.x / v1.x;
@@ -1302,7 +1302,7 @@ static void initialise_free_list(Tree* tree, s32 index)
 		tree->nodes[i].next = i + 1;
 		tree->nodes[i].height = null_index;
 	}
-	Node* last = tree->nodes + (tree->nodes_capacity - 1);
+	Node* last = &tree->nodes[tree->nodes_capacity - 1];
 	last->next = null_index;
 	last->height = null_index;
 	tree->free_list = index;
@@ -1359,7 +1359,7 @@ static s32 balance_node(Tree* tree, s32 node_index)
 
 	// Only an inner node with grandchildren can be rotated.
 	s32 ai = node_index;
-	Node* a = tree->nodes + ai;
+	Node* a = &tree->nodes[ai];
 	if(is_leaf(a) || a->height < 2)
 	{
 		return ai;
@@ -1367,8 +1367,8 @@ static s32 balance_node(Tree* tree, s32 node_index)
 
 	s32 bi = a->left;
 	s32 ci = a->right;
-	Node* b = tree->nodes + bi;
-	Node* c = tree->nodes + ci;
+	Node* b = &tree->nodes[bi];
+	Node* c = &tree->nodes[ci];
 
 	s32 balance = c->height - b->height;
 	if(balance > 1)
@@ -1383,8 +1383,8 @@ static s32 balance_node(Tree* tree, s32 node_index)
 
 		s32 fi = c->left;
 		s32 gi = c->right;
-		Node* f = tree->nodes + fi;
-		Node* g = tree->nodes + gi;
+		Node* f = &tree->nodes[fi];
+		Node* g = &tree->nodes[gi];
 
 		c->left = ai;
 		c->parent = a->parent;
@@ -1443,8 +1443,8 @@ static s32 balance_node(Tree* tree, s32 node_index)
 
 		s32 di = b->left;
 		s32 ei = b->right;
-		Node* d = tree->nodes + di;
-		Node* e = tree->nodes + ei;
+		Node* d = &tree->nodes[di];
+		Node* e = &tree->nodes[ei];
 
 		b->left = ai;
 		b->parent = a->parent;
@@ -1506,9 +1506,9 @@ static void refresh_parent_chain(Tree* tree, s32 index)
 	{
 		index = balance_node(tree, index);
 
-		Node* node = tree->nodes + index;
-		Node* left = tree->nodes + node->left;
-		Node* right = tree->nodes + node->right;
+		Node* node = &tree->nodes[index];
+		Node* left = &tree->nodes[node->left];
+		Node* right = &tree->nodes[node->right];
 
 		node->height = 1 + MAX(left->height, right->height);
 		node->aabb = aabb_merge(left->aabb, right->aabb);
@@ -1531,7 +1531,7 @@ static bool aabb_choose(AABB aabb, AABB c0, AABB c1)
 s32 insert_node(Tree* tree, AABB aabb, void* user_data)
 {
 	s32 node_index = allocate_node(tree);
-	Node* node = tree->nodes + node_index;
+	Node* node = &tree->nodes[node_index];
 	node->aabb = aabb;
 	node->user_data = user_data;
 
@@ -1546,14 +1546,14 @@ s32 insert_node(Tree* tree, AABB aabb, void* user_data)
 
 	// If the root is the only node in the tree, make the root a sibling to the
 	// inserted node and create a new root above them.
-	Node* root = tree->nodes + tree->root_index;
+	Node* root = &tree->nodes[tree->root_index];
 	if(is_leaf(root))
 	{
 		Node* sibling = root;
 		s32 sibling_index = tree->root_index;
 
 		s32 root_index = allocate_node(tree);
-		Node* root = tree->nodes + root_index;
+		Node* root = &tree->nodes[root_index];
 		root->aabb = aabb_merge(sibling->aabb, node->aabb);
 		root->left = sibling_index;
 		root->right = node_index;
@@ -1582,13 +1582,13 @@ s32 insert_node(Tree* tree, AABB aabb, void* user_data)
 		{
 			branch_index = branch->right;
 		}
-		branch = tree->nodes + branch_index;
+		branch = &tree->nodes[branch_index];
 	} while(!is_leaf(branch));
 
 	// Replace the branch with a new parent, whose children are the branch and
 	// the inserted node.
 	s32 parent_index = allocate_node(tree);
-	Node* parent = tree->nodes + parent_index;
+	Node* parent = &tree->nodes[parent_index];
 	parent->left = branch_index;
 	parent->right = node_index;
 	root->parent = parent_index;
@@ -1600,7 +1600,7 @@ s32 insert_node(Tree* tree, AABB aabb, void* user_data)
 
 void remove_node(Tree* tree, s32 index)
 {
-	Node* node = tree->nodes + index;
+	Node* node = &tree->nodes[index];
 
 	// If this is the only node in the tree.
 	if(node->parent == null_index)
@@ -1611,7 +1611,7 @@ void remove_node(Tree* tree, s32 index)
 	}
 
 	// All leaves must have a sibling.
-	Node* parent = tree->nodes + node->parent;
+	Node* parent = &tree->nodes[node->parent];
 	s32 sibling_index;
 	if(parent->left == index)
 	{
@@ -1635,7 +1635,7 @@ void remove_node(Tree* tree, s32 index)
 
 	// Replace the parent with the node's sibling and get rid of the replaced
 	// parent and the original node.
-	Node* grandparent = tree->nodes + parent->parent;
+	Node* grandparent = &tree->nodes[parent->parent];
 	if(grandparent->left == node->parent)
 	{
 		grandparent->left = sibling_index;
@@ -1716,7 +1716,7 @@ static float compute_just_min(Triangle* triangles, int lower, int upper, Flag ax
 	float result = FLT_MAX;
 	for(int i = lower; i <= upper; ++i)
 	{
-		Triangle* triangle = triangles + i;
+		Triangle* triangle = &triangles[i];
 		float v0 = triangle->vertices[0][axis];
 		float v1 = triangle->vertices[1][axis];
 		float v2 = triangle->vertices[2][axis];
@@ -1731,7 +1731,7 @@ static float compute_just_max(Triangle* triangles, int lower, int upper, Flag ax
 	float result = -FLT_MAX;
 	for(int i = lower; i <= upper; ++i)
 	{
-		Triangle* triangle = triangles + i;
+		Triangle* triangle = &triangles[i];
 		float v0 = triangle->vertices[0][axis];
 		float v1 = triangle->vertices[1][axis];
 		float v2 = triangle->vertices[2][axis];
@@ -1747,7 +1747,7 @@ static int partition_triangles(Triangle* triangles, int lower, int upper, float 
 	int j = upper;
 	while(pivot <= j)
 	{
-		Triangle* triangle = triangles + pivot;
+		Triangle* triangle = &triangles[pivot];
 		float v0 = triangle->vertices[0][axis];
 		float v1 = triangle->vertices[1][axis];
 		float v2 = triangle->vertices[2][axis];
@@ -1837,16 +1837,16 @@ static bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles,
 			return false;
 		}
 		node->index = index;
-		Node* children = tree->nodes + index;
+		Node* children = &tree->nodes[index];
 
-		Node* child_left = children + 0;
+		Node* child_left = &children[0];
 		int left_upper = fmax(lower, pivot - 1);
 		AABB left_bounds = aabb;
 		left_bounds.max[axis] = split;
 		node->clip[0] = compute_just_max(triangles, lower, left_upper, axis);
 		bool built0 = build_node(tree, child_left, left_bounds, triangles, lower, left_upper);
 
-		Node* child_right = children + 1;
+		Node* child_right = &children[1];
 		AABB right_bounds = aabb;
 		right_bounds.min[axis] = split;
 		node->clip[1] = compute_just_min(triangles, pivot, upper, axis);
@@ -1873,7 +1873,7 @@ bool build_tree(Tree* tree, Triangle* triangles, int triangles_count)
 	{
 		return false;
 	}
-	Node* root = tree->nodes + index;
+	Node* root = &tree->nodes[index];
 	tree->bounds = compute_bounds(triangles, 0, triangles_count - 1);
 
 	return build_node(tree, root, tree->bounds, triangles, 0, triangles_count - 1);
@@ -1914,14 +1914,14 @@ static bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb,
 	}
 
 	Flag axis = node->flag;
-	Node* children = nodes + node->index;
+	Node* children = &nodes[node->index];
 
-	Node* left = children + 0;
+	Node* left = &children[0];
 	AABB left_bounds = node_bounds;
 	left_bounds.max[axis] = node->clip[0];
 	bool intersects0 = intersect_node(nodes, left, left_bounds, aabb, velocity, result);
 
-	Node* right = children + 1;
+	Node* right = &children[1];
 	AABB right_bounds = node_bounds;
 	right_bounds.min[axis] = node->clip[1];
 	bool intersects1 = intersect_node(nodes, right, right_bounds, aabb, velocity, result);
@@ -1955,14 +1955,14 @@ static bool intersect_node(Node* nodes, Node* node, AABB bounds, Ray ray, Inters
 	}
 
 	Flag axis = node->flag;
-	Node* children = nodes + node->index;
+	Node* children = &nodes[node->index];
 
-	Node* left = children + 0;
+	Node* left = &children[0];
 	AABB left_bounds = bounds;
 	left_bounds.max[axis] = node->clip[0];
 	bool intersects0 = intersect_node(nodes, left, left_bounds, ray, result);
 
-	Node* right = children + 1;
+	Node* right = &children[1];
 	AABB right_bounds = bounds;
 	right_bounds.min[axis] = node->clip[1];
 	bool intersects1 = intersect_node(nodes, right, right_bounds, ray, result);
@@ -2203,12 +2203,12 @@ struct World
 
 static void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, World* world, CollisionPacket* packet)
 {
-	Vector3 world_position = anisotropic_scale(position, radius);
-	Vector3 world_velocity = anisotropic_scale(velocity, radius);
+	Vector3 world_position = pointwise_multiply(position, radius);
+	Vector3 world_velocity = pointwise_multiply(velocity, radius);
 	AABB aabb = aabb_from_ellipsoid(world_position, radius);
 	for(int i = 0; i < world->colliders_count; ++i)
 	{
-		Collider* collider = world->colliders + i;
+		Collider* collider = &world->colliders[i];
 		bih::IntersectionResult intersection = {};
 		bih::intersect_tree(&collider->tree, aabb, world_velocity, &intersection);
 		for(int j = 0; j < intersection.indices_count; ++j)
@@ -2219,7 +2219,7 @@ static void check_collision(Vector3 position, Vector3 radius, Vector3 velocity, 
 			for(int k = 0; k < 3; ++k)
 			{
 				Vector3 v = triangle.vertices[k];
-				v = scale_reciprocal(v, radius);
+				v = pointwise_divide(v, radius);
 				triangle.vertices[k] = v;
 			}
 			collide_unit_sphere_with_triangle(position, velocity, triangle, packet);
@@ -2303,20 +2303,20 @@ static Vector3 collide_with_world(Vector3 position, Vector3 radius, Vector3 velo
 
 Vector3 collide_and_slide(Vector3 position, Vector3 radius, Vector3 velocity, Vector3 gravity, World* world)
 {
-	Vector3 e_position = scale_reciprocal(position, radius);
-	Vector3 e_velocity = scale_reciprocal(velocity, radius);
+	Vector3 e_position = pointwise_divide(position, radius);
+	Vector3 e_velocity = pointwise_divide(velocity, radius);
 	Vector3 collide_position;
 	if(squared_length(e_velocity) != 0.0f)
 	{
 		collide_position = collide_with_world(e_position, radius, e_velocity, world);
-		position = anisotropic_scale(collide_position, radius);
+		position = pointwise_multiply(collide_position, radius);
 		e_position = collide_position;
 	}
 	velocity = gravity;
 
-	e_velocity = scale_reciprocal(gravity, radius);
+	e_velocity = pointwise_divide(gravity, radius);
 	collide_position = collide_with_world(e_position, radius, e_velocity, world);
-	Vector3 final_position = anisotropic_scale(collide_position, radius);
+	Vector3 final_position = pointwise_multiply(collide_position, radius);
 
 	return final_position;
 }
@@ -2406,7 +2406,7 @@ Frustum make_frustum(Matrix4 m)
 	Frustum result;
 	for(int i = 0; i < 6; ++i)
 	{
-		Frustum::Plane* plane = result.planes + i;
+		Frustum::Plane* plane = &result.planes[i];
 		float sign = 2 * (i & 1) - 1;
 		int row = 4 * (i / 2);
 		plane->x = m[12] + sign * m[0 + row];
@@ -2427,7 +2427,7 @@ bool intersect_aabb_frustum(Frustum* frustum, AABB* aabb)
 	for(int i = 0; i < 6; ++i)
 	{
 		Frustum::Plane plane = frustum->planes[i];
-		Vector3 sf = anisotropic_scale(extent, plane.sign_flip);
+		Vector3 sf = pointwise_multiply(extent, plane.sign_flip);
 		if(dot(center + sf, plane.normal) <= 2.0f * -plane.w)
 		{
 			return false;
@@ -3199,7 +3199,7 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 		{
 			add_aabb_plane(bounds, axis, node->clip[0], {1.0f, 0.0f, 0.0f});
 		}
-		add_bih_node(nodes, nodes + node->index, left, depth + 1, target_depth);
+		add_bih_node(nodes, &nodes[node->index], left, depth + 1, target_depth);
 
 		AABB right = bounds;
 		right.min[axis] = node->clip[1];
@@ -3207,13 +3207,13 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 		{
 			add_aabb_plane(bounds, axis, node->clip[1], {0.0f, 0.0f, 1.0f});
 		}
-		add_bih_node(nodes, nodes + node->index + 1, right, depth + 1, target_depth);
+		add_bih_node(nodes, &nodes[node->index + 1], right, depth + 1, target_depth);
 	}
 }
 
 static void draw_bih_tree(bih::Tree* tree, int target_depth)
 {
-	bih::Node* root = tree->nodes;
+	bih::Node* root = &tree->nodes[0];
 	AABB bounds = tree->bounds;
 	add_bih_node(tree->nodes, root, bounds, 0, target_depth);
 	immediate::draw();
@@ -3949,7 +3949,7 @@ static void system_terminate(bool functions_loaded)
 	{
 		for(int i = 0; i < objects_count; ++i)
 		{
-			object_destroy(objects + i);
+			object_destroy(&objects[i]);
 		}
 		glDeleteSamplers(1, &nearest_repeat);
 		glDeleteProgram(shader);
@@ -4017,10 +4017,10 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		Vector3 direction = normalise(camera_target - camera_position);
 		const Matrix4 view4 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
 
-		object_set_matrices(objects, model0, view, projection);
-		object_set_matrices(objects + 1, model1, view, projection);
-		object_set_matrices(objects + 2, model2, view, projection);
-		object_set_matrices(objects + 3, model3, view, projection);
+		object_set_matrices(&objects[0], model0, view, projection);
+		object_set_matrices(&objects[1], model1, view, projection);
+		object_set_matrices(&objects[2], model2, view, projection);
+		object_set_matrices(&objects[3], model3, view, projection);
 		object_set_matrices(&sky, model4, view4, sky_projection);
 
 		immediate::set_matrices(view, projection);
@@ -4071,7 +4071,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	glUseProgram(shader_camera_fade);
 	for(int i = 0; i < fade_calls.count; ++i)
 	{
-		Object* o = objects + fade_calls.indices[i];
+		Object* o = &objects[fade_calls.indices[i]];
 		glUniformMatrix4fv(location00, 1, GL_TRUE, o->model_view_projection.elements);
 		glUniformMatrix4fv(location11, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
@@ -4082,7 +4082,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	glUseProgram(shader);
 	for(int i = 0; i < solid_calls.count; ++i)
 	{
-		Object* o = objects + solid_calls.indices[i];
+		Object* o = &objects[solid_calls.indices[i]];
 		glUniformMatrix4fv(location0, 1, GL_TRUE, o->model_view_projection.elements);
 		glUniformMatrix4fv(location1, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
@@ -4173,13 +4173,18 @@ struct DeviceDescription
 	u8 silence;
 };
 
+static u8 get_silence_by_format(Format format)
+{
+	switch(format)
+	{
+		case FORMAT_U8: return 0x80;
+		default:        return 0x00;
+	}
+}
+
 static void fill_remaining_device_description(DeviceDescription* description)
 {
-	switch(description->format)
-	{
-		case FORMAT_U8: description->silence = 0x80; break;
-		default:        description->silence = 0x00; break;
-	}
+	description->silence = get_silence_by_format(description->format);
 	description->size = format_byte_count(description->format) * description->channels * description->frames;
 }
 
@@ -4838,6 +4843,51 @@ static float flanger_apply(Flanger* flanger, float sample, float time)
 	return feedback;
 }
 
+static const int phaser_poles = 4;
+
+struct Phaser
+{
+	TDL delay_line;
+	float delay;
+	float depth;
+	float rate;
+	float gain;
+	float mix;
+};
+
+static void phaser_create(Phaser* phaser)
+{
+	tdl_create(&phaser->delay_line, 4096);
+	phaser->delay = 512.0f;
+	phaser->depth = 511.0f;
+	phaser->rate = 1.0f;
+	phaser->gain = 0.8f;
+	phaser->mix = 0.5f;
+}
+
+static void phaser_destroy(Phaser* phaser)
+{
+	tdl_destroy(&phaser->delay_line);
+}
+
+static float phaser_apply(Phaser* phaser, float sample, float time)
+{
+	float modulation = sin(tau * phaser->rate * time);
+	modulation = (modulation + 1.0f) / 2.0f;
+
+	float result = sample;
+	for(int i = 0; i < phaser_poles; ++i)
+	{
+		float delay_time = phaser->depth * modulation + phaser->delay * i;
+		float prior = tdl_tap(&phaser->delay_line, delay_time);
+		float feedback = sample - (phaser->gain * prior);
+		tdl_record(&phaser->delay_line, feedback);
+		float out = (phaser->gain * feedback) + prior;
+		result = lerp(result, out, phaser->mix);
+	}
+	return result;
+}
+
 struct Vibrato
 {
 	TDL delay_line;
@@ -4979,6 +5029,50 @@ static int assign_voice(VoiceEntry* voice_map, int voices, int track, int note)
 	return 0;
 }
 
+static void free_associated_voices(VoiceEntry* voice_map, int voices, int track)
+{
+	for(int i = 0; i < voices; ++i)
+	{
+		if(voice_map[i].track == track)
+		{
+			voice_map[i].track = no_track;
+			voice_map[i].note = no_note;
+		}
+	}
+}
+
+// History......................................................................
+
+static const int history_events_max = 32;
+
+struct History
+{
+	struct Event
+	{
+		double time;
+		int track;
+		bool started;
+	};
+
+	Event events[history_events_max];
+	int count;
+};
+
+static void history_erase(History* history)
+{
+	history->count = 0;
+}
+
+static void history_record(History* history, int track_index, double time, bool started)
+{
+	History::Event* record = &history->events[history->count];
+	record->time = time;
+	record->track = track_index;
+	record->started = started;
+	ASSERT(history->count + 1 < history_events_max);
+	history->count = (history->count + 1) % history_events_max;
+}
+
 // §4.8 Track...................................................................
 
 #define C  0
@@ -5037,38 +5131,9 @@ struct Track
 	int stop_index;
 	double timing_offset;
 	int octave;
-	bool staccato;
+	int octave_range;
+	int style;
 };
-
-static const int history_events_max = 32;
-
-struct History
-{
-	struct Event
-	{
-		double time;
-		int track;
-		bool started;
-	};
-
-	Event events[history_events_max];
-	int count;
-};
-
-static void history_erase(History* history)
-{
-	history->count = 0;
-}
-
-static void history_record(History* history, int track_index, Track::Event* event, bool started)
-{
-	History::Event* record = history->events + history->count;
-	record->time = event->time;
-	record->track = track_index;
-	record->started = started;
-	ASSERT(history->count + 1 < history_events_max);
-	history->count = (history->count + 1) % history_events_max;
-}
 
 static void sort_events(Track::Event* events, int events_count)
 {
@@ -5094,42 +5159,57 @@ void track_setup(Track* track)
 	track->stop_index = 0;
 	track->timing_offset = 0.0;
 	track->octave = 1;
-	track->staccato = false;
+	track->octave_range = 1;
+	track->style = 0;
 }
 
 void track_generate(Track* track, double origin_time)
 {
 	double note_spacing;
 	double note_length;
-	if(track->staccato)
+	switch(track->style)
 	{
-		note_spacing = 0.6;
-		note_length = 0.2;
+		case 0:
+		{
+			note_spacing = 0.6;
+			note_length = 0.2;
+			break;
+		}
+		case 1:
+		{
+			note_spacing = 1.2;
+			note_length = 0.3;
+			break;
+		}
+		case 2:
+		{
+			note_spacing = 0.15;
+			note_length = 0.3;
+			break;
+		}
 	}
-	else
-	{
-		note_spacing = 1.2;
-		note_length = 0.3;
-	}
+
 	for(int i = track->notes_count; i < track->notes_capacity; ++i)
 	{
 		int degrees = pentatonic_major[0];
 		int degree = arandom::int_range(0, degrees - 1);
 		int pitch_class = pentatonic_major[degree + 1];
 
-		int octave = arandom::int_range(track->octave, track->octave + 1);
+		int lowest_octave = track->octave;
+		int highest_octave = track->octave + track->octave_range;
+		int octave = arandom::int_range(lowest_octave, highest_octave);
 
 		double note_start = note_spacing * i + track->timing_offset + origin_time;
 
-		Track::Note* note = track->notes + i;
+		Track::Note* note = &track->notes[i];
 		note->pitch = 12 * octave + pitch_class;
 		note->velocity = 1.0f;
 
-		Track::Event* start_event = track->start_events + i;
+		Track::Event* start_event = &track->start_events[i];
 		start_event->note = i;
 		start_event->time = note_start;
 
-		Track::Event* stop_event = track->stop_events + i;
+		Track::Event* stop_event = &track->stop_events[i];
 		stop_event->note = i;
 		stop_event->time = note_start + note_length;
 	}
@@ -5185,7 +5265,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 	// Gate any start events in this time slice.
 	for(int i = track->start_index; i < track->notes_count; ++i)
 	{
-		Track::Event* start = track->start_events + i;
+		Track::Event* start = &track->start_events[i];
 		if(start->time > time)
 		{
 			// This event is in the future, so all events after it are also.
@@ -5198,9 +5278,9 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			if(!found)
 			{
 				index = assign_voice(voice_map, count, track_index, start->note);
-				voice_gate(voices + index, true, use_pitch_envelope);
+				voice_gate(&voices[index], true, use_pitch_envelope);
 			}
-			history_record(history, track_index, start, true);
+			history_record(history, track_index, start->time, true);
 			track->start_index = i + 1;
 		}
 	}
@@ -5208,7 +5288,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 	// Gate any stop events.
 	for(int i = track->stop_index; i < track->notes_count; ++i)
 	{
-		Track::Event* stop = track->stop_events + i;
+		Track::Event* stop = &track->stop_events[i];
 		if(stop->time > time)
 		{
 			// This event is in the future, so all events after it are also.
@@ -5220,9 +5300,9 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			bool found = find_voice(voice_map, count, track_index, stop->note, &index);
 			if(found)
 			{
-				voice_gate(voices + index, false, use_pitch_envelope);
+				voice_gate(&voices[index], false, use_pitch_envelope);
 			}
-			history_record(history, track_index, stop, false);
+			history_record(history, track_index, stop->time, false);
 			track->stop_index = i + 1;
 		}
 	}
@@ -5238,7 +5318,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 		int note_index = voice_map[i].note;
 		if(note_index != no_note)
 		{
-			if(voice_is_unused(voices + i))
+			if(voice_is_unused(&voices[i]))
 			{
 				voice_map[i].track = no_track;
 				voice_map[i].note = no_note;
@@ -5256,6 +5336,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 	if(should_regenerate(track))
 	{
 		transfer_unfinished_notes(track);
+		free_associated_voices(voice_map, count, track_index);
 		track_generate(track, track->finish_time);
 	}
 }
@@ -5431,6 +5512,7 @@ enum class EffectType
 	Ring_Modulator,
 	Bitcrush,
 	Flanger,
+	Phaser,
 	Vibrato,
 	Chorus,
 };
@@ -5448,6 +5530,7 @@ struct Effect
 		RingModulator ring_modulator;
 		Bitcrush bitcrush;
 		Flanger flanger;
+		Phaser phaser;
 		Vibrato vibrato;
 		Chorus chorus;
 	};
@@ -5459,7 +5542,7 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 	int frames = stream->samples_count / stream->channels;
 	for(int i = 0; i < count; ++i)
 	{
-		Effect* effect = effects + i;
+		Effect* effect = &effects[i];
 		switch(effect->type)
 		{
 			case EffectType::Low_Pass_Filter:
@@ -5585,6 +5668,20 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 				}
 				break;
 			}
+			case EffectType::Phaser:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float t = static_cast<float>(i) / sample_rate + time;
+					float value = stream->samples[stream->channels * i];
+					value = phaser_apply(&effect->phaser, value, t);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
 			case EffectType::Vibrato:
 			{
 				for(int i = 0; i < frames; ++i)
@@ -5664,7 +5761,7 @@ static void instrument_destroy(Instrument* instrument)
 {
 	for(int i = 0; i < instrument->effects_count; ++i)
 	{
-		Effect* effect = instrument->effects + i;
+		Effect* effect = &instrument->effects[i];
 		switch(effect->type)
 		{
 			case EffectType::Reverb:
@@ -5675,6 +5772,11 @@ static void instrument_destroy(Instrument* instrument)
 			case EffectType::Flanger:
 			{
 				flanger_destroy(&effect->flanger);
+				break;
+			}
+			case EffectType::Phaser:
+			{
+				phaser_destroy(&effect->phaser);
 				break;
 			}
 			case EffectType::Vibrato:
@@ -5701,7 +5803,7 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 	int index = instrument->effects_count;
 	ASSERT(instrument->effects_count + 1 < instrument_effects_max);
 	instrument->effects_count = (index + 1) % instrument_effects_max;
-	Effect* effect = instrument->effects + index;
+	Effect* effect = &instrument->effects[index];
 	effect->type = type;
 
 	switch(type)
@@ -5749,6 +5851,11 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 		case EffectType::Flanger:
 		{
 			flanger_create(&effect->flanger, 2048);
+			break;
+		}
+		case EffectType::Phaser:
+		{
+			phaser_create(&effect->phaser);
 			break;
 		}
 		case EffectType::Vibrato:
@@ -6288,7 +6395,7 @@ static void main_update()
 	}
 
 	// Update the player's movement state with the input.
-	struct {float x, y;} d = {0.0f, 0.0f};
+	Vector2 d = {0.0f, 0.0f};
 	if(key_pressed(UserKey::Left))
 	{
 		d.x -= 1.0f;
@@ -6305,7 +6412,7 @@ static void main_update()
 	{
 		d.y -= 1.0f;
 	}
-	float l = sqrt((d.x * d.x) + (d.y * d.y));
+	float l = length(d);
 	Vector3 velocity = vector3_zero;
 	if(l != 0.0f)
 	{
@@ -6912,7 +7019,7 @@ static void send_history_to_main_thread(History* history)
 {
 	for(int i = 0; i < history->count; ++i)
 	{
-		History::Event* event = history->events + i;
+		History::Event* event = &history->events[i];
 		Message message;
 		message.code = Message::Code::Note;
 		message.note.start = event->started;
@@ -6982,7 +7089,7 @@ static void* run_mixer_thread(void* argument)
 	Voice voices[voice_count];
 	for(int i = 0; i < voice_count; ++i)
 	{
-		Voice* voice = voices + i;
+		Voice* voice = &voices[i];
 
 		ADSR* envelope = &voice->envelope;
 		envelope_setup(envelope);
@@ -7002,26 +7109,33 @@ static void* run_mixer_thread(void* argument)
 	VoiceEntry voice_map[voice_count];
 	voice_map_setup(voice_map, voice_count);
 
-	const int tracks_count = 2;
+	const int tracks_count = 3;
 	Track tracks[tracks_count];
 
 	track_setup(&tracks[0]);
 	track_generate(&tracks[0], 0.0);
 
 	track_setup(&tracks[1]);
-	tracks[1].timing_offset = 0.4;
+	tracks[1].timing_offset = 0.3;
 	tracks[1].octave = 4;
-	tracks[1].staccato = true;
+	tracks[1].style = 1;
 	track_generate(&tracks[1], 0.0);
+
+	track_setup(&tracks[2]);
+	tracks[2].timing_offset = 0.0;
+	tracks[2].octave = 2;
+	tracks[2].octave_range = 2;
+	tracks[2].style = 2;
+	track_generate(&tracks[2], 0.0);
 
 	BPF bandpass;
 	bpf_reset(&bandpass);
 
-	int streams_count = 4;
+	int streams_count = tracks_count + 2;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
-		stream_create(streams + i, device_description.frames, 1);
+		stream_create(&streams[i], device_description.frames, 1);
 	}
 
 	History history;
@@ -7031,7 +7145,7 @@ static void* run_mixer_thread(void* argument)
 
 	Instrument instruments[tracks_count];
 
-	Instrument* kick = instruments;
+	Instrument* kick = &instruments[0];
 	kick->oscillator = Oscillator::Sine;
 	kick->pitch_envelope.use = true;
 	kick->pitch_envelope.semitones = 36;
@@ -7045,15 +7159,20 @@ static void* run_mixer_thread(void* argument)
 	distortion->gain = 5.0f;
 	distortion->mix = 0.8f;
 
-	Instrument* snare = instruments + 1;
+	Instrument* snare = &instruments[1];
 	snare->oscillator = Oscillator::Noise;
 	snare->pitch_envelope.use = false;
 	snare->noise.passband = 48;
 
+	Instrument* lead = &instruments[2];
+	lead->oscillator = Oscillator::Square;
+
+	effect = instrument_add_effect(lead, EffectType::Phaser);
+
 	streams[1].pan = 0.4f;
 
-	streams[2].pan = -0.6f;
-	streams[2].volume = 0.6f;
+	streams[3].pan = -0.6f;
+	streams[3].volume = 0.6f;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
@@ -7066,14 +7185,14 @@ static void* run_mixer_thread(void* argument)
 
 		for(int i = 0; i < tracks_count; ++i)
 		{
-			Stream* stream = streams + i;
-			Track* track = tracks + i;
-			Instrument* instrument = instruments + i;
+			Stream* stream = &streams[i];
+			Track* track = &tracks[i];
+			Instrument* instrument = &instruments[i];
 			generate_oscillation(stream, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
 			apply_effects(instrument->effects, instrument->effects_count, stream, sample_rate, time);
 		}
 
-		Stream* stream = streams + 2;
+		Stream* stream = &streams[3];
 		for(int i = 0; i < frames; ++i)
 		{
 			float t = static_cast<float>(i) / sample_rate + time;
@@ -7089,7 +7208,7 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
-		stream = streams + 3;
+		stream = &streams[4];
 		{
 			stream->volume = 0.0f;
 			if(boop_on)
@@ -7148,11 +7267,11 @@ static void* run_mixer_thread(void* argument)
 	SAFE_DEALLOCATE(devicebound_samples);
 	for(int i = 0; i < streams_count; ++i)
 	{
-		stream_destroy(streams + i);
+		stream_destroy(&streams[i]);
 	}
 	for(int i = 0; i < tracks_count; ++i)
 	{
-		instrument_destroy(instruments + i);
+		instrument_destroy(&instruments[i]);
 	}
 
 	LOG_DEBUG("Audio thread shut down.");
