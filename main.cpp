@@ -4847,27 +4847,37 @@ static const int phaser_poles = 4;
 
 struct Phaser
 {
-	TDL delay_line;
+	TDL delay_lines[phaser_poles];
+	float prior;
 	float delay;
 	float depth;
 	float rate;
 	float gain;
+	float diffusion;
 	float mix;
 };
 
 static void phaser_create(Phaser* phaser)
 {
-	tdl_create(&phaser->delay_line, 4096);
-	phaser->delay = 512.0f;
-	phaser->depth = 511.0f;
-	phaser->rate = 1.0f;
-	phaser->gain = 0.8f;
+	for(int i = 0; i < phaser_poles; ++i)
+	{
+		tdl_create(&phaser->delay_lines[i], 512);
+	}
+	phaser->prior = 0.0f;
+	phaser->delay = 64.0f;
+	phaser->depth = 16.0f;
+	phaser->rate = 0.4f;
+	phaser->gain = 0.5f;
+	phaser->diffusion = 0.1f;
 	phaser->mix = 0.5f;
 }
 
 static void phaser_destroy(Phaser* phaser)
 {
-	tdl_destroy(&phaser->delay_line);
+	for(int i = 0; i < phaser_poles; ++i)
+	{
+		tdl_destroy(&phaser->delay_lines[i]);
+	}
 }
 
 static float phaser_apply(Phaser* phaser, float sample, float time)
@@ -4875,17 +4885,18 @@ static float phaser_apply(Phaser* phaser, float sample, float time)
 	float modulation = sin(tau * phaser->rate * time);
 	modulation = (modulation + 1.0f) / 2.0f;
 
-	float result = sample;
+	float result = (phaser->gain * phaser->prior) + sample;
 	for(int i = 0; i < phaser_poles; ++i)
 	{
-		float delay_time = phaser->depth * modulation + phaser->delay * i;
-		float prior = tdl_tap(&phaser->delay_line, delay_time);
-		float feedback = sample - (phaser->gain * prior);
-		tdl_record(&phaser->delay_line, feedback);
-		float out = (phaser->gain * feedback) + prior;
-		result = lerp(result, out, phaser->mix);
+		float delay_time = phaser->depth * modulation + phaser->delay;
+		float prior = tdl_tap(&phaser->delay_lines[i], delay_time);
+		float feedback = result - (phaser->diffusion * prior);
+		tdl_record(&phaser->delay_lines[i], feedback);
+		result = (phaser->diffusion * feedback) + prior;
 	}
-	return result;
+	phaser->prior = result;
+
+	return lerp(sample, result, phaser->mix);
 }
 
 struct Vibrato
@@ -5073,6 +5084,22 @@ static void history_record(History* history, int track_index, double time, bool 
 	history->count = (history->count + 1) % history_events_max;
 }
 
+// Envelope Settings............................................................
+
+struct EnvelopeSettings
+{
+	struct
+	{
+		int semitones;
+		bool use;
+	} pitch_envelope;
+
+	float attack;
+	float decay;
+	float sustain;
+	float release;
+};
+
 // §4.8 Track...................................................................
 
 #define C  0
@@ -5183,7 +5210,7 @@ void track_generate(Track* track, double origin_time)
 		}
 		case 2:
 		{
-			note_spacing = 0.15;
+			note_spacing = 0.3;
 			note_length = 0.3;
 			break;
 		}
@@ -5260,7 +5287,7 @@ struct RenderResult
 	int voices_count;
 };
 
-void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voice_map, int count, double time, bool use_pitch_envelope, History* history, RenderResult* result)
+void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voice_map, int count, double time, EnvelopeSettings* envelope_settings, History* history, RenderResult* result)
 {
 	// Gate any start events in this time slice.
 	for(int i = track->start_index; i < track->notes_count; ++i)
@@ -5278,7 +5305,12 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			if(!found)
 			{
 				index = assign_voice(voice_map, count, track_index, start->note);
-				voice_gate(&voices[index], true, use_pitch_envelope);
+				Voice* voice = &voices[index];
+				envelope_set_attack(&voice->envelope, envelope_settings->attack);
+				envelope_set_decay(&voice->envelope, envelope_settings->decay);
+				envelope_set_sustain(&voice->envelope, envelope_settings->sustain);
+				envelope_set_release(&voice->envelope, envelope_settings->release);
+				voice_gate(&voices[index], true, envelope_settings->pitch_envelope.use);
 			}
 			history_record(history, track_index, start->time, true);
 			track->start_index = i + 1;
@@ -5300,7 +5332,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			bool found = find_voice(voice_map, count, track_index, stop->note, &index);
 			if(found)
 			{
-				voice_gate(&voices[index], false, use_pitch_envelope);
+				voice_gate(&voices[index], false, envelope_settings->pitch_envelope.use);
 			}
 			history_record(history, track_index, stop->time, false);
 			track->stop_index = i + 1;
@@ -5733,12 +5765,7 @@ static const int instrument_effects_max = 8;
 struct Instrument
 {
 	Effect effects[instrument_effects_max];
-
-	struct
-	{
-		int semitones;
-		bool use;
-	} pitch_envelope;
+	EnvelopeSettings envelope_settings;
 
 	union
 	{
@@ -5885,17 +5912,17 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	// every frame, it's easiest to split that into its own loop and just check
 	// once and enter the appropriate loop.
 
-#define JUST_OSCILLATOR_TOP_PART()                                                                     \
-	for(int i = 0; i < frames; ++i)                                                                    \
-	{                                                                                                  \
-		float t = static_cast<float>(i) / sample_rate + time;                                          \
-		RenderResult result = {};                                                                      \
-		track_render(track, track_index, voices, voice_map, voices_count, t, false, history, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                                   \
-		{                                                                                              \
-			Voice* voice = &voices[result.voices[j]];                                                  \
-			int pitch = result.pitches[j];                                                             \
-			float theta = pitch_to_frequency(pitch);                                                   \
+#define JUST_OSCILLATOR_TOP_PART()                                                                                 \
+	for(int i = 0; i < frames; ++i)                                                                                \
+	{                                                                                                              \
+		float t = static_cast<float>(i) / sample_rate + time;                                                      \
+		RenderResult result = {};                                                                                  \
+		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                                               \
+		{                                                                                                          \
+			Voice* voice = &voices[result.voices[j]];                                                              \
+			int pitch = result.pitches[j];                                                                         \
+			float theta = pitch_to_frequency(pitch);                                                               \
 
 #define JUST_OSCILLATOR_BOTTOM_PART()                               \
 			value = envelope_apply(&voice->envelope) * value;       \
@@ -5906,20 +5933,20 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}                                                           \
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                                     \
-	for(int i = 0; i < frames; ++i)                                                                   \
-	{                                                                                                 \
-		float t = static_cast<float>(i) / sample_rate + time;                                         \
-		RenderResult result = {};                                                                     \
-		track_render(track, track_index, voices, voice_map, voices_count, t, true, history, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                                  \
-		{                                                                                             \
-			Voice* voice = &voices[result.voices[j]];                                                 \
-			int pitch = result.pitches[j];                                                            \
-			float theta = pitch_to_frequency(pitch);                                                  \
-			float pitched_theta = pitch_to_frequency(pitch + semitones);                              \
-			float modulation = envelope_apply(&voice->pitch_envelope);                                \
-			theta = lerp(theta, pitched_theta, modulation);                                           \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                                                  \
+	for(int i = 0; i < frames; ++i)                                                                                \
+	{                                                                                                              \
+		float t = static_cast<float>(i) / sample_rate + time;                                                      \
+		RenderResult result = {};                                                                                  \
+		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result); \
+		for(int j = 0; j < result.voices_count; ++j)                                                               \
+		{                                                                                                          \
+			Voice* voice = &voices[result.voices[j]];                                                              \
+			int pitch = result.pitches[j];                                                                         \
+			float theta = pitch_to_frequency(pitch);                                                               \
+			float pitched_theta = pitch_to_frequency(pitch + semitones);                                           \
+			float modulation = envelope_apply(&voice->pitch_envelope);                                             \
+			theta = lerp(theta, pitched_theta, modulation);                                                        \
 
 #define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()                \
 			value = envelope_apply(&voice->envelope) * value;       \
@@ -5931,7 +5958,9 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	}
 
 	int frames = stream->samples_count / stream->channels;
-	int semitones = instrument->pitch_envelope.semitones;
+	EnvelopeSettings* envelope_settings = &instrument->envelope_settings;
+	int semitones = envelope_settings->pitch_envelope.semitones;
+	bool use_pitch_envelope = envelope_settings->pitch_envelope.use;
 
 	fill_with_silence(stream->samples, 0, stream->samples_count);
 
@@ -5939,7 +5968,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	{
 		case Oscillator::Sine:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = sin(tau * theta * t);
@@ -5955,7 +5984,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Square:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = square_wave(theta * t);
@@ -5971,7 +6000,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Pulse:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = pulse_wave(theta * t, instrument->pulse.width);
@@ -5987,7 +6016,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Triangle:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = triangle_wave(theta * t);
@@ -6003,7 +6032,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Sawtooth:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = sawtooth_wave(theta * t);
@@ -6019,7 +6048,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Rectified_Sine:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = rectified_sin(tau * theta * t);
@@ -6035,7 +6064,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}
 		case Oscillator::Cycloid:
 		{
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float value = cycloid(tau * theta * t);
@@ -6057,7 +6086,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			int passband_extent = instrument->noise.passband;
 			BPF filter;
 			bpf_reset(&filter);
-			if(instrument->pitch_envelope.use)
+			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
 				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.0f);
@@ -7090,13 +7119,7 @@ static void* run_mixer_thread(void* argument)
 	for(int i = 0; i < voice_count; ++i)
 	{
 		Voice* voice = &voices[i];
-
-		ADSR* envelope = &voice->envelope;
-		envelope_setup(envelope);
-		envelope_set_attack(envelope, 0.002f * device_description.sample_rate);
-		envelope_set_decay(envelope, 0.56f * device_description.sample_rate);
-		envelope_set_sustain(envelope, 0.0f);
-		envelope_set_release(envelope, 2.0f * device_description.sample_rate);
+		envelope_setup(&voice->envelope);
 
 		ADSR* pitch_envelope = &voice->pitch_envelope;
 		envelope_setup(pitch_envelope);
@@ -7123,8 +7146,8 @@ static void* run_mixer_thread(void* argument)
 
 	track_setup(&tracks[2]);
 	tracks[2].timing_offset = 0.0;
-	tracks[2].octave = 2;
-	tracks[2].octave_range = 2;
+	tracks[2].octave = 4;
+	tracks[2].octave_range = 1;
 	tracks[2].style = 2;
 	track_generate(&tracks[2], 0.0);
 
@@ -7146,9 +7169,13 @@ static void* run_mixer_thread(void* argument)
 	Instrument instruments[tracks_count];
 
 	Instrument* kick = &instruments[0];
+	kick->envelope_settings.attack = 0.002f * device_description.sample_rate;
+	kick->envelope_settings.decay = 0.56f * device_description.sample_rate;
+	kick->envelope_settings.sustain = 0.0f;
+	kick->envelope_settings.release = 2.0f * device_description.sample_rate;
+	kick->envelope_settings.pitch_envelope.use = true;
+	kick->envelope_settings.pitch_envelope.semitones = 36;
 	kick->oscillator = Oscillator::Sine;
-	kick->pitch_envelope.use = true;
-	kick->pitch_envelope.semitones = 36;
 
 	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
@@ -7161,11 +7188,19 @@ static void* run_mixer_thread(void* argument)
 
 	Instrument* snare = &instruments[1];
 	snare->oscillator = Oscillator::Noise;
-	snare->pitch_envelope.use = false;
+	snare->envelope_settings.attack = 0.002f * device_description.sample_rate;
+	snare->envelope_settings.decay = 0.56f * device_description.sample_rate;
+	snare->envelope_settings.sustain = 0.0f;
+	snare->envelope_settings.release = 2.0f * device_description.sample_rate;
+	snare->envelope_settings.pitch_envelope.use = false;
 	snare->noise.passband = 48;
 
 	Instrument* lead = &instruments[2];
 	lead->oscillator = Oscillator::Square;
+	lead->envelope_settings.attack = 0.2f * device_description.sample_rate;
+	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.sustain = 0.75f;
+	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
 
 	effect = instrument_add_effect(lead, EffectType::Phaser);
 
