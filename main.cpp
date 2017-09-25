@@ -123,16 +123,16 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
-#define ASSERT(expression) \
+#define ASSERT(expression)\
 	assert(expression)
 
-#define ALLOCATE(type, count) \
+#define ALLOCATE(type, count)\
 	static_cast<type*>(calloc((count), sizeof(type)))
-#define REALLOCATE(memory, type, count) \
+#define REALLOCATE(memory, type, count)\
 	static_cast<type*>(realloc((memory), sizeof(type) * (count)))
-#define DEALLOCATE(memory) \
+#define DEALLOCATE(memory)\
 	free(memory)
-#define SAFE_DEALLOCATE(memory) \
+#define SAFE_DEALLOCATE(memory)\
 	if(memory) {DEALLOCATE(memory); (memory) = nullptr;}
 
 static bool ensure_array_size(void** array, int* capacity, int item_size, int extra)
@@ -161,16 +161,16 @@ static bool ensure_array_size(void** array, int* capacity, int item_size, int ex
 	return true;
 }
 
-#define ENSURE_ARRAY_SIZE(array, extra) \
+#define ENSURE_ARRAY_SIZE(array, extra)\
 	ensure_array_size(reinterpret_cast<void**>(&array), &array##_capacity, sizeof(*(array)), array##_count + (extra))
 
-#define ARRAY_COUNT(array) \
+#define ARRAY_COUNT(array)\
 	static_cast<int>(sizeof(array) / sizeof(*(array)))
 
 // Prefer these for integers and fmax() and fmin() for floating-point numbers.
-#define MAX(a, b) \
+#define MAX(a, b)\
 	(((a) > (b)) ? (a) : (b))
-#define MIN(a, b) \
+#define MIN(a, b)\
 	(((a) < (b)) ? (a) : (b))
 
 static int string_size(const char* string)
@@ -211,13 +211,13 @@ enum class LogLevel
 
 void log_add_message(LogLevel level, const char* format, ...);
 
-#define LOG_ERROR(format, ...) \
+#define LOG_ERROR(format, ...)\
 	log_add_message(LogLevel::Error, format, ##__VA_ARGS__)
 
 #if defined(NDEBUG)
 #define LOG_DEBUG(format, ...) // do nothing
 #else
-#define LOG_DEBUG(format, ...) \
+#define LOG_DEBUG(format, ...)\
 	log_add_message(LogLevel::Debug, format, ##__VA_ARGS__)
 #endif
 
@@ -1108,16 +1108,18 @@ static bool aabb_overlap(AABB b0, AABB b1)
 	Vector3 c0 = b0.min + e0;
 	Vector3 c1 = b1.min + e1;
 	Vector3 t = c1 - c0;
-	return abs(t.x) <= e0.x + e1.x
-		&& abs(t.y) <= e0.y + e1.y
-		&& abs(t.z) <= e0.z + e1.z;
+	return
+		abs(t.x) <= e0.x + e1.x &&
+		abs(t.y) <= e0.y + e1.y &&
+		abs(t.z) <= e0.z + e1.z;
 }
 
 static bool aabb_validate(AABB b)
 {
-	return b.max.x > b.min.x
-		&& b.max.y > b.min.y
-		&& b.max.z > b.min.z;
+	return
+		b.max.x > b.min.x &&
+		b.max.y > b.min.y &&
+		b.max.z > b.min.z;
 }
 
 static Vector3 max3(Vector3 v0, Vector3 v1)
@@ -1170,7 +1172,7 @@ static AABB compute_bounds(Triangle* triangles, int lower, int upper)
 	AABB result = {vector3_max, vector3_min};
 	for(int i = lower; i <= upper; ++i)
 	{
-		AABB aabb = aabb_from_triangle(triangles + i);
+		AABB aabb = aabb_from_triangle(&triangles[i]);
 		result = aabb_merge(result, aabb);
 	}
 	return result;
@@ -1227,13 +1229,7 @@ static bool aabb_intersect(AABB a, Vector3 a_velocity, AABB b, Vector3 b_velocit
 	*t0 = fmax(u0[0], fmax(u0[1], u0[2]));
 	*t1 = fmin(u1[0], fmin(u1[1], u1[2]));
 
-	bool result = *t0 >= 0.0f && *t1 <= 1.0f && *t0 <= *t1;
-	if(result)
-	{
-		return result;
-	}
-
-	return result;
+	return *t0 >= 0.0f && *t1 <= 1.0f && *t0 <= *t1;
 }
 
 static bool intersect_aabb_ray(AABB aabb, Ray ray)
@@ -2957,8 +2953,8 @@ void add_line(Vector3 start, Vector3 end, Vector3 colour)
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
-	c->vertices[c->filled] = {start, colour};
-	c->vertices[c->filled+1] = {end, colour};
+	c->vertices[c->filled + 0] = {start, colour};
+	c->vertices[c->filled + 1] = {end, colour};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
 }
@@ -2968,8 +2964,8 @@ void add_line_gradient(Vector3 start, Vector3 end, Vector3 colour0, Vector3 colo
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
-	c->vertices[c->filled] = {start, colour0};
-	c->vertices[c->filled+1] = {end, colour1};
+	c->vertices[c->filled + 0] = {start, colour0};
+	c->vertices[c->filled + 1] = {end, colour1};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
 }
@@ -3569,7 +3565,7 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 			float fx = static_cast<float>(x) - 5.0f;
 			float fy = static_cast<float>(y) - 1.0f;
 			float fz = arandom::float_range(-0.5f, 0.5f) - 1.0f;
-			vertices[y*columns+x].position = {fx, fy, fz};
+			vertices[columns * y + x].position = {fx, fy, fz};
 		}
 	}
 
@@ -3604,13 +3600,13 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 		int o = 6 * i;
 		int k = i + i / side;
 
-		indices[o  ] = k + columns + 1;
-		indices[o+1] = k + columns;
-		indices[o+2] = k;
+		indices[o + 0] = k + columns + 1;
+		indices[o + 1] = k + columns;
+		indices[o + 2] = k;
 
-		indices[o+3] = k + 1;
-		indices[o+4] = k + columns + 1;
-		indices[o+5] = k;
+		indices[o + 3] = k + 1;
+		indices[o + 4] = k + columns + 1;
+		indices[o + 5] = k;
 	}
 
 	// Generate vertex normals from the triangles.
@@ -3623,9 +3619,9 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 	}
 	for(int i = 0; i < indices_count; i += 3)
 	{
-		u16 ia = indices[i];
-		u16 ib = indices[i+1];
-		u16 ic = indices[i+2];
+		u16 ia = indices[i + 0];
+		u16 ib = indices[i + 1];
+		u16 ic = indices[i + 2];
 		Vector3 a = vertices[ia].position;
 		Vector3 b = vertices[ib].position;
 		Vector3 c = vertices[ic].position;
@@ -3662,9 +3658,9 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 	*triangles_count = t_count;
 	for(int i = 0; i < t_count; ++i)
 	{
-		Vector3 a = vertices[indices[3*i+0]].position;
-		Vector3 b = vertices[indices[3*i+1]].position;
-		Vector3 c = vertices[indices[3*i+2]].position;
+		Vector3 a = vertices[indices[3 * i + 0]].position;
+		Vector3 b = vertices[indices[3 * i + 1]].position;
+		Vector3 c = vertices[indices[3 * i + 2]].position;
 		t[i] = {a, b, c};
 	}
 
@@ -3705,7 +3701,7 @@ void object_generate_sky(Object* object)
 			float y = radius * sin(theta) * sin(phi);
 			float z = radius * cos(theta);
 			Vector3 position = {x, y, z};
-			VertexPNC* vertex = &vertices[meridians*i+j+1];
+			VertexPNC* vertex = &vertices[meridians * i + j + 1];
 			vertex->position = position;
 			vertex->normal = -normalise(position);
 			vertex->colour = ring_colour;
@@ -3728,9 +3724,9 @@ void object_generate_sky(Object* object)
 	for(int i = 0; i < meridians; ++i)
 	{
 		int o = out_base + 3 * i;
-		indices[o+0] = 0;
-		indices[o+1] = in_base + (i + 1) % meridians;
-		indices[o+2] = in_base + i;
+		indices[o + 0] = 0;
+		indices[o + 1] = in_base + (i + 1) % meridians;
+		indices[o + 2] = in_base + i;
 	}
 	out_base += 3 * meridians;
 	for(int i = 0; i < rings - 2; ++i)
@@ -3742,13 +3738,13 @@ void object_generate_sky(Object* object)
 			int k0 = in_base + x;
 			int k1 = in_base + meridians * i;
 
-			indices[o+0] = k0;
-			indices[o+1] = k1 + (j + 1) % meridians;
-			indices[o+2] = k0 + meridians;
+			indices[o + 0] = k0;
+			indices[o + 1] = k1 + (j + 1) % meridians;
+			indices[o + 2] = k0 + meridians;
 
-			indices[o+3] = k0 + meridians;
-			indices[o+4] = k1 + (j + 1) % meridians;
-			indices[o+5] = k1 + meridians + (j + 1) % meridians;
+			indices[o + 3] = k0 + meridians;
+			indices[o + 4] = k1 + (j + 1) % meridians;
+			indices[o + 5] = k1 + meridians + (j + 1) % meridians;
 		}
 	}
 	out_base += 6 * meridians * (rings - 2);
@@ -3756,9 +3752,9 @@ void object_generate_sky(Object* object)
 	for(int i = 0; i < meridians; ++i)
 	{
 		int o = out_base + 3 * i;
-		indices[o+0] = vertices_count - 1;
-		indices[o+1] = in_base + i;
-		indices[o+2] = in_base + (i + 1) % meridians;
+		indices[o + 0] = vertices_count - 1;
+		indices[o + 1] = in_base + i;
+		indices[o + 2] = in_base + (i + 1) % meridians;
 	}
 
 	object_set_surface(object, vertices, vertices_count, indices, indices_count);
@@ -3792,6 +3788,14 @@ static void cube_helix(Vector3* colours, int levels, float start_hue, float rota
 		colours[i].z = b;
 	}
 }
+
+static const int max_shader_uniform_locations = 8;
+
+struct Shader
+{
+	GLuint program;
+	GLint uniform_locations[max_shader_uniform_locations];
+};
 
 // Whole system
 
@@ -4240,18 +4244,18 @@ struct ConversionInfo
 	int channels;
 };
 
-#define DEFINE_CONVERT_BUFFER(type)                                                                    \
-	static void convert_buffer_to_##type(const float* in, type* out, int frames, ConversionInfo* info) \
-	{                                                                                                  \
-		for(int i = 0; i < frames; ++i)                                                                \
-		{                                                                                              \
-			for(int j = 0; j < info->channels; ++j)                                                    \
-			{                                                                                          \
-				out[j] = convert_to_##type(in[j]);                                                     \
-			}                                                                                          \
-			in += info->in.stride;                                                                     \
-			out += info->out.stride;                                                                   \
-		}                                                                                              \
+#define DEFINE_CONVERT_BUFFER(type)\
+	static void convert_buffer_to_##type(const float* in, type* out, int frames, ConversionInfo* info)\
+	{\
+		for(int i = 0; i < frames; ++i)\
+		{\
+			for(int j = 0; j < info->channels; ++j)\
+			{\
+				out[j] = convert_to_##type(in[j]);\
+			}\
+			in += info->in.stride;\
+			out += info->out.stride;\
+		}\
 	}
 
 DEFINE_CONVERT_BUFFER(s8);
@@ -4260,8 +4264,6 @@ DEFINE_CONVERT_BUFFER(s32);
 DEFINE_CONVERT_BUFFER(float);
 DEFINE_CONVERT_BUFFER(double);
 
-// This function does format conversion, input/output channel compensation, and
-// data interleaving/deinterleaving.
 static void format_buffer_from_float(float* in_samples, void* out_samples, int frames, ConversionInfo* info)
 {
 	switch(info->in.format)
@@ -4673,7 +4675,102 @@ static float apf_apply(APF* filter, float sample)
 	return (filter->gain * feedback) + prior;
 }
 
+// Smith-Angell Resonator
+struct SAR
+{
+	float input_samples[2];
+	float output_samples[2];
+	float a0;
+	float a2;
+	float b0;
+	float b1;
+};
+
+static void sar_reset(SAR* filter)
+{
+	filter->input_samples[0] = 0.0f;
+	filter->input_samples[1] = 0.0f;
+	filter->output_samples[0] = 0.0f;
+	filter->output_samples[1] = 0.0f;
+}
+
+static void sar_set_passband(SAR* filter, float center_frequency, int sample_rate, float quality_factor)
+{
+	float fc = center_frequency;
+	float fs = sample_rate;
+	float q = quality_factor;
+
+	float theta = tau * fc / fs;
+	float w = fc / q;
+	float b1 = exp(-tau * w / fs);
+	float b0 = -4.0f * b1 / (1.0f + b1) * cos(theta);
+	float a0 = 1.0f - sqrt(b1);
+	// a1 is zero
+	float a2 = -a0;
+
+	filter->a0 = a0;
+	filter->a2 = a2;
+	filter->b0 = b0;
+	filter->b1 = b1;
+}
+
+static float sar_apply(SAR* filter, float sample)
+{
+	// The difference equation is:
+	// y(n) = a₀x(n) + a₂x(n-2) - (b₀y(n-1) + b₁y(n-2))
+	// where a₀, a₂ are the feedforward coefficients and b₀, b₁ are the feedback
+	// coefficients.
+
+	float x0 = sample;
+	// since a1 is zero, the x1 term will always be zero
+	float x2 = filter->input_samples[1];
+	float y0 = filter->output_samples[0];
+	float y1 = filter->output_samples[1];
+	float a0 = filter->a0;
+	float a2 = filter->a2;
+	float b0 = filter->b0;
+	float b1 = filter->b1;
+	float result = (a0 * x0) + (a2 * x2) - ((b0 * y0) + (b1 * y1));
+
+	filter->input_samples[1] = filter->input_samples[0];
+	filter->input_samples[0] = sample;
+
+	filter->output_samples[1] = filter->output_samples[0];
+	filter->output_samples[0] = result;
+
+	return result;
+}
+
 // §4.5 Effects.................................................................
+
+static const int resonator_filters = 3;
+
+struct Resonator
+{
+	SAR bank[resonator_filters];
+	float gain;
+	float mix;
+};
+
+static void resonator_default(Resonator* resonator)
+{
+	for(int i = 0; i < resonator_filters; ++i)
+	{
+		sar_reset(&resonator->bank[i]);
+	}
+	resonator->gain = 1.0f;
+	resonator->mix = 0.5f;
+}
+
+static float resonator_apply(Resonator* resonator, float sample)
+{
+	float sum = 0.0f;
+	for(int i = 0; i < resonator_filters; ++i)
+	{
+		sum += sar_apply(&resonator->bank[i], sample);
+	}
+	return lerp(sample, resonator->gain * sum, resonator->mix);
+}
 
 struct Overdrive
 {
@@ -4834,7 +4931,8 @@ static void flanger_destroy(Flanger* flanger)
 
 static float flanger_apply(Flanger* flanger, float sample, float time)
 {
-	float modulation = (sin(flanger->rate * tau * time) + 1.0f) / 2.0f;
+	float modulation = sin(flanger->rate * tau * time);
+	modulation = (0.5f * modulation) + 0.5f;
 	float delay_time = flanger->depth * modulation + flanger->delay;
 	float past_sample = tdl_tap(&flanger->delay_line, delay_time);
 
@@ -4864,10 +4962,10 @@ static void phaser_create(Phaser* phaser)
 		tdl_create(&phaser->delay_lines[i], 512);
 	}
 	phaser->prior = 0.0f;
-	phaser->delay = 64.0f;
+	phaser->delay = 32.0f;
 	phaser->depth = 16.0f;
 	phaser->rate = 0.4f;
-	phaser->gain = 0.5f;
+	phaser->gain = 0.8f;
 	phaser->diffusion = 0.1f;
 	phaser->mix = 0.5f;
 }
@@ -4883,9 +4981,10 @@ static void phaser_destroy(Phaser* phaser)
 static float phaser_apply(Phaser* phaser, float sample, float time)
 {
 	float modulation = sin(tau * phaser->rate * time);
-	modulation = (modulation + 1.0f) / 2.0f;
+	modulation = (0.5f * modulation) + 0.5f;
 
 	float result = (phaser->gain * phaser->prior) + sample;
+	// This is using the delay lines as variable delay all-pass filters.
 	for(int i = 0; i < phaser_poles; ++i)
 	{
 		float delay_time = phaser->depth * modulation + phaser->delay;
@@ -4923,7 +5022,7 @@ static void vibrato_destroy(Vibrato* vibrato)
 static float vibrato_apply(Vibrato* vibrato, float sample, float time)
 {
 	float modulation = sin(vibrato->rate * tau * time);
-	modulation = (modulation + 1.0f) / 2.0f;
+	modulation = (0.5f * modulation) + 0.5f;
 	float delay_time = vibrato->depth * modulation + vibrato->delay;
 
 	float result = tdl_tap(&vibrato->delay_line, delay_time);
@@ -4955,7 +5054,7 @@ static void chorus_destroy(Chorus* chorus)
 static float chorus_apply(Chorus* chorus, float sample, float time)
 {
 	float modulation = sin(tau * chorus->rate * time);
-	modulation = (modulation + 1.0f) / 2.0f;
+	modulation = (0.5f * modulation) + 0.5f;
 	float delay_time = chorus->depth * modulation + chorus->delay;
 	float result = sample + tdl_tap(&chorus->delay_line, delay_time);
 	tdl_record(&chorus->delay_line, sample);
@@ -5181,7 +5280,7 @@ static void sort_events(Track::Event* events, int events_count)
 void track_setup(Track* track)
 {
 	track->notes_count = 0;
-	track->notes_capacity = 8;
+	track->notes_capacity = 32;
 	track->start_index = 0;
 	track->stop_index = 0;
 	track->timing_offset = 0.0;
@@ -5414,7 +5513,7 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 			{
 				for(int k = 0; k < channels; ++k)
 				{
-					mixed_samples[j * channels + k] += stream->volume * stream->samples[j * stream->channels];
+					mixed_samples[channels * j + k] += stream->volume * stream->samples[stream->channels * j];
 				}
 			}
 		}
@@ -5425,24 +5524,24 @@ static void mix_streams(Stream* streams, int streams_count, float* mixed_samples
 			ASSERT(stream->channels == 1);
 			if(channels == 2)
 			{
-				float theta = (-stream->pan / 2.0f + 0.5f) * pi_over_2;
+				float theta = (0.5f * -stream->pan + 0.5f) * pi_over_2;
 				float pan_left = sin(theta);
 				float pan_right = cos(theta);
 				for(int j = 0; j < frames; ++j)
 				{
-					float sample = stream->volume * stream->samples[j * stream->channels];
-					mixed_samples[j * channels] += pan_left * sample;
-					mixed_samples[j * channels + 1] += pan_right * sample;
+					float sample = stream->volume * stream->samples[stream->channels * j];
+					mixed_samples[channels * j] += pan_left * sample;
+					mixed_samples[channels * j + 1] += pan_right * sample;
 				}
 			}
 			else
 			{
 				for(int j = 0; j < frames; ++j)
 				{
-					float sample = stream->volume * stream->samples[j * stream->channels];
+					float sample = stream->volume * stream->samples[stream->channels * j];
 					for(int k = 0; k < channels; ++k)
 					{
-						mixed_samples[j * channels + k] += sample;
+						mixed_samples[channels * j + k] += sample;
 					}
 				}
 			}
@@ -5539,6 +5638,7 @@ enum class EffectType
 	Band_Pass_Filter,
 	High_Pass_Filter,
 	Reverb,
+	Resonator,
 	Overdrive,
 	Distortion,
 	Ring_Modulator,
@@ -5557,6 +5657,7 @@ struct Effect
 		BPF bandpass;
 		HPF highpass;
 		APF reverb;
+		Resonator resonator;
 		Overdrive overdrive;
 		Distortion distortion;
 		RingModulator ring_modulator;
@@ -5622,6 +5723,19 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 				{
 					float value = stream->samples[stream->channels * i];
 					value = apf_apply(&effect->reverb, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Resonator:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = resonator_apply(&effect->resonator, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5855,6 +5969,11 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 			apf_create(&effect->reverb, 4096);
 			break;
 		}
+		case EffectType::Resonator:
+		{
+			resonator_default(&effect->resonator);
+			break;
+		}
 		case EffectType::Overdrive:
 		{
 			overdrive_default(&effect->overdrive);
@@ -5912,49 +6031,49 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	// every frame, it's easiest to split that into its own loop and just check
 	// once and enter the appropriate loop.
 
-#define JUST_OSCILLATOR_TOP_PART()                                                                                 \
-	for(int i = 0; i < frames; ++i)                                                                                \
-	{                                                                                                              \
-		float t = static_cast<float>(i) / sample_rate + time;                                                      \
-		RenderResult result = {};                                                                                  \
-		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                                               \
-		{                                                                                                          \
-			Voice* voice = &voices[result.voices[j]];                                                              \
-			int pitch = result.pitches[j];                                                                         \
-			float theta = pitch_to_frequency(pitch);                                                               \
+#define JUST_OSCILLATOR_TOP_PART()\
+	for(int i = 0; i < frames; ++i)\
+	{\
+		float t = static_cast<float>(i) / sample_rate + time;\
+		RenderResult result = {};\
+		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result);\
+		for(int j = 0; j < result.voices_count; ++j)\
+		{\
+			Voice* voice = &voices[result.voices[j]];\
+			int pitch = result.pitches[j];\
+			float theta = pitch_to_frequency(pitch);\
 
-#define JUST_OSCILLATOR_BOTTOM_PART()                               \
-			value = envelope_apply(&voice->envelope) * value;       \
-			for(int k = 0; k < stream->channels; ++k)               \
-			{                                                       \
-				stream->samples[stream->channels * i + k] += value; \
-			}                                                       \
-		}                                                           \
+#define JUST_OSCILLATOR_BOTTOM_PART()\
+			value = envelope_apply(&voice->envelope) * value;\
+			for(int k = 0; k < stream->channels; ++k)\
+			{\
+				stream->samples[stream->channels * i + k] += value;\
+			}\
+		}\
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()                                                                  \
-	for(int i = 0; i < frames; ++i)                                                                                \
-	{                                                                                                              \
-		float t = static_cast<float>(i) / sample_rate + time;                                                      \
-		RenderResult result = {};                                                                                  \
-		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result); \
-		for(int j = 0; j < result.voices_count; ++j)                                                               \
-		{                                                                                                          \
-			Voice* voice = &voices[result.voices[j]];                                                              \
-			int pitch = result.pitches[j];                                                                         \
-			float theta = pitch_to_frequency(pitch);                                                               \
-			float pitched_theta = pitch_to_frequency(pitch + semitones);                                           \
-			float modulation = envelope_apply(&voice->pitch_envelope);                                             \
-			theta = lerp(theta, pitched_theta, modulation);                                                        \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()\
+	for(int i = 0; i < frames; ++i)\
+	{\
+		float t = static_cast<float>(i) / sample_rate + time;\
+		RenderResult result = {};\
+		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result);\
+		for(int j = 0; j < result.voices_count; ++j)\
+		{\
+			Voice* voice = &voices[result.voices[j]];\
+			int pitch = result.pitches[j];\
+			float theta = pitch_to_frequency(pitch);\
+			float pitched_theta = pitch_to_frequency(pitch + semitones);\
+			float modulation = envelope_apply(&voice->pitch_envelope);\
+			theta = lerp(theta, pitched_theta, modulation);\
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()                \
-			value = envelope_apply(&voice->envelope) * value;       \
-			for(int k = 0; k < stream->channels; ++k)               \
-			{                                                       \
-				stream->samples[stream->channels * i + k] += value; \
-			}                                                       \
-		}                                                           \
+#define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()\
+			value = envelope_apply(&voice->envelope) * value;\
+			for(int k = 0; k < stream->channels; ++k)\
+			{\
+				stream->samples[stream->channels * i + k] += value;\
+			}\
+		}\
 	}
 
 	int frames = stream->samples_count / stream->channels;
@@ -6228,7 +6347,7 @@ void make_complex(float* samples, Complex* result, int count, int channels)
 {
 	for(int i = 0; i < count; ++i)
 	{
-		result[i].r = samples[channels*i];
+		result[i].r = samples[channels * i];
 		result[i].i = 0.0f;
 	}
 }
@@ -6363,7 +6482,7 @@ static void game_destroy()
 {
 	for(int i = 0; i < world.colliders_count; ++i)
 	{
-		collider_destroy(world.colliders + i);
+		collider_destroy(&world.colliders[i]);
 	}
 }
 
@@ -6396,8 +6515,7 @@ static void process_messages_from_the_audio_thread()
 			}
 			default:
 			{
-				// Any other message types are meant for the audio thread. So,
-				// if they're received here, something's gone wrong.
+				// Any other message types are meant for the audio thread.
 				ASSERT(false);
 				break;
 			}
@@ -7073,7 +7191,7 @@ static void process_messages_from_main_thread()
 			default:
 			{
 				// Any other message types should be ones sent to the main
-				// thread. So, if they're received here, something's gone wrong.
+				// thread.
 				ASSERT(false);
 				break;
 			}
@@ -7196,15 +7314,27 @@ static void* run_mixer_thread(void* argument)
 	snare->noise.passband = 48;
 
 	Instrument* lead = &instruments[2];
-	lead->oscillator = Oscillator::Square;
+	lead->oscillator = Oscillator::Sawtooth;
 	lead->envelope_settings.attack = 0.2f * device_description.sample_rate;
 	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.sustain = 0.75f;
 	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
 
-	effect = instrument_add_effect(lead, EffectType::Phaser);
+	effect = instrument_add_effect(lead, EffectType::Resonator);
+	Resonator* resonator = &effect->resonator;
+	resonator->mix = 0.6f;
+	resonator->gain = 35.0f;
+	sar_set_passband(&resonator->bank[0], 700.0f, device_description.sample_rate,  40.0f * 13.0f);
+	sar_set_passband(&resonator->bank[1], 1200.0f, device_description.sample_rate, 40.0f * 7.0f);
+	sar_set_passband(&resonator->bank[2], 2600.0f, device_description.sample_rate, 40.0f * 16.0f);
+
+	effect = instrument_add_effect(lead, EffectType::Ring_Modulator);
+	RingModulator* ring_modulator = &effect->ring_modulator;
+	ring_modulator->rate = pitch_to_frequency(57);
 
 	streams[1].pan = 0.4f;
+
+	streams[2].pan = -0.1f;
 
 	streams[3].pan = -0.6f;
 	streams[3].volume = 0.6f;
@@ -7239,7 +7369,7 @@ static void* run_mixer_thread(void* argument)
 			value = bpf_apply(&bandpass, value);
 			for(int j = 0; j < stream->channels; ++j)
 			{
-				stream->samples[i * stream->channels + j] = value;
+				stream->samples[stream->channels * i + j] = value;
 			}
 		}
 
