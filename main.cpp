@@ -5189,6 +5189,10 @@ struct EnvelopeSettings
 {
 	struct
 	{
+		float attack;
+		float decay;
+		float sustain;
+		float release;
 		int semitones;
 		bool use;
 	} pitch_envelope;
@@ -5255,6 +5259,7 @@ struct Track
 	int notes_capacity;
 	int start_index;
 	int stop_index;
+
 	double timing_offset;
 	int octave;
 	int octave_range;
@@ -5409,6 +5414,10 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 				envelope_set_decay(&voice->envelope, envelope_settings->decay);
 				envelope_set_sustain(&voice->envelope, envelope_settings->sustain);
 				envelope_set_release(&voice->envelope, envelope_settings->release);
+				envelope_set_attack(&voice->pitch_envelope, envelope_settings->pitch_envelope.attack);
+				envelope_set_decay(&voice->pitch_envelope, envelope_settings->pitch_envelope.decay);
+				envelope_set_sustain(&voice->pitch_envelope, envelope_settings->pitch_envelope.sustain);
+				envelope_set_release(&voice->pitch_envelope, envelope_settings->pitch_envelope.release);
 				voice_gate(&voices[index], true, envelope_settings->pitch_envelope.use);
 			}
 			history_record(history, track_index, start->time, true);
@@ -5872,6 +5881,7 @@ enum class Oscillator
 	Rectified_Sine,
 	Cycloid,
 	Noise,
+	Double_Sine,
 };
 
 static const int instrument_effects_max = 8;
@@ -5891,6 +5901,11 @@ struct Instrument
 		{
 			int passband;
 		} noise;
+		struct
+		{
+			float ratio;
+			float gain;
+		} fm; // frequency modulation
 	};
 
 	Oscillator oscillator;
@@ -6223,6 +6238,28 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 				bpf_set_passband(&filter, low, high, delta_time);
 				float value = arandom::float_range(-1.0f, 1.0f);
 				value = bpf_apply(&filter, value);
+				JUST_OSCILLATOR_BOTTOM_PART();
+			}
+			break;
+		}
+		case Oscillator::Double_Sine:
+		{
+			float ratio = instrument->fm.ratio;
+			float gain = instrument->fm.gain;
+			if(use_pitch_envelope)
+			{
+				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				float fm_theta = ratio * theta;
+				float phase = (gain / fm_theta) * (sin(tau * fm_theta * t - pi_over_2) + 1.0f);
+				float value = sin(tau * theta * t + phase);
+				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+			}
+			else
+			{
+				JUST_OSCILLATOR_TOP_PART();
+				float fm_theta = ratio * theta;
+				float phase = (gain / fm_theta) * (sin(tau * fm_theta * t - pi_over_2) + 1.0f);
+				float value = sin(tau * theta * t + phase);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -7241,10 +7278,6 @@ static void* run_mixer_thread(void* argument)
 
 		ADSR* pitch_envelope = &voice->pitch_envelope;
 		envelope_setup(pitch_envelope);
-		envelope_set_attack(pitch_envelope, 0.0001f * device_description.sample_rate);
-		envelope_set_decay(pitch_envelope, 0.0006f * device_description.sample_rate);
-		envelope_set_sustain(pitch_envelope, 0.0f);
-		envelope_set_release(pitch_envelope, 0.0f * device_description.sample_rate);
 	}
 
 	VoiceEntry voice_map[voice_count];
@@ -7287,13 +7320,17 @@ static void* run_mixer_thread(void* argument)
 	Instrument instruments[tracks_count];
 
 	Instrument* kick = &instruments[0];
+	kick->oscillator = Oscillator::Sine;
 	kick->envelope_settings.attack = 0.002f * device_description.sample_rate;
 	kick->envelope_settings.decay = 0.56f * device_description.sample_rate;
 	kick->envelope_settings.sustain = 0.0f;
 	kick->envelope_settings.release = 2.0f * device_description.sample_rate;
 	kick->envelope_settings.pitch_envelope.use = true;
 	kick->envelope_settings.pitch_envelope.semitones = 36;
-	kick->oscillator = Oscillator::Sine;
+	kick->envelope_settings.pitch_envelope.attack = 0.0001f * device_description.sample_rate;
+	kick->envelope_settings.pitch_envelope.decay = 0.0006f * device_description.sample_rate;
+	kick->envelope_settings.pitch_envelope.sustain = 0.0f;
+	kick->envelope_settings.pitch_envelope.release = 0.0f * device_description.sample_rate;
 
 	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
@@ -7314,23 +7351,22 @@ static void* run_mixer_thread(void* argument)
 	snare->noise.passband = 48;
 
 	Instrument* lead = &instruments[2];
-	lead->oscillator = Oscillator::Sawtooth;
+	lead->oscillator = Oscillator::Double_Sine;
+	lead->fm.ratio = 0.333f;
+	lead->fm.gain = 1400.0f;
 	lead->envelope_settings.attack = 0.2f * device_description.sample_rate;
 	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.sustain = 0.75f;
 	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
+	lead->envelope_settings.pitch_envelope.use = false;
 
 	effect = instrument_add_effect(lead, EffectType::Resonator);
 	Resonator* resonator = &effect->resonator;
-	resonator->mix = 0.6f;
-	resonator->gain = 35.0f;
-	sar_set_passband(&resonator->bank[0], 700.0f, device_description.sample_rate,  40.0f * 13.0f);
-	sar_set_passband(&resonator->bank[1], 1200.0f, device_description.sample_rate, 40.0f * 7.0f);
-	sar_set_passband(&resonator->bank[2], 2600.0f, device_description.sample_rate, 40.0f * 16.0f);
-
-	effect = instrument_add_effect(lead, EffectType::Ring_Modulator);
-	RingModulator* ring_modulator = &effect->ring_modulator;
-	ring_modulator->rate = pitch_to_frequency(57);
+	resonator->mix = 0.4f;
+	resonator->gain = 12.0f;
+	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
+	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
+	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
 
 	streams[1].pan = 0.4f;
 
