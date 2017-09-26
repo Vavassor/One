@@ -4357,6 +4357,7 @@ struct ADSR
 		Decay,
 		Sustain,
 		Release,
+		Post_Release,
 	};
 
 	State state;
@@ -4485,12 +4486,24 @@ static float envelope_apply(ADSR* envelope)
         case ADSR::State::Release:
         {
         	result = envelope->release_base + envelope->prior * envelope->release_coef;
-            if(result <= 0.0f)
+            if(result <= 0.05f)
             {
-            	result = 0.0f;
-                envelope->state = ADSR::State::Neutral;
+            	result = -0.00001f + 0.995 * envelope->prior;
+                envelope->state = ADSR::State::Post_Release;
             }
             break;
+        }
+        case ADSR::State::Post_Release:
+        {
+        	// This state is to reduce clicks by enforcing a ramp down to zero
+        	// that's soft even when the release ramp is fairly steep.
+        	result = -0.00001f + 0.995 * envelope->prior;
+			if(result <= 0.0f)
+			{
+				envelope->prior = 0.0f;
+				envelope->state = ADSR::State::Neutral;
+			}
+        	break;
         }
         case ADSR::State::Sustain:
         case ADSR::State::Neutral:
@@ -7376,14 +7389,14 @@ static void* run_mixer_thread(void* argument)
 	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.sustain = 0.75f;
 	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
-	lead->envelope_settings.pitch_envelope.use = true;
+	lead->envelope_settings.pitch_envelope.use = false;
 	lead->envelope_settings.pitch_envelope.semitones = -12;
 	lead->envelope_settings.pitch_envelope.attack = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.pitch_envelope.decay = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.pitch_envelope.sustain = 0.0f;
 	lead->envelope_settings.pitch_envelope.release = 0.0f * device_description.sample_rate;
 
-#if 0
+#if 1
 	effect = instrument_add_effect(lead, EffectType::Resonator);
 	Resonator* resonator = &effect->resonator;
 	resonator->mix = 0.4f;
