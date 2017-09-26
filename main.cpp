@@ -4414,7 +4414,7 @@ static void envelope_set_release(ADSR* envelope, float rate)
 {
 	envelope->release_rate = rate;
 	float ratio = envelope->ratio_decay_release;
-	float coef = envelope_curve(ratio, envelope->release_rate);
+	float coef = envelope_curve(ratio, rate);
 	envelope->release_coef = coef;
 	envelope->release_base = -ratio * (1.0f - coef);
 }
@@ -5067,6 +5067,10 @@ struct Voice
 {
 	ADSR envelope;
 	ADSR pitch_envelope;
+	float phase_accumulator;
+	float phase_step;
+	float fm_phase_accumulator;
+	float fm_phase_step;
 };
 
 static bool voice_is_unused(Voice* voice)
@@ -5087,6 +5091,10 @@ static void voice_reset(Voice* voice)
 {
 	envelope_reset(&voice->envelope);
 	envelope_reset(&voice->pitch_envelope);
+	voice->phase_accumulator = 0.0f;
+	voice->phase_step = 0.0f;
+	voice->fm_phase_accumulator = 0.0f;
+	voice->fm_phase_step = 0.0f;
 }
 
 // §4.7 Voice Map...............................................................
@@ -5410,6 +5418,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			{
 				index = assign_voice(voice_map, count, track_index, start->note);
 				Voice* voice = &voices[index];
+				voice_reset(voice);
 				envelope_set_attack(&voice->envelope, envelope_settings->attack);
 				envelope_set_decay(&voice->envelope, envelope_settings->decay);
 				envelope_set_sustain(&voice->envelope, envelope_settings->sustain);
@@ -5418,7 +5427,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 				envelope_set_decay(&voice->pitch_envelope, envelope_settings->pitch_envelope.decay);
 				envelope_set_sustain(&voice->pitch_envelope, envelope_settings->pitch_envelope.sustain);
 				envelope_set_release(&voice->pitch_envelope, envelope_settings->pitch_envelope.release);
-				voice_gate(&voices[index], true, envelope_settings->pitch_envelope.use);
+				voice_gate(voice, true, envelope_settings->pitch_envelope.use);
 			}
 			history_record(history, track_index, start->time, true);
 			track->start_index = i + 1;
@@ -6077,10 +6086,11 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		{\
 			Voice* voice = &voices[result.voices[j]];\
 			int pitch = result.pitches[j];\
-			float theta = pitch_to_frequency(pitch);\
+			float unpitched_theta = pitch_to_frequency(pitch);\
 			float pitched_theta = pitch_to_frequency(pitch + semitones);\
 			float modulation = envelope_apply(&voice->pitch_envelope);\
-			theta = lerp(theta, pitched_theta, modulation);\
+			float theta = lerp(unpitched_theta, pitched_theta, modulation);\
+			voice->phase_accumulator += voice->phase_step;
 
 #define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()\
 			value = envelope_apply(&voice->envelope) * value;\
@@ -6105,7 +6115,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = sin(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = sin(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6121,7 +6132,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = square_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = square_wave(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6137,7 +6149,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = pulse_wave(theta * t, instrument->pulse.width);
+				voice->phase_step = theta / sample_rate;
+				float value = pulse_wave(voice->phase_accumulator, instrument->pulse.width);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6153,7 +6166,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = triangle_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = triangle_wave(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6169,7 +6183,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = sawtooth_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = sawtooth_wave(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6185,7 +6200,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = rectified_sin(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = rectified_sin(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6201,7 +6217,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float value = cycloid(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = cycloid(voice->phase_accumulator);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -6249,9 +6266,12 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
+				voice->phase_step = tau * theta / sample_rate;
 				float fm_theta = ratio * theta;
-				float phase = (gain / fm_theta) * (sin(tau * fm_theta * t - pi_over_2) + 1.0f);
-				float value = sin(tau * theta * t + phase);
+				voice->fm_phase_accumulator += voice->fm_phase_step;
+				voice->fm_phase_step = tau * fm_theta / sample_rate;
+				float phase = (gain / fm_theta) * (sin(voice->fm_phase_accumulator - pi_over_2) + 1.0f);
+				float value = sin(voice->phase_accumulator + phase);
 				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
 			}
 			else
@@ -7275,9 +7295,7 @@ static void* run_mixer_thread(void* argument)
 	{
 		Voice* voice = &voices[i];
 		envelope_setup(&voice->envelope);
-
-		ADSR* pitch_envelope = &voice->pitch_envelope;
-		envelope_setup(pitch_envelope);
+		envelope_setup(&voice->pitch_envelope);
 	}
 
 	VoiceEntry voice_map[voice_count];
@@ -7353,13 +7371,19 @@ static void* run_mixer_thread(void* argument)
 	Instrument* lead = &instruments[2];
 	lead->oscillator = Oscillator::Double_Sine;
 	lead->fm.ratio = 0.333f;
-	lead->fm.gain = 1400.0f;
+	lead->fm.gain = 2400.0f;
 	lead->envelope_settings.attack = 0.2f * device_description.sample_rate;
 	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
 	lead->envelope_settings.sustain = 0.75f;
 	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
-	lead->envelope_settings.pitch_envelope.use = false;
+	lead->envelope_settings.pitch_envelope.use = true;
+	lead->envelope_settings.pitch_envelope.semitones = -12;
+	lead->envelope_settings.pitch_envelope.attack = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch_envelope.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch_envelope.sustain = 0.0f;
+	lead->envelope_settings.pitch_envelope.release = 0.0f * device_description.sample_rate;
 
+#if 0
 	effect = instrument_add_effect(lead, EffectType::Resonator);
 	Resonator* resonator = &effect->resonator;
 	resonator->mix = 0.4f;
@@ -7367,6 +7391,7 @@ static void* run_mixer_thread(void* argument)
 	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
 	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
 	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
+#endif
 
 	streams[1].pan = 0.4f;
 
