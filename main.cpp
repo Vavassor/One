@@ -4204,7 +4204,7 @@ static float pitch_to_frequency(int pitch)
 
 static float frequency_given_interval(float frequency, int semitones)
 {
-	return frequency * exp(semitones * log(2.0f) / 12.0f);
+	return frequency * pow(2.0f, semitones / 12.0f);
 }
 
 // §4.1 Format Conversion.......................................................
@@ -4837,6 +4837,8 @@ static float distort(float sample, float gain, float mix)
 
 struct RingModulator
 {
+	float phase_accumulator;
+	float phase_step;
 	float mix;
 	float rate;
 };
@@ -4847,11 +4849,21 @@ static void ring_modulator_default(RingModulator* ring_modulator)
 	ring_modulator->rate = 1.0f;
 }
 
-static float ring_modulate(float sample, double time, float mix, float rate)
+static float ring_modulate(float sample, float phase, float mix)
 {
-	float modulation = sin(tau * rate * time);
+	float modulation = sin(phase);
 	modulation = (1.0f - mix + mix * modulation);
 	return sample * modulation;
+}
+
+static float ring_modulator_apply(RingModulator* ring_modulator, float sample)
+{
+	ring_modulator->phase_accumulator += ring_modulator->phase_step;
+	float phase = ring_modulator->phase_accumulator;
+	float mix = ring_modulator->mix;
+	float result = ring_modulate(sample, phase, mix);
+	ring_modulator->phase_step = tau * ring_modulator->rate;
+	return result;
 }
 
 struct Bitcrush
@@ -4922,6 +4934,8 @@ float bitcrush_apply(Bitcrush* bitcrush, float sample)
 struct Flanger
 {
 	TDL delay_line;
+	float phase_accumulator;
+	float phase_step;
 	float rate;
 	float delay;
 	float depth;
@@ -4931,6 +4945,8 @@ struct Flanger
 static void flanger_create(Flanger* flanger, int max_delay)
 {
 	tdl_create(&flanger->delay_line, max_delay);
+	flanger->phase_accumulator = 0.0f;
+	flanger->phase_step = 0.0f;
 	flanger->rate = 1.0f;
 	flanger->delay = 220.0f;
 	flanger->depth = 220.0f;
@@ -4942,10 +4958,13 @@ static void flanger_destroy(Flanger* flanger)
 	tdl_destroy(&flanger->delay_line);
 }
 
-static float flanger_apply(Flanger* flanger, float sample, float time)
+static float flanger_apply(Flanger* flanger, float sample)
 {
-	float modulation = sin(flanger->rate * tau * time);
+	flanger->phase_accumulator += flanger->phase_step;
+	float modulation = sin(flanger->phase_accumulator);
+	flanger->phase_step = flanger->rate * tau;
 	modulation = (0.5f * modulation) + 0.5f;
+
 	float delay_time = flanger->depth * modulation + flanger->delay;
 	float past_sample = tdl_tap(&flanger->delay_line, delay_time);
 
@@ -4959,6 +4978,8 @@ static const int phaser_poles = 4;
 struct Phaser
 {
 	TDL delay_lines[phaser_poles];
+	float phase_accumulator;
+	float phase_step;
 	float prior;
 	float delay;
 	float depth;
@@ -4974,6 +4995,8 @@ static void phaser_create(Phaser* phaser)
 	{
 		tdl_create(&phaser->delay_lines[i], 512);
 	}
+	phaser->phase_accumulator = 0.0f;
+	phaser->phase_step = 0.0f;
 	phaser->prior = 0.0f;
 	phaser->delay = 32.0f;
 	phaser->depth = 16.0f;
@@ -4991,9 +5014,11 @@ static void phaser_destroy(Phaser* phaser)
 	}
 }
 
-static float phaser_apply(Phaser* phaser, float sample, float time)
+static float phaser_apply(Phaser* phaser, float sample)
 {
-	float modulation = sin(tau * phaser->rate * time);
+	phaser->phase_accumulator += phaser->phase_step;
+	float modulation = sin(phaser->phase_accumulator);
+	phaser->phase_step = tau * phaser->rate;
 	modulation = (0.5f * modulation) + 0.5f;
 
 	float result = (phaser->gain * phaser->prior) + sample;
@@ -5014,6 +5039,8 @@ static float phaser_apply(Phaser* phaser, float sample, float time)
 struct Vibrato
 {
 	TDL delay_line;
+	float phase_accumulator;
+	float phase_step;
 	float rate;
 	float depth;
 	float delay;
@@ -5022,6 +5049,8 @@ struct Vibrato
 static void vibrato_create(Vibrato* vibrato)
 {
 	tdl_create(&vibrato->delay_line, 512);
+	vibrato->phase_accumulator = 0.0f;
+	vibrato->phase_step = 0.0f;
 	vibrato->rate = 8.0f;
 	vibrato->depth = 220.0f;
 	vibrato->delay = 220.0f;
@@ -5032,9 +5061,11 @@ static void vibrato_destroy(Vibrato* vibrato)
 	tdl_destroy(&vibrato->delay_line);
 }
 
-static float vibrato_apply(Vibrato* vibrato, float sample, float time)
+static float vibrato_apply(Vibrato* vibrato, float sample)
 {
-	float modulation = sin(vibrato->rate * tau * time);
+	vibrato->phase_accumulator += vibrato->phase_step;
+	float modulation = sin(vibrato->phase_accumulator);
+	vibrato->phase_step = tau * vibrato->rate;
 	modulation = (0.5f * modulation) + 0.5f;
 	float delay_time = vibrato->depth * modulation + vibrato->delay;
 
@@ -5046,6 +5077,8 @@ static float vibrato_apply(Vibrato* vibrato, float sample, float time)
 struct Chorus
 {
 	TDL delay_line;
+	float phase_accumulator;
+	float phase_step;
 	float rate;
 	float depth;
 	float delay;
@@ -5054,6 +5087,8 @@ struct Chorus
 static void chorus_create(Chorus* chorus)
 {
 	tdl_create(&chorus->delay_line, 2048);
+	chorus->phase_accumulator = 0.0f;
+	chorus->phase_step = 0.0f;
 	chorus->delay = 1024.0f;
 	chorus->depth = 40.0f;
 	chorus->rate = 2.0f;
@@ -5064,13 +5099,45 @@ static void chorus_destroy(Chorus* chorus)
 	tdl_destroy(&chorus->delay_line);
 }
 
-static float chorus_apply(Chorus* chorus, float sample, float time)
+static float chorus_apply(Chorus* chorus, float sample)
 {
-	float modulation = sin(tau * chorus->rate * time);
+	chorus->phase_accumulator += chorus->phase_step;
+	float modulation = sin(chorus->phase_accumulator);
+	chorus->phase_step = tau * chorus->rate;
 	modulation = (0.5f * modulation) + 0.5f;
 	float delay_time = chorus->depth * modulation + chorus->delay;
 	float result = sample + tdl_tap(&chorus->delay_line, delay_time);
 	tdl_record(&chorus->delay_line, sample);
+	return result;
+}
+
+struct Delay
+{
+	TDL delay_line;
+	float delay;
+	float feedback;
+	float mix;
+};
+
+static void delay_create(Delay* delay)
+{
+	tdl_create(&delay->delay_line, 65536);
+	delay->delay = 100.0f;
+	delay->feedback = 0.3f;
+	delay->mix = 0.5f;
+}
+
+static void delay_destroy(Delay* delay)
+{
+	tdl_destroy(&delay->delay_line);
+}
+
+static float delay_apply(Delay* delay, float sample)
+{
+	float past_sample = tdl_tap(&delay->delay_line, delay->delay);
+	float feedback = sample + delay->feedback * past_sample;
+	tdl_record(&delay->delay_line, feedback);
+	float result = lerp(sample, feedback, delay->mix);
 	return result;
 }
 
@@ -5216,12 +5283,15 @@ struct EnvelopeSettings
 		float release;
 		int semitones;
 		bool use;
-	} pitch_envelope;
+	} pitch;
 
-	float attack;
-	float decay;
-	float sustain;
-	float release;
+	struct
+	{
+		float attack;
+		float decay;
+		float sustain;
+		float release;
+	} amp;
 };
 
 // §4.8 Track...................................................................
@@ -5275,13 +5345,11 @@ struct Track
 	Note notes[32];
 	Event start_events[32];
 	Event stop_events[32];
-	double finish_time;
 	int notes_count;
 	int notes_capacity;
 	int start_index;
 	int stop_index;
 
-	double timing_offset;
 	int octave;
 	int octave_range;
 	int style;
@@ -5309,13 +5377,12 @@ void track_setup(Track* track)
 	track->notes_capacity = 32;
 	track->start_index = 0;
 	track->stop_index = 0;
-	track->timing_offset = 0.0;
 	track->octave = 1;
 	track->octave_range = 1;
 	track->style = 0;
 }
 
-void track_generate(Track* track, double origin_time)
+void track_generate(Track* track, double finish_time)
 {
 	double note_spacing;
 	double note_length;
@@ -5330,7 +5397,7 @@ void track_generate(Track* track, double origin_time)
 		case 1:
 		{
 			note_spacing = 1.2;
-			note_length = 0.3;
+			note_length = 0.08;
 			break;
 		}
 		case 2:
@@ -5339,10 +5406,24 @@ void track_generate(Track* track, double origin_time)
 			note_length = 0.3;
 			break;
 		}
+		case 3:
+		{
+			note_spacing = 0.3;
+			note_length = 0.08;
+			break;
+		}
 	}
 
+	int generated = 0;
 	for(int i = track->notes_count; i < track->notes_capacity; ++i)
 	{
+		double note_start = note_spacing * generated;
+
+		if(note_start >= finish_time)
+		{
+			break;
+		}
+
 		int degrees = pentatonic_major[0];
 		int degree = arandom::int_range(0, degrees - 1);
 		int pitch_class = pentatonic_major[degree + 1];
@@ -5350,8 +5431,6 @@ void track_generate(Track* track, double origin_time)
 		int lowest_octave = track->octave;
 		int highest_octave = track->octave + track->octave_range;
 		int octave = arandom::int_range(lowest_octave, highest_octave);
-
-		double note_start = note_spacing * i + track->timing_offset + origin_time;
 
 		Track::Note* note = &track->notes[i];
 		note->pitch = 12 * octave + pitch_class;
@@ -5364,18 +5443,22 @@ void track_generate(Track* track, double origin_time)
 		Track::Event* stop_event = &track->stop_events[i];
 		stop_event->note = i;
 		stop_event->time = note_start + note_length;
+
+		generated += 1;
 	}
 
-	int generated = track->notes_capacity - track->notes_count - 1;
-	track->notes_count = track->notes_capacity;
+	if(track->notes_count == track->notes_capacity)
+	{
+		LOG_DEBUG("The audio track note capacity was exceeded.");
+	}
+
+	track->notes_count = MIN(track->notes_count + generated, track->notes_capacity);
 
 	sort_events(track->start_events, track->notes_count);
 	sort_events(track->stop_events, track->notes_count);
-
-	track->finish_time = note_spacing * generated + origin_time;
 }
 
-static void transfer_unfinished_notes(Track* track)
+static void transfer_unfinished_notes(Track* track, double time)
 {
 	const int transfer_max = 8;
 	Track::Note notes_to_transfer[transfer_max];
@@ -5384,6 +5467,7 @@ static void transfer_unfinished_notes(Track* track)
 	for(int i = track->stop_index; i < track->notes_count && transferred < transfer_max; ++i)
 	{
 		Track::Event stop = track->stop_events[i];
+		stop.time -= time;
 		stops_to_transfer[transferred] = stop;
 		notes_to_transfer[transferred] = track->notes[stop.note];
 		transferred += 1;
@@ -5393,6 +5477,11 @@ static void transfer_unfinished_notes(Track* track)
 	{
 		track->notes[i] = notes_to_transfer[i];
 		track->stop_events[i] = stops_to_transfer[i];
+
+		track->start_events[i].note = 0;
+		// Make sure these sort to the beginning of the list by using a negative
+		// time value.
+		track->start_events[i].time = -1.0;
 	}
 
 	track->notes_count = transferred;
@@ -5425,6 +5514,7 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 		}
 		else
 		{
+			ASSERT(start->time >= 0.0f);
 			int index;
 			bool found = find_voice(voice_map, count, track_index, start->note, &index);
 			if(!found)
@@ -5432,15 +5522,15 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 				index = assign_voice(voice_map, count, track_index, start->note);
 				Voice* voice = &voices[index];
 				voice_reset(voice);
-				envelope_set_attack(&voice->envelope, envelope_settings->attack);
-				envelope_set_decay(&voice->envelope, envelope_settings->decay);
-				envelope_set_sustain(&voice->envelope, envelope_settings->sustain);
-				envelope_set_release(&voice->envelope, envelope_settings->release);
-				envelope_set_attack(&voice->pitch_envelope, envelope_settings->pitch_envelope.attack);
-				envelope_set_decay(&voice->pitch_envelope, envelope_settings->pitch_envelope.decay);
-				envelope_set_sustain(&voice->pitch_envelope, envelope_settings->pitch_envelope.sustain);
-				envelope_set_release(&voice->pitch_envelope, envelope_settings->pitch_envelope.release);
-				voice_gate(voice, true, envelope_settings->pitch_envelope.use);
+				envelope_set_attack(&voice->envelope, envelope_settings->amp.attack);
+				envelope_set_decay(&voice->envelope, envelope_settings->amp.decay);
+				envelope_set_sustain(&voice->envelope, envelope_settings->amp.sustain);
+				envelope_set_release(&voice->envelope, envelope_settings->amp.release);
+				envelope_set_attack(&voice->pitch_envelope, envelope_settings->pitch.attack);
+				envelope_set_decay(&voice->pitch_envelope, envelope_settings->pitch.decay);
+				envelope_set_sustain(&voice->pitch_envelope, envelope_settings->pitch.sustain);
+				envelope_set_release(&voice->pitch_envelope, envelope_settings->pitch.release);
+				voice_gate(voice, true, envelope_settings->pitch.use);
 			}
 			history_record(history, track_index, start->time, true);
 			track->start_index = i + 1;
@@ -5458,11 +5548,12 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 		}
 		else
 		{
+			ASSERT(stop->time >= 0.0f);
 			int index;
 			bool found = find_voice(voice_map, count, track_index, stop->note, &index);
 			if(found)
 			{
-				voice_gate(&voices[index], false, envelope_settings->pitch_envelope.use);
+				voice_gate(&voices[index], false, envelope_settings->pitch.use);
 			}
 			history_record(history, track_index, stop->time, false);
 			track->stop_index = i + 1;
@@ -5494,13 +5585,45 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			}
 		}
 	}
+}
 
-	if(should_regenerate(track))
+// Composer.....................................................................
+
+enum class Section
+{
+	Intro,
+	Verse,
+	Chorus,
+	Bridge,
+	Breakdown,
+	Coda,
+};
+
+struct Composer
+{
+	struct State
 	{
-		transfer_unfinished_notes(track);
-		free_associated_voices(voice_map, count, track_index);
-		track_generate(track, track->finish_time);
-	}
+		Section section;
+		int next_state;
+	};
+
+	State states[16];
+	int state;
+};
+
+static void compose_form(Composer* composer)
+{
+	composer->states[0].section = Section::Verse;
+	composer->states[0].next_state = 1;
+
+	composer->states[1].section = Section::Chorus;
+	composer->states[1].next_state = 0;
+}
+
+static void composer_update_state(Composer* composer)
+{
+	Composer::State* state = &composer->states[composer->state];
+	composer->state = state->next_state;
 }
 
 // §4.9 Stream..................................................................
@@ -5678,6 +5801,7 @@ enum class EffectType
 	Phaser,
 	Vibrato,
 	Chorus,
+	Delay,
 };
 
 struct Effect
@@ -5697,11 +5821,12 @@ struct Effect
 		Phaser phaser;
 		Vibrato vibrato;
 		Chorus chorus;
+		Delay delay;
 	};
 	EffectType type;
 };
 
-static void apply_effects(Effect* effects, int count, Stream* stream, int sample_rate, double time)
+static void apply_effects(Effect* effects, int count, Stream* stream)
 {
 	int frames = stream->samples_count / stream->channels;
 	for(int i = 0; i < count; ++i)
@@ -5804,13 +5929,10 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			}
 			case EffectType::Ring_Modulator:
 			{
-				float mix = effect->ring_modulator.mix;
-				float rate = effect->ring_modulator.rate;
 				for(int i = 0; i < frames; ++i)
 				{
-					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = ring_modulate(value, t, mix, rate);
+					value = ring_modulator_apply(&effect->ring_modulator, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5835,9 +5957,8 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			{
 				for(int i = 0; i < frames; ++i)
 				{
-					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = flanger_apply(&effect->flanger, value, t);
+					value = flanger_apply(&effect->flanger, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5849,9 +5970,8 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			{
 				for(int i = 0; i < frames; ++i)
 				{
-					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = phaser_apply(&effect->phaser, value, t);
+					value = phaser_apply(&effect->phaser, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5863,9 +5983,8 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			{
 				for(int i = 0; i < frames; ++i)
 				{
-					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = vibrato_apply(&effect->vibrato, value, t);
+					value = vibrato_apply(&effect->vibrato, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5877,9 +5996,21 @@ static void apply_effects(Effect* effects, int count, Stream* stream, int sample
 			{
 				for(int i = 0; i < frames; ++i)
 				{
-					float t = static_cast<float>(i) / sample_rate + time;
 					float value = stream->samples[stream->channels * i];
-					value = chorus_apply(&effect->chorus, value, t);
+					value = chorus_apply(&effect->chorus, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
+			case EffectType::Delay:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = delay_apply(&effect->delay, value);
 					for(int j = 0; j < stream->channels; ++j)
 					{
 						stream->samples[stream->channels * i + j] = value;
@@ -5903,7 +6034,7 @@ enum class Oscillator
 	Rectified_Sine,
 	Cycloid,
 	Noise,
-	Double_Sine,
+	FM_Sine,
 };
 
 static const int instrument_effects_max = 8;
@@ -5965,6 +6096,11 @@ static void instrument_destroy(Instrument* instrument)
 			case EffectType::Chorus:
 			{
 				chorus_destroy(&effect->chorus);
+				break;
+			}
+			case EffectType::Delay:
+			{
+				delay_destroy(&effect->delay);
 				break;
 			}
 			default:
@@ -6051,12 +6187,17 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 			chorus_create(&effect->chorus);
 			break;
 		}
+		case EffectType::Delay:
+		{
+			delay_create(&effect->delay);
+			break;
+		}
 	}
 
 	return effect;
 }
 
-static void generate_oscillation(Stream* stream, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time, History* history)
+static void generate_oscillation(Stream* stream, int start_frame, int end_frame, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time, History* history)
 {
 	// These are some pretty absurd macros. Basically, most of the oscillators
 	// have identical loops, but the function called to generate the next sample
@@ -6069,9 +6210,9 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	// once and enter the appropriate loop.
 
 #define JUST_OSCILLATOR_TOP_PART()\
-	for(int i = 0; i < frames; ++i)\
+	for(int i = start_frame; i < end_frame; ++i)\
 	{\
-		float t = static_cast<float>(i) / sample_rate + time;\
+		double t = static_cast<double>(i - start_frame) / sample_rate + time;\
 		RenderResult result = {};\
 		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result);\
 		for(int j = 0; j < result.voices_count; ++j)\
@@ -6079,6 +6220,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			Voice* voice = &voices[result.voices[j]];\
 			int pitch = result.pitches[j];\
 			float theta = pitch_to_frequency(pitch);\
+			voice->phase_accumulator += voice->phase_step;
 
 #define JUST_OSCILLATOR_BOTTOM_PART()\
 			value = envelope_apply(&voice->envelope) * value;\
@@ -6090,9 +6232,9 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 	}
 
 #define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()\
-	for(int i = 0; i < frames; ++i)\
+	for(int i = start_frame; i < end_frame; ++i)\
 	{\
-		float t = static_cast<float>(i) / sample_rate + time;\
+		double t = static_cast<double>(i - start_frame) / sample_rate + time;\
 		RenderResult result = {};\
 		track_render(track, track_index, voices, voice_map, voices_count, t, envelope_settings, history, &result);\
 		for(int j = 0; j < result.voices_count; ++j)\
@@ -6114,12 +6256,9 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 		}\
 	}
 
-	int frames = stream->samples_count / stream->channels;
 	EnvelopeSettings* envelope_settings = &instrument->envelope_settings;
-	int semitones = envelope_settings->pitch_envelope.semitones;
-	bool use_pitch_envelope = envelope_settings->pitch_envelope.use;
-
-	fill_with_silence(stream->samples, 0, stream->samples_count);
+	int semitones = envelope_settings->pitch.semitones;
+	bool use_pitch_envelope = envelope_settings->pitch.use;
 
 	switch(instrument->oscillator)
 	{
@@ -6135,7 +6274,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = sin(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = sin(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6152,7 +6292,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = square_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = square_wave(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6169,7 +6310,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = pulse_wave(theta * t, instrument->pulse.width);
+				voice->phase_step = theta / sample_rate;
+				float value = pulse_wave(voice->phase_accumulator, instrument->pulse.width);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6186,7 +6328,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = triangle_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = triangle_wave(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6203,7 +6346,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = sawtooth_wave(theta * t);
+				voice->phase_step = theta / sample_rate;
+				float value = sawtooth_wave(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6220,7 +6364,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = rectified_sin(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = rectified_sin(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6237,7 +6382,8 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float value = cycloid(tau * theta * t);
+				voice->phase_step = tau * theta / sample_rate;
+				float value = cycloid(voice->phase_accumulator);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -6253,7 +6399,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			if(use_pitch_envelope)
 			{
 				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.0f);
+				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.01f);
 				float high = frequency_given_interval(theta, passband_extent);
 				bpf_set_passband(&filter, low, high, delta_time);
 				float value = arandom::float_range(-1.0f, 1.0f);
@@ -6263,7 +6409,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
-				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.0f);
+				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.01f);
 				float high = frequency_given_interval(theta, passband_extent);
 				bpf_set_passband(&filter, low, high, delta_time);
 				float value = arandom::float_range(-1.0f, 1.0f);
@@ -6272,7 +6418,7 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			}
 			break;
 		}
-		case Oscillator::Double_Sine:
+		case Oscillator::FM_Sine:
 		{
 			float ratio = instrument->fm.ratio;
 			float gain = instrument->fm.gain;
@@ -6290,9 +6436,10 @@ static void generate_oscillation(Stream* stream, Track* track, int track_index, 
 			else
 			{
 				JUST_OSCILLATOR_TOP_PART();
+				voice->phase_step = tau * theta / sample_rate;
 				float fm_theta = ratio * theta;
 				float phase = (gain / fm_theta) * (sin(tau * fm_theta * t - pi_over_2) + 1.0f);
-				float value = sin(tau * theta * t + phase);
+				float value = sin(voice->phase_accumulator + phase);
 				JUST_OSCILLATOR_BOTTOM_PART();
 			}
 			break;
@@ -7314,29 +7461,42 @@ static void* run_mixer_thread(void* argument)
 	VoiceEntry voice_map[voice_count];
 	voice_map_setup(voice_map, voice_count);
 
-	const int tracks_count = 3;
+	const int tracks_count = 5;
 	Track tracks[tracks_count];
 
+	const double first_section_length = 2.4;
+
 	track_setup(&tracks[0]);
-	track_generate(&tracks[0], 0.0);
+	track_generate(&tracks[0], first_section_length);
 
 	track_setup(&tracks[1]);
-	tracks[1].timing_offset = 0.3;
 	tracks[1].octave = 4;
+	tracks[1].octave_range = 0;
 	tracks[1].style = 1;
-	track_generate(&tracks[1], 0.0);
+	track_generate(&tracks[1], first_section_length);
 
 	track_setup(&tracks[2]);
-	tracks[2].timing_offset = 0.0;
 	tracks[2].octave = 4;
-	tracks[2].octave_range = 1;
-	tracks[2].style = 2;
-	track_generate(&tracks[2], 0.0);
+	tracks[2].octave_range = 0;
+	tracks[2].style = 1;
+	track_generate(&tracks[2], first_section_length);
+
+	track_setup(&tracks[3]);
+	tracks[3].octave = 4;
+	tracks[3].octave_range = 1;
+	tracks[3].style = 2;
+	track_generate(&tracks[3], first_section_length);
+
+	track_setup(&tracks[4]);
+	tracks[4].octave = 5;
+	tracks[4].octave_range = 0;
+	tracks[4].style = 3;
+	track_generate(&tracks[4], first_section_length);
 
 	BPF bandpass;
 	bpf_reset(&bandpass);
 
-	int streams_count = tracks_count + 2;
+	int streams_count = tracks_count + 1;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
@@ -7352,16 +7512,16 @@ static void* run_mixer_thread(void* argument)
 
 	Instrument* kick = &instruments[0];
 	kick->oscillator = Oscillator::Sine;
-	kick->envelope_settings.attack = 0.002f * device_description.sample_rate;
-	kick->envelope_settings.decay = 0.56f * device_description.sample_rate;
-	kick->envelope_settings.sustain = 0.0f;
-	kick->envelope_settings.release = 2.0f * device_description.sample_rate;
-	kick->envelope_settings.pitch_envelope.use = true;
-	kick->envelope_settings.pitch_envelope.semitones = 36;
-	kick->envelope_settings.pitch_envelope.attack = 0.0001f * device_description.sample_rate;
-	kick->envelope_settings.pitch_envelope.decay = 0.0006f * device_description.sample_rate;
-	kick->envelope_settings.pitch_envelope.sustain = 0.0f;
-	kick->envelope_settings.pitch_envelope.release = 0.0f * device_description.sample_rate;
+	kick->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
+	kick->envelope_settings.amp.decay = 0.56f * device_description.sample_rate;
+	kick->envelope_settings.amp.sustain = 0.0f;
+	kick->envelope_settings.amp.release = 2.0f * device_description.sample_rate;
+	kick->envelope_settings.pitch.use = true;
+	kick->envelope_settings.pitch.semitones = 36;
+	kick->envelope_settings.pitch.attack = 0.01f * device_description.sample_rate;
+	kick->envelope_settings.pitch.decay = 0.06f * device_description.sample_rate;
+	kick->envelope_settings.pitch.sustain = 0.0f;
+	kick->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
 
 	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
 	LPF* lowpass = &effect->lowpass;
@@ -7372,31 +7532,57 @@ static void* run_mixer_thread(void* argument)
 	distortion->gain = 5.0f;
 	distortion->mix = 0.8f;
 
-	Instrument* snare = &instruments[1];
-	snare->oscillator = Oscillator::Noise;
-	snare->envelope_settings.attack = 0.002f * device_description.sample_rate;
-	snare->envelope_settings.decay = 0.56f * device_description.sample_rate;
-	snare->envelope_settings.sustain = 0.0f;
-	snare->envelope_settings.release = 2.0f * device_description.sample_rate;
-	snare->envelope_settings.pitch_envelope.use = false;
-	snare->noise.passband = 48;
+#if 0
+	Instrument* open_hat = &instruments[1];
+	open_hat->oscillator = Oscillator::Noise;
+	open_hat->envelope_settings.attack = 0.002f * device_description.sample_rate;
+	open_hat->envelope_settings.decay = 0.56f * device_description.sample_rate;
+	open_hat->envelope_settings.sustain = 0.0f;
+	open_hat->envelope_settings.release = 2.0f * device_description.sample_rate;
+	open_hat->envelope_settings.pitch_envelope.use = false;
+	open_hat->noise.passband = 48;
+#endif
 
-	Instrument* lead = &instruments[2];
-	lead->oscillator = Oscillator::Double_Sine;
+	Instrument* snare0 = &instruments[1];
+	snare0->oscillator = Oscillator::Pulse;
+	snare0->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
+	snare0->envelope_settings.amp.decay = 0.2f * device_description.sample_rate;
+	snare0->envelope_settings.amp.sustain = 0.1f;
+	snare0->envelope_settings.amp.release = 0.6f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.use = true;
+	snare0->envelope_settings.pitch.semitones = 36;
+	snare0->envelope_settings.pitch.attack = 0.001f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.decay = 0.05f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.sustain = 0.0f;
+	snare0->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
+	snare0->pulse.width = 0.3f;
+
+	Instrument* snare1 = &instruments[2];
+	snare1->oscillator = Oscillator::Noise;
+	snare1->envelope_settings.amp.attack = 0.05f * device_description.sample_rate;
+	snare1->envelope_settings.amp.decay = 0.001f * device_description.sample_rate;
+	snare1->envelope_settings.amp.sustain = 0.8f;
+	snare1->envelope_settings.amp.release = 0.001f * device_description.sample_rate;
+	snare1->envelope_settings.pitch.use = false;
+	snare1->noise.passband = 24;
+
+	effect = instrument_add_effect(snare1, EffectType::Overdrive);
+
+	Instrument* lead = &instruments[3];
+	lead->oscillator = Oscillator::FM_Sine;
 	lead->fm.ratio = 0.333f;
 	lead->fm.gain = 2400.0f;
-	lead->envelope_settings.attack = 0.2f * device_description.sample_rate;
-	lead->envelope_settings.decay = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.sustain = 0.75f;
-	lead->envelope_settings.release = 0.0f * device_description.sample_rate;
-	lead->envelope_settings.pitch_envelope.use = false;
-	lead->envelope_settings.pitch_envelope.semitones = -12;
-	lead->envelope_settings.pitch_envelope.attack = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.pitch_envelope.decay = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.pitch_envelope.sustain = 0.0f;
-	lead->envelope_settings.pitch_envelope.release = 0.0f * device_description.sample_rate;
+	lead->envelope_settings.amp.attack = 0.2f * device_description.sample_rate;
+	lead->envelope_settings.amp.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.amp.sustain = 0.75f;
+	lead->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
+	lead->envelope_settings.pitch.use = false;
+	lead->envelope_settings.pitch.semitones = -12;
+	lead->envelope_settings.pitch.attack = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch.sustain = 0.0f;
+	lead->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
 
-#if 1
 	effect = instrument_add_effect(lead, EffectType::Resonator);
 	Resonator* resonator = &effect->resonator;
 	resonator->mix = 0.4f;
@@ -7404,14 +7590,42 @@ static void* run_mixer_thread(void* argument)
 	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
 	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
 	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
-#endif
+
+	Instrument* rim = &instruments[4];
+	rim->oscillator = Oscillator::Noise;
+	rim->envelope_settings.amp.attack = 0.008f * device_description.sample_rate;
+	rim->envelope_settings.amp.decay = 0.14f * device_description.sample_rate;
+	rim->envelope_settings.amp.sustain = 0.0f;
+	rim->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
+	rim->envelope_settings.pitch.use = false;
+	rim->envelope_settings.pitch.semitones = 24;
+	rim->envelope_settings.pitch.attack = 0.03f * device_description.sample_rate;
+	rim->envelope_settings.pitch.decay = 0.2f * device_description.sample_rate;
+	rim->envelope_settings.pitch.sustain = 0.0f;
+	rim->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
+	rim->noise.passband = 36;
+
+	effect = instrument_add_effect(rim, EffectType::Resonator);
+	resonator = &effect->resonator;
+	resonator->mix = 0.9f;
+	resonator->gain = 23.0f;
+	sar_set_passband(&resonator->bank[0], pitch_to_frequency(89), device_description.sample_rate, 29.0f);
+	sar_set_passband(&resonator->bank[1], pitch_to_frequency(85), device_description.sample_rate, 33.0f);
+	sar_set_passband(&resonator->bank[2], pitch_to_frequency(88), device_description.sample_rate, 20.0f);
+
+	effect = instrument_add_effect(rim, EffectType::Delay);
+	Delay* delay = &effect->delay;
+	delay->delay = 1.0f * device_description.sample_rate;
+	delay->feedback = 0.3f;
+	delay->mix = 0.5f;
 
 	streams[1].pan = 0.4f;
 
-	streams[2].pan = -0.1f;
+	streams[2].pan = 0.4f;
 
-	streams[3].pan = -0.6f;
-	streams[3].volume = 0.6f;
+	streams[3].pan = -0.1f;
+
+	streams[4].pan = -0.7f;
 
 	while(atomic_flag_test_and_set(&quit))
 	{
@@ -7422,32 +7636,37 @@ static void* run_mixer_thread(void* argument)
 		int frames = device_description.frames;
 		int sample_rate = device_description.sample_rate;
 
+		double section_finish_time = first_section_length;
+		bool cue_time_reset = false;
+
 		for(int i = 0; i < tracks_count; ++i)
 		{
 			Stream* stream = &streams[i];
 			Track* track = &tracks[i];
 			Instrument* instrument = &instruments[i];
-			generate_oscillation(stream, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
-			apply_effects(instrument->effects, instrument->effects_count, stream, sample_rate, time);
-		}
-
-		Stream* stream = &streams[3];
-		for(int i = 0; i < frames; ++i)
-		{
-			float t = static_cast<float>(i) / sample_rate + time;
-			float value = arandom::float_range(-1.0f, 1.0f);
-			float center_frequency = 50.0f * sin(1.0f * tau * t) + 65.0f;
-			float l = pitch_to_frequency(center_frequency - 5.0f);
-			float h = pitch_to_frequency(center_frequency + 5.0f);
-			bpf_set_passband(&bandpass, l, h, delta_time_per_frame);
-			value = bpf_apply(&bandpass, value);
-			for(int j = 0; j < stream->channels; ++j)
+			fill_with_silence(stream->samples, 0, stream->samples_count);
+			if(time + delta_time < section_finish_time)
 			{
-				stream->samples[stream->channels * i + j] = value;
+				generate_oscillation(stream, 0, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
 			}
+			else
+			{
+				int regen_frame = (section_finish_time - time) * device_description.sample_rate;
+				generate_oscillation(stream, 0, regen_frame, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
+
+				ASSERT(should_regenerate(track));
+				transfer_unfinished_notes(track, section_finish_time);
+				free_associated_voices(voice_map, voice_count, i);
+				track_generate(track, section_finish_time);
+
+				cue_time_reset = true;
+
+				generate_oscillation(stream, regen_frame, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, 0.0, &history);
+			}
+			apply_effects(instrument->effects, instrument->effects_count, stream);
 		}
 
-		stream = &streams[4];
+		Stream* stream = &streams[5];
 		{
 			stream->volume = 0.0f;
 			if(boop_on)
@@ -7498,7 +7717,14 @@ static void* run_mixer_thread(void* argument)
 			frames_left -= frames_written;
 		}
 
-		time += delta_time;
+		if(cue_time_reset)
+		{
+			time = (time + delta_time) - section_finish_time;
+		}
+		else
+		{
+			time += delta_time;
+		}
 	}
 
 	close_device(pcm_handle);
