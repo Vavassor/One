@@ -5328,6 +5328,43 @@ namespace
 #undef AS
 #undef B
 
+enum class Section
+{
+	Intro,
+	Verse,
+	Chorus,
+	Bridge,
+	Breakdown,
+	Coda,
+};
+
+struct Composer
+{
+	struct State
+	{
+		Section section;
+		int next_state;
+	};
+
+	State states[16];
+	int state;
+};
+
+static void compose_form(Composer* composer)
+{
+	composer->states[0].section = Section::Verse;
+	composer->states[0].next_state = 1;
+
+	composer->states[1].section = Section::Chorus;
+	composer->states[1].next_state = 0;
+}
+
+static void composer_update_state(Composer* composer)
+{
+	Composer::State* state = &composer->states[composer->state];
+	composer->state = state->next_state;
+}
+
 struct Track
 {
 	struct Note
@@ -5382,34 +5419,75 @@ void track_setup(Track* track)
 	track->style = 0;
 }
 
-void track_generate(Track* track, double finish_time)
+void track_generate(Track* track, double finish_time, Composer* composer)
 {
+	Composer::State* state = &composer->states[composer->state];
+
 	double note_spacing;
 	double note_length;
-	switch(track->style)
+	switch(state->section)
 	{
-		case 0:
+		default:
+		case Section::Verse:
 		{
-			note_spacing = 0.6;
-			note_length = 0.2;
+			switch(track->style)
+			{
+				case 0:
+				{
+					note_spacing = 0.6;
+					note_length = 0.2;
+					break;
+				}
+				case 1:
+				{
+					note_spacing = 1.2;
+					note_length = 0.08;
+					break;
+				}
+				case 2:
+				{
+					note_spacing = 0.3;
+					note_length = 0.3;
+					break;
+				}
+				case 3:
+				{
+					note_spacing = 0.3;
+					note_length = 0.08;
+					break;
+				}
+			}
 			break;
 		}
-		case 1:
+		case Section::Chorus:
 		{
-			note_spacing = 1.2;
-			note_length = 0.08;
-			break;
-		}
-		case 2:
-		{
-			note_spacing = 0.3;
-			note_length = 0.3;
-			break;
-		}
-		case 3:
-		{
-			note_spacing = 0.3;
-			note_length = 0.08;
+			switch(track->style)
+			{
+				case 0:
+				{
+					note_spacing = 0.6;
+					note_length = 0.1;
+					break;
+				}
+				case 1:
+				{
+					note_spacing = 0.6;
+					note_length = 0.08;
+					break;
+				}
+				case 2:
+				{
+					note_spacing = 1.2;
+					note_length = 0.6;
+					break;
+				}
+				case 3:
+				{
+					note_spacing = 0.2;
+					note_length = 0.08;
+					break;
+				}
+			}
 			break;
 		}
 	}
@@ -5585,45 +5663,6 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 			}
 		}
 	}
-}
-
-// Composer.....................................................................
-
-enum class Section
-{
-	Intro,
-	Verse,
-	Chorus,
-	Bridge,
-	Breakdown,
-	Coda,
-};
-
-struct Composer
-{
-	struct State
-	{
-		Section section;
-		int next_state;
-	};
-
-	State states[16];
-	int state;
-};
-
-static void compose_form(Composer* composer)
-{
-	composer->states[0].section = Section::Verse;
-	composer->states[0].next_state = 1;
-
-	composer->states[1].section = Section::Chorus;
-	composer->states[1].next_state = 0;
-}
-
-static void composer_update_state(Composer* composer)
-{
-	Composer::State* state = &composer->states[composer->state];
-	composer->state = state->next_state;
 }
 
 // §4.9 Stream..................................................................
@@ -7447,7 +7486,7 @@ static void* run_mixer_thread(void* argument)
 	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
 	float delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
 
-	// Setup test effects and filters.
+	// Setup voices.
 
 	int voice_count = 16;
 	Voice voices[voice_count];
@@ -7461,37 +7500,44 @@ static void* run_mixer_thread(void* argument)
 	VoiceEntry voice_map[voice_count];
 	voice_map_setup(voice_map, voice_count);
 
+	// Setup the composer and tracks.
+
+	Composer composer;
+	compose_form(&composer);
+
 	const int tracks_count = 5;
 	Track tracks[tracks_count];
 
 	const double first_section_length = 2.4;
 
 	track_setup(&tracks[0]);
-	track_generate(&tracks[0], first_section_length);
+	track_generate(&tracks[0], first_section_length, &composer);
 
 	track_setup(&tracks[1]);
 	tracks[1].octave = 4;
 	tracks[1].octave_range = 0;
 	tracks[1].style = 1;
-	track_generate(&tracks[1], first_section_length);
+	track_generate(&tracks[1], first_section_length, &composer);
 
 	track_setup(&tracks[2]);
 	tracks[2].octave = 4;
 	tracks[2].octave_range = 0;
 	tracks[2].style = 1;
-	track_generate(&tracks[2], first_section_length);
+	track_generate(&tracks[2], first_section_length, &composer);
 
 	track_setup(&tracks[3]);
 	tracks[3].octave = 4;
 	tracks[3].octave_range = 1;
 	tracks[3].style = 2;
-	track_generate(&tracks[3], first_section_length);
+	track_generate(&tracks[3], first_section_length, &composer);
 
 	track_setup(&tracks[4]);
 	tracks[4].octave = 5;
 	tracks[4].octave_range = 0;
 	tracks[4].style = 3;
-	track_generate(&tracks[4], first_section_length);
+	track_generate(&tracks[4], first_section_length, &composer);
+
+	// Setup test instruments and streams.
 
 	BPF bandpass;
 	bpf_reset(&bandpass);
@@ -7616,7 +7662,7 @@ static void* run_mixer_thread(void* argument)
 	effect = instrument_add_effect(rim, EffectType::Delay);
 	Delay* delay = &effect->delay;
 	delay->delay = 1.0f * device_description.sample_rate;
-	delay->feedback = 0.3f;
+	delay->feedback = 0.2f;
 	delay->mix = 0.5f;
 
 	streams[1].pan = 0.4f;
@@ -7625,6 +7671,7 @@ static void* run_mixer_thread(void* argument)
 
 	streams[3].pan = -0.1f;
 
+	streams[4].volume = 0.6f;
 	streams[4].pan = -0.7f;
 
 	while(atomic_flag_test_and_set(&quit))
@@ -7657,7 +7704,11 @@ static void* run_mixer_thread(void* argument)
 				ASSERT(should_regenerate(track));
 				transfer_unfinished_notes(track, section_finish_time);
 				free_associated_voices(voice_map, voice_count, i);
-				track_generate(track, section_finish_time);
+				if(!cue_time_reset)
+				{
+					composer_update_state(&composer);
+				}
+				track_generate(track, section_finish_time, &composer);
 
 				cue_time_reset = true;
 
