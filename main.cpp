@@ -30,61 +30,61 @@ g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpth
 Table Of Contents...............................................................
 
 1. Utility and Math
-  §1.1 Globally-Useful Things
-  §1.2 Clock Declarations
-  §1.3 Logging Declarations
-  §1.4 Atomic Declarations
-  §1.5 Immediate Mode Drawing Declarations
-  §1.6 Random Number Generation
-  §1.7 Vectors
-  §1.8 Quaternions
-  §1.9 Matrices
-  §1.10 Complex Numbers
+	§1.1 Globally-Useful Things
+	§1.2 Clock Declarations
+	§1.3 Logging Declarations
+	§1.4 Atomic Declarations
+	§1.5 Immediate Mode Drawing Declarations
+	§1.6 Random Number Generation
+	§1.7 Vectors
+	§1.8 Quaternions
+	§1.9 Matrices
+	§1.10 Complex Numbers
 
 2. Physics
-  §2.1 Geometry Functions
-  §2.2 Bounding Volume Hierarchy
-  §2.3 Bounding Interval Hierarchy
-  §2.4 Collision Functions
-  §2.5 Frustum Functions
+	§2.1 Geometry Functions
+	§2.2 Bounding Volume Hierarchy
+	§2.3 Bounding Interval Hierarchy
+	§2.4 Collision Functions
+	§2.5 Frustum Functions
 
 3. Video
-  §3.1 OpenGL Function and Type Declarations
-  §3.2 Shader Functions
-  §3.3 Floor Functions
-  §3.4 Immediate Mode Functions
-  §3.5 Render System
-    §3.5.1 Shader Sources
+	§3.1 OpenGL Function and Type Declarations
+	§3.2 Shader Functions
+	§3.3 Floor Functions
+	§3.4 Immediate Mode Functions
+	§3.5 Render System
+		§3.5.1 Shader Sources
 
 4. Audio
-  §4.1 Format Conversion
-  §4.2 Oscillators
-  §4.3 Envelopes
-  §4.4 Filters
-  §4.5 Effects
-  §4.6 Voice
-  §4.7 Voice Map
-  §4.8 Track
-  §4.9 Stream
-  §4.10 Message Queue
-  §4.11 Generate Oscillation
-  §4.12 Audio System Declarations
+	§4.1 Format Conversion
+	§4.2 Oscillators
+	§4.3 Envelopes
+	§4.4 Filters
+	§4.5 Effects
+	§4.6 Voice
+	§4.7 Voice Map
+	§4.8 Track
+	§4.9 Stream
+	§4.10 Message Queue
+	§4.11 Generate Oscillation
+	§4.12 Audio System Declarations
 
 5. Game
-  §5.1 Game Functions
+	§5.1 Game Functions
 
 6. OpenGL Function Loading
 
 7. Compiler-Specific Implementations
-  §7.1 Atomic Functions
+	§7.1 Atomic Functions
 
 8. Platform-Specific Implementations
-  §8.1 Logging Functions
-  §8.2 Clock Functions
-  §8.3 Audio Functions
-    §8.3.1 Device
-    §8.3.2 Audio System Functions
-  §8.4 Platform Main Functions
+	§8.1 Logging Functions
+	§8.2 Clock Functions
+	§8.3 Audio Functions
+		§8.3.1 Device
+		§8.3.2 Audio System Functions
+	§8.4 Platform Main Functions
 */
 
 #if defined(__linux__)
@@ -256,6 +256,8 @@ void add_triangle(Triangle* triangle, Vector3 colour);
 
 // §1.6 Random Number Generation................................................
 
+// This has been named arandom rather than random because random() is the name
+// of a function in stdlib.h under POSIX. Thanks POSIX.
 namespace arandom {
 
 /*  Written in 2015 by Sebastiano Vigna (vigna@acm.org)
@@ -1012,6 +1014,7 @@ float abs(Complex x)
 
 float complex_angle(Complex x)
 {
+	ASSERT((x.r * x.r) + (x.i * x.i) != 0.0f);
 	return atan2(x.i, x.r);
 }
 
@@ -2877,22 +2880,22 @@ static void context_create()
 	context = ALLOCATE(Context, 1);
 	Context* c = context;
 
-    glGenVertexArrays(1, &c->vertex_array);
-    glBindVertexArray(c->vertex_array);
+	glGenVertexArrays(1, &c->vertex_array);
+	glBindVertexArray(c->vertex_array);
 
-    glGenBuffers(1, &c->buffer);
-    glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
+	glGenBuffers(1, &c->buffer);
+	glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
 
-    glBufferData(GL_ARRAY_BUFFER, sizeof(c->vertices), nullptr, GL_DYNAMIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(c->vertices), nullptr, GL_DYNAMIC_DRAW);
 
-    GLvoid* offset0 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, position));
-    GLvoid* offset1 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, colour));
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset0);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset1);
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(2);
+	GLvoid* offset0 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, position));
+	GLvoid* offset1 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, colour));
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset0);
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset1);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(2);
 
-    glBindVertexArray(0);
+	glBindVertexArray(0);
 }
 
 static void context_destroy()
@@ -2930,13 +2933,13 @@ void draw()
 		return;
 	}
 
-    glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
-    GLvoid* mapped_buffer = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
-    if(mapped_buffer)
-    {
-        memcpy(mapped_buffer, c->vertices, sizeof(VertexPC) * c->filled);
-        glUnmapBuffer(GL_ARRAY_BUFFER);
-    }
+	glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
+	GLvoid* mapped_buffer = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+	if(mapped_buffer)
+	{
+		memcpy(mapped_buffer, c->vertices, sizeof(VertexPC) * c->filled);
+		glUnmapBuffer(GL_ARRAY_BUFFER);
+	}
 
 	glUseProgram(context->shader);
 	GLint location = glGetUniformLocation(context->shader, "model_view_projection");
@@ -3311,9 +3314,9 @@ out vec2 surface_texcoord;
 
 void main()
 {
-    gl_Position = model_view_projection * vec4(position, 1.0);
-    // The texcoord is stored as a vertex colour because I'm lazy.
-    surface_texcoord = colour.xy;
+	gl_Position = model_view_projection * vec4(position, 1.0);
+	// The texcoord is stored as a vertex colour because I'm lazy.
+	surface_texcoord = colour.xy;
 }
 )";
 
@@ -3328,7 +3331,7 @@ in vec2 surface_texcoord;
 
 void main()
 {
-    output_colour = vec4(texture2D(texture, surface_texcoord).rgb, 1.0);
+	output_colour = vec4(texture2D(texture, surface_texcoord).rgb, 1.0);
 }
 )";
 
@@ -3351,14 +3354,14 @@ out float distance_to_camera;
 
 void main()
 {
-    vec4 position = model_view_projection * vec4(position, 1.0);
+	vec4 position = model_view_projection * vec4(position, 1.0);
 	gl_Position = position;
 	surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
 	surface_colour = colour;
 
-    float z_ndc = 2.0 * (position.z / position.w) - 1.0;
-    float z_eye = 2.0 * near * far / (far + near - z_ndc * (far - near));
-    distance_to_camera = (1.0 / fade_distance) * (z_eye - fade_distance);
+	float z_ndc = 2.0 * (position.z / position.w) - 1.0;
+	float z_eye = 2.0 * near * far / (far + near - z_ndc * (far - near));
+	distance_to_camera = (1.0 / fade_distance) * (z_eye - fade_distance);
 }
 )";
 
@@ -3382,10 +3385,10 @@ float half_lambert(vec3 n, vec3 l)
 
 void main()
 {
-    if(distance_to_camera < texture2D(dither_pattern, gl_FragCoord.xy / dither_pattern_side).r)
-    {
-        discard;
-    }
+	if(distance_to_camera < texture2D(dither_pattern, gl_FragCoord.xy / dither_pattern_side).r)
+	{
+		discard;
+	}
 	float light = half_lambert(surface_normal, light_direction);
 	output_colour = vec4(surface_colour * vec3(light), 1.0);
 }
@@ -4463,55 +4466,55 @@ static float envelope_apply(ADSR* envelope)
 	float result;
 	switch(envelope->state)
 	{
-        case ADSR::State::Attack:
-        {
-        	result = envelope->attack_base + envelope->prior * envelope->attack_coef;
-            if(result >= 1.0f)
-            {
-            	result = 1.0f;
-                envelope->state = ADSR::State::Decay;
-            }
-            break;
-        }
-        case ADSR::State::Decay:
-        {
-        	result = envelope->decay_base + envelope->prior * envelope->decay_coef;
-            if(result <= envelope->sustain)
-            {
-            	result = envelope->sustain;
-                envelope->state = ADSR::State::Sustain;
-            }
-            break;
-        }
-        case ADSR::State::Release:
-        {
-        	result = envelope->release_base + envelope->prior * envelope->release_coef;
-            if(result <= 0.05f)
-            {
-            	result = -0.00001f + 0.995 * envelope->prior;
-                envelope->state = ADSR::State::Post_Release;
-            }
-            break;
-        }
-        case ADSR::State::Post_Release:
-        {
-        	// This state is to reduce clicks by enforcing a ramp down to zero
-        	// that's soft even when the release ramp is fairly steep.
-        	result = -0.00001f + 0.995 * envelope->prior;
+		case ADSR::State::Attack:
+		{
+			result = envelope->attack_base + envelope->prior * envelope->attack_coef;
+			if(result >= 1.0f)
+			{
+				result = 1.0f;
+				envelope->state = ADSR::State::Decay;
+			}
+			break;
+		}
+		case ADSR::State::Decay:
+		{
+			result = envelope->decay_base + envelope->prior * envelope->decay_coef;
+			if(result <= envelope->sustain)
+			{
+				result = envelope->sustain;
+				envelope->state = ADSR::State::Sustain;
+			}
+			break;
+		}
+		case ADSR::State::Release:
+		{
+			result = envelope->release_base + envelope->prior * envelope->release_coef;
+			if(result <= 0.05f)
+			{
+				result = -0.00001f + 0.995 * envelope->prior;
+				envelope->state = ADSR::State::Post_Release;
+			}
+			break;
+		}
+		case ADSR::State::Post_Release:
+		{
+			// This state is to reduce clicks by enforcing a ramp down to zero
+			// that's soft even when the release ramp is fairly steep.
+			result = -0.00001f + 0.995 * envelope->prior;
 			if(result <= 0.0f)
 			{
 				envelope->prior = 0.0f;
 				envelope->state = ADSR::State::Neutral;
 			}
-        	break;
-        }
-        case ADSR::State::Sustain:
-        case ADSR::State::Neutral:
-        default:
-        {
-        	result = envelope->prior;
-        	break;
-        }
+			break;
+		}
+		case ADSR::State::Sustain:
+		case ADSR::State::Neutral:
+		default:
+		{
+			result = envelope->prior;
+			break;
+		}
 	}
 	envelope->prior = result;
 	return result;
@@ -4752,6 +4755,51 @@ static float sar_apply(SAR* filter, float sample)
 	filter->output_samples[0] = result;
 
 	return result;
+}
+
+// State-Variable Filter
+struct SVF
+{
+	float prior_low;
+	float prior_band;
+	float tuning;
+	float quality_factor;
+};
+
+static void svf_set_center_frequency(SVF* filter, float center_frequency)
+{
+	filter->tuning = 2.0f * sin(pi * center_frequency);
+}
+
+static void svf_set_damping(SVF* filter, float damping)
+{
+	filter->quality_factor = 2.0f * damping;
+}
+
+static void svf_reset(SVF* filter)
+{
+	filter->prior_low = 0.0f;
+	filter->prior_band = 0.0f;
+	svf_set_center_frequency(filter, 0.01f);
+	svf_set_damping(filter, 1.0f);
+}
+
+static float svf_apply(SVF* filter, float sample)
+{
+	float q = filter->quality_factor;
+	float t = filter->tuning;
+	float x0 = sample;
+	float l1 = filter->prior_low;
+	float b1 = filter->prior_band;
+
+	float h0 = x0 - l1 - (q * b1);
+	float b0 = (t * h0) + b1;
+	float l0 = (t * b0) + l1;
+
+	filter->prior_low = l0;
+	filter->prior_band = b0;
+
+	return b0;
 }
 
 // §4.5 Effects.................................................................
@@ -5141,11 +5189,41 @@ static float delay_apply(Delay* delay, float sample)
 	return result;
 }
 
+struct AutoWah
+{
+	SVF filter;
+	float phase_accumulator;
+	float rate;
+	float mix;
+	float depth;
+	float breadth;
+};
+
+static void auto_wah_default(AutoWah* wah)
+{
+	svf_reset(&wah->filter);
+	wah->phase_accumulator = 0.0f;
+	wah->rate = 0.001f;
+	wah->mix = 0.8f;
+	wah->breadth = 0.03f;
+	wah->depth = 0.01f;
+}
+
+static float auto_wah_apply(AutoWah* wah, float sample)
+{
+	wah->phase_accumulator += wah->rate;
+	float phi = triangle_wave(wah->phase_accumulator);
+	float frequency = (wah->breadth * phi) + wah->depth + wah->breadth;
+	svf_set_center_frequency(&wah->filter, frequency);
+	float filtered = svf_apply(&wah->filter, sample);
+	return lerp(sample, filtered, wah->mix);
+}
+
 // §4.6 Voice...................................................................
 
 struct Voice
 {
-	ADSR envelope;
+	ADSR amp_envelope;
 	ADSR pitch_envelope;
 	float phase_accumulator;
 	float phase_step;
@@ -5155,12 +5233,12 @@ struct Voice
 
 static bool voice_is_unused(Voice* voice)
 {
-	return voice->envelope.state == ADSR::State::Neutral;
+	return voice->amp_envelope.state == ADSR::State::Neutral;
 }
 
 static void voice_gate(Voice* voice, bool gate, bool use_pitch_envelope)
 {
-	envelope_gate(&voice->envelope, gate);
+	envelope_gate(&voice->amp_envelope, gate);
 	if(use_pitch_envelope)
 	{
 		envelope_gate(&voice->pitch_envelope, gate);
@@ -5169,7 +5247,7 @@ static void voice_gate(Voice* voice, bool gate, bool use_pitch_envelope)
 
 static void voice_reset(Voice* voice)
 {
-	envelope_reset(&voice->envelope);
+	envelope_reset(&voice->amp_envelope);
 	envelope_reset(&voice->pitch_envelope);
 	voice->phase_accumulator = 0.0f;
 	voice->phase_step = 0.0f;
@@ -5600,10 +5678,10 @@ void track_render(Track* track, int track_index, Voice* voices, VoiceEntry* voic
 				index = assign_voice(voice_map, count, track_index, start->note);
 				Voice* voice = &voices[index];
 				voice_reset(voice);
-				envelope_set_attack(&voice->envelope, envelope_settings->amp.attack);
-				envelope_set_decay(&voice->envelope, envelope_settings->amp.decay);
-				envelope_set_sustain(&voice->envelope, envelope_settings->amp.sustain);
-				envelope_set_release(&voice->envelope, envelope_settings->amp.release);
+				envelope_set_attack(&voice->amp_envelope, envelope_settings->amp.attack);
+				envelope_set_decay(&voice->amp_envelope, envelope_settings->amp.decay);
+				envelope_set_sustain(&voice->amp_envelope, envelope_settings->amp.sustain);
+				envelope_set_release(&voice->amp_envelope, envelope_settings->amp.release);
 				envelope_set_attack(&voice->pitch_envelope, envelope_settings->pitch.attack);
 				envelope_set_decay(&voice->pitch_envelope, envelope_settings->pitch.decay);
 				envelope_set_sustain(&voice->pitch_envelope, envelope_settings->pitch.sustain);
@@ -5769,6 +5847,7 @@ struct Message
 		{
 			bool on;
 		} boop;
+
 		struct
 		{
 			int track;
@@ -5841,6 +5920,7 @@ enum class EffectType
 	Vibrato,
 	Chorus,
 	Delay,
+	Auto_Wah,
 };
 
 struct Effect
@@ -5861,6 +5941,7 @@ struct Effect
 		Vibrato vibrato;
 		Chorus chorus;
 		Delay delay;
+		AutoWah auto_wah;
 	};
 	EffectType type;
 };
@@ -6057,6 +6138,19 @@ static void apply_effects(Effect* effects, int count, Stream* stream)
 				}
 				break;
 			}
+			case EffectType::Auto_Wah:
+			{
+				for(int i = 0; i < frames; ++i)
+				{
+					float value = stream->samples[stream->channels * i];
+					value = auto_wah_apply(&effect->auto_wah, value);
+					for(int j = 0; j < stream->channels; ++j)
+					{
+						stream->samples[stream->channels * i + j] = value;
+					}
+				}
+				break;
+			}
 		}
 	}
 }
@@ -6231,6 +6325,11 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 			delay_create(&effect->delay);
 			break;
 		}
+		case EffectType::Auto_Wah:
+		{
+			auto_wah_default(&effect->auto_wah);
+			break;
+		}
 	}
 
 	return effect;
@@ -6241,8 +6340,8 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 	// These are some pretty absurd macros. Basically, most of the oscillators
 	// have identical loops, but the function called to generate the next sample
 	// is different and may have slightly different parameters. So, the loop is
-	// split to the part before the call that needs to be different, and the
-	// part after. Then the line that needs to be different is placed between them.
+	// split to the part before the bit that needs to be different, and the
+	// part after. Then whatever needs to be different is placed between them.
 	//
 	// Also, to prevent having to check whether the pitch envelope is needed for
 	// every frame, it's easiest to split that into its own loop and just check
@@ -6262,7 +6361,7 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 			voice->phase_accumulator += voice->phase_step;
 
 #define JUST_OSCILLATOR_BOTTOM_PART()\
-			value = envelope_apply(&voice->envelope) * value;\
+			value = envelope_apply(&voice->amp_envelope) * value;\
 			for(int k = 0; k < stream->channels; ++k)\
 			{\
 				stream->samples[stream->channels * i + k] += value;\
@@ -6287,7 +6386,7 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 			voice->phase_accumulator += voice->phase_step;
 
 #define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()\
-			value = envelope_apply(&voice->envelope) * value;\
+			value = envelope_apply(&voice->amp_envelope) * value;\
 			for(int k = 0; k < stream->channels; ++k)\
 			{\
 				stream->samples[stream->channels * i + k] += value;\
@@ -6678,6 +6777,13 @@ void transform(Table* table, Complex* samples, int count, double delta_time, boo
 	for(int i = 0; i < count; ++i)
 	{
 		samples[i] *= delta_time;
+	}
+	if(inverse)
+	{
+		for(int i = 0; i < count; ++i)
+		{
+			samples[i] /= count;
+		}
 	}
 }
 
@@ -7484,7 +7590,7 @@ static void* run_mixer_thread(void* argument)
 
 	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
 	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
-	float delta_time_per_frame = 1.0 / static_cast<double>(device_description.sample_rate);
+	float delta_time_per_frame = 1.0f / device_description.sample_rate;
 
 	// Setup voices.
 
@@ -7493,7 +7599,7 @@ static void* run_mixer_thread(void* argument)
 	for(int i = 0; i < voice_count; ++i)
 	{
 		Voice* voice = &voices[i];
-		envelope_setup(&voice->envelope);
+		envelope_setup(&voice->amp_envelope);
 		envelope_setup(&voice->pitch_envelope);
 	}
 
@@ -7538,9 +7644,6 @@ static void* run_mixer_thread(void* argument)
 	track_generate(&tracks[4], first_section_length, &composer);
 
 	// Setup test instruments and streams.
-
-	BPF bandpass;
-	bpf_reset(&bandpass);
 
 	int streams_count = tracks_count + 1;
 	Stream streams[streams_count];
@@ -7636,6 +7739,14 @@ static void* run_mixer_thread(void* argument)
 	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
 	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
 	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
+
+	effect = instrument_add_effect(lead, EffectType::Auto_Wah);
+	AutoWah* wah = &effect->auto_wah;
+	svf_set_damping(&wah->filter, 0.2f);
+	wah->breadth = 1250.0f / device_description.sample_rate;
+	wah->depth = 200.0f / device_description.sample_rate;
+	wah->rate = 1.0f / device_description.sample_rate;
+	wah->mix = 0.8f;
 
 	Instrument* rim = &instruments[4];
 	rim->oscillator = Oscillator::Noise;
