@@ -3218,6 +3218,237 @@ static void draw_bih_tree(bih::Tree* tree, int target_depth)
 	immediate::draw();
 }
 
+// Colour.......................................................................
+
+static const Vector3 colour_white = vector3_one;
+static const Vector3 colour_black = vector3_zero;
+static const Vector3 colour_red = vector3_unit_x;
+static const Vector3 colour_green = vector3_unit_y;
+static const Vector3 colour_blue = vector3_unit_z;
+static const Vector3 colour_cyan = {0.0f, 1.0f, 1.0f};
+static const Vector3 colour_magenta = {1.0f, 0.0f, 1.0f};
+static const Vector3 colour_yellow = {1.0f, 1.0f, 0.0f};
+
+// Oscilloscope.................................................................
+
+static const int oscilloscope_channel_samples_count = 32768;
+static const int oscilloscope_channels_count = 2;
+static const float oscilloscope_hysteresis = 0.01f;
+static const int trace_points_count = 256;
+
+struct Oscilloscope
+{
+	struct Channel
+	{
+		float samples[oscilloscope_channel_samples_count];
+		int samples_index;
+		int samples_buffered;
+		int trigger_index;
+		bool active;
+	};
+
+	Channel channels[oscilloscope_channels_count];
+	float timebase;
+	float holdoff;
+	int sample_rate;
+	float range;
+	float trigger_level;
+	bool normalise;
+	bool disable_trigger;
+	bool trigger_rising_edge;
+};
+
+static void oscilloscope_default(Oscilloscope* scope)
+{
+	scope->sample_rate = 44100;
+	scope->holdoff = 500e-9f;
+	scope->timebase = 1.0f / 60.0f;
+	scope->range = 2.0f;
+	scope->trigger_level = 0.0f;
+	scope->disable_trigger = false;
+	scope->trigger_rising_edge = true;
+}
+
+static bool can_use_bitwise_and_to_cycle(int count)
+{
+	return is_power_of_two(count);
+}
+
+static int get_cyclic_distance(int a, int b, int range)
+{
+	if(a < b)
+	{
+		return b - a;
+	}
+	else
+	{
+		return b + (range - a);
+	}
+}
+
+static bool in_cyclic_interval(int x, int first, int second)
+{
+	if(second > first)
+	{
+		return x >= first && x <= second;
+	}
+	else
+	{
+		return x >= first || x <= second;
+	}
+}
+
+static void oscilloscope_set_trigger(Oscilloscope::Channel* channel, int index)
+{
+	int prior = channel->trigger_index;
+	int distance = get_cyclic_distance(prior, index, oscilloscope_channel_samples_count);
+	ASSERT(can_use_bitwise_and_to_cycle(oscilloscope_channel_samples_count));
+	int mask = oscilloscope_channel_samples_count - 1;
+	int tail = (channel->samples_index + channel->samples_buffered) & mask;
+	if(in_cyclic_interval(tail, prior, index))
+	{
+		channel->trigger_index = tail;
+		channel->samples_buffered = 0;
+	}
+	else
+	{
+		channel->trigger_index = index;
+		channel->samples_buffered -= distance;
+	}
+}
+
+static void oscilloscope_detect_trigger(Oscilloscope* scope, int channel_index)
+{
+	Oscilloscope::Channel* channel = &scope->channels[channel_index];
+
+	float trigger_level = scope->trigger_level;
+	bool disable_trigger = scope->disable_trigger;
+	bool rising = scope->trigger_rising_edge;
+
+	ASSERT(can_use_bitwise_and_to_cycle(oscilloscope_channel_samples_count));
+	int samples_mask = oscilloscope_channel_samples_count - 1;
+
+	int samples_to_wait = (scope->timebase + scope->holdoff) * scope->sample_rate;
+	int start = (channel->trigger_index + samples_to_wait) & samples_mask;
+	if(disable_trigger)
+	{
+		oscilloscope_set_trigger(channel, start);
+		return;
+	}
+
+	float first;
+	if(rising)
+	{
+		first = trigger_level - (oscilloscope_hysteresis * scope->range);
+	}
+	else
+	{
+		first = trigger_level + (oscilloscope_hysteresis * scope->range);
+	}
+	float second = trigger_level;
+
+	bool first_crossed = false;
+	int i = start;
+	float prior;
+	float level = channel->samples[i];
+	do
+	{
+		prior = level;
+		i = (i + 1) & samples_mask;
+		level = channel->samples[i];
+		if(prior <= first && level >= first)
+		{
+			first_crossed = true;
+		}
+		if(first_crossed && prior <= second && level >= second)
+		{
+			oscilloscope_set_trigger(channel, i);
+			return;
+		}
+	} while(i != start);
+
+	LOG_DEBUG("Failed to detect a trigger!");
+}
+
+static void oscilloscope_sample_data(Oscilloscope* scope, int channel_index, float* samples, int samples_count, int offset, int stride)
+{
+	Oscilloscope::Channel* channel = &scope->channels[channel_index];
+	if(channel->samples_buffered >= oscilloscope_channel_samples_count)
+	{
+		LOG_DEBUG("Oscilloscope buffer overflowed!");
+		return;
+	}
+
+	ASSERT(can_use_bitwise_and_to_cycle(oscilloscope_channel_samples_count));
+	int o = channel->samples_index;
+	for(int i = offset; i < samples_count; i += stride)
+	{
+		channel->samples[o] = samples[i];
+		o = (o + 1) & (oscilloscope_channel_samples_count - 1);
+	}
+	channel->samples_index = o;
+
+	channel->samples_buffered += samples_count / stride;
+}
+
+struct Trace
+{
+	float points[trace_points_count];
+};
+
+static void normalise_trace(Trace* trace)
+{
+	float min = FLT_MAX;
+	float max = -FLT_MAX;
+	for(int i = 0; i < trace_points_count; ++i)
+	{
+		float point = trace->points[i];
+		min = fmin(min, point);
+		max = fmax(max, point);
+	}
+	for(int i = 0; i < trace_points_count; ++i)
+	{
+		float x = trace->points[i];
+		x = (x - min) / (max - min);
+		trace->points[i] = 2.0f * x - 1.0f;
+	}
+}
+
+static void trace_oscilloscope_channel(Trace* trace, Oscilloscope* scope, int channel_index)
+{
+	oscilloscope_detect_trigger(scope, channel_index);
+	ASSERT(can_use_bitwise_and_to_cycle(oscilloscope_channel_samples_count));
+	Oscilloscope::Channel* channel = &scope->channels[channel_index];
+	int window = scope->timebase * scope->sample_rate;
+	for(int i = 0; i < trace_points_count; ++i)
+	{
+		int step = window * i / static_cast<float>(trace_points_count);
+		int o = (channel->trigger_index + step) & (oscilloscope_channel_samples_count - 1);
+		trace->points[i] = channel->samples[o];
+	}
+	if(scope->normalise)
+	{
+		normalise_trace(trace);
+	}
+}
+
+static void draw_trace(Trace* trace, float x, float y, float width, float height)
+{
+	Vector3 colour = colour_white;
+	float scale_y = height / 2.0f;
+	for(int i = 0; i < trace_points_count - 1; ++i)
+	{
+		float x0 = width * i / static_cast<float>(trace_points_count) + x;
+		float x1 = width * (i + 1) / static_cast<float>(trace_points_count) + x;
+		float y0 = scale_y * trace->points[i] + y;
+		float y1 = scale_y * trace->points[i + 1] + y;
+		Vector3 p0 = {x0, y0, 0.0f};
+		Vector3 p1 = {x1, y1, 0.0f};
+		immediate::add_line(p0, p1, colour);
+	}
+	immediate::draw();
+}
+
 // §3.5 Render System...........................................................
 
 namespace render {
@@ -3792,14 +4023,6 @@ static void cube_helix(Vector3* colours, int levels, float start_hue, float rota
 	}
 }
 
-static const int max_shader_uniform_locations = 8;
-
-struct Shader
-{
-	GLuint program;
-	GLint uniform_locations[max_shader_uniform_locations];
-};
-
 // Whole system
 
 struct CallList
@@ -3825,7 +4048,11 @@ Triangle* terrain_triangles;
 int terrain_triangles_count;
 CallList solid_calls;
 CallList fade_calls;
+Oscilloscope oscilloscope;
+const int traces_count = 2;
+Trace traces[traces_count];
 bool debug_draw_colliders = false;
+bool debug_show_oscilloscope = true;
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
@@ -3946,6 +4173,8 @@ static bool system_initialise()
 
 	immediate::context_create();
 	immediate::context->shader = shader_vertex_colour;
+
+	oscilloscope_default(&oscilloscope);
 
 	return true;
 }
@@ -4121,6 +4350,26 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 		glDepthMask(GL_TRUE);
 	}
+
+	// Draw screen-space debug UI.
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+
+	Matrix4 screen_view = matrix4_identity;
+	immediate::set_matrices(screen_view, screen_projection);
+
+	if(debug_show_oscilloscope)
+	{
+		float y[2] = {-128.0f, 128.0f};
+		for(int i = 0; i < traces_count; ++i)
+		{
+			trace_oscilloscope_channel(&traces[i], &oscilloscope, i);
+			draw_trace(&traces[i], -256.0, y[i], 512.0f, 128.0f);
+		}
+	}
+
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
 }
 
 } // namespace render
@@ -5839,6 +6088,9 @@ struct Message
 	{
 		Boop,
 		Note,
+		Oscilloscope_Settings,
+		Oscilloscope_Channel,
+		Oscilloscope_Samples,
 	} code;
 
 	union
@@ -5853,6 +6105,24 @@ struct Message
 			int track;
 			bool start;
 		} note;
+
+		struct
+		{
+			int sample_rate;
+		} oscilloscope_settings;
+
+		struct
+		{
+			int index;
+			bool active;
+		} oscilloscope_channel;
+
+		struct
+		{
+			float* array;
+			int frames;
+			int channels;
+		} oscilloscope_samples;
 	};
 };
 
@@ -5956,78 +6226,78 @@ static void apply_effects(Effect* effects, int count, Stream* stream)
 		{
 			case EffectType::Low_Pass_Filter:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = lpf_apply(&effect->lowpass, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Band_Pass_Filter:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = bpf_apply(&effect->bandpass, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::High_Pass_Filter:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = hpf_apply(&effect->highpass, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Reverb:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = apf_apply(&effect->reverb, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Resonator:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = resonator_apply(&effect->resonator, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Overdrive:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = overdrive(value, effect->overdrive.factor);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
@@ -6036,117 +6306,117 @@ static void apply_effects(Effect* effects, int count, Stream* stream)
 			{
 				float gain = effect->distortion.gain;
 				float mix = effect->distortion.mix;
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = distort(value, gain, mix);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Ring_Modulator:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = ring_modulator_apply(&effect->ring_modulator, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Bitcrush:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = bitcrush_apply(&effect->bitcrush, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Flanger:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = flanger_apply(&effect->flanger, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Phaser:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = phaser_apply(&effect->phaser, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Vibrato:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = vibrato_apply(&effect->vibrato, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Chorus:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = chorus_apply(&effect->chorus, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Delay:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = delay_apply(&effect->delay, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
 			}
 			case EffectType::Auto_Wah:
 			{
-				for(int i = 0; i < frames; ++i)
+				for(int j = 0; j < frames; ++j)
 				{
-					float value = stream->samples[stream->channels * i];
+					float value = stream->samples[stream->channels * j];
 					value = auto_wah_apply(&effect->auto_wah, value);
-					for(int j = 0; j < stream->channels; ++j)
+					for(int k = 0; k < stream->channels; ++k)
 					{
-						stream->samples[stream->channels * i + j] = value;
+						stream->samples[stream->channels * j + k] = value;
 					}
 				}
 				break;
@@ -6185,6 +6455,7 @@ struct Instrument
 		} pulse;
 		struct
 		{
+			BPF filter;
 			int passband;
 		} noise;
 		struct
@@ -6335,19 +6606,86 @@ static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 	return effect;
 }
 
+static float process_sine(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = tau * theta / sample_rate;
+	return sin(voice->phase_accumulator);
+}
+
+static float process_square(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = theta / sample_rate;
+	return square_wave(voice->phase_accumulator);
+}
+
+static float process_pulse(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = theta / sample_rate;
+	return pulse_wave(voice->phase_accumulator, instrument->pulse.width);
+}
+
+static float process_triangle(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = theta / sample_rate;
+	return triangle_wave(voice->phase_accumulator);
+}
+
+static float process_sawtooth(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = theta / sample_rate;
+	return sawtooth_wave(voice->phase_accumulator);
+}
+
+static float process_rectified_sine(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = tau * theta / sample_rate;
+	return rectified_sin(voice->phase_accumulator);
+}
+
+static float process_cycloid(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	voice->phase_step = tau * theta / sample_rate;
+	return cycloid(voice->phase_accumulator);
+}
+
+static float process_noise(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	// Since white noise is uniform across the frequency spectrum, it can't be
+	// pitched as is, so a band-pass filter is used.
+	int passband_extent = instrument->noise.passband;
+	float delta_time = 1.0f / sample_rate;
+	float low = fmax(frequency_given_interval(theta, -passband_extent), 0.01f);
+	float high = frequency_given_interval(theta, passband_extent);
+	BPF* filter = &instrument->noise.filter;
+	bpf_set_passband(filter, low, high, delta_time);
+	float value = arandom::float_range(-1.0f, 1.0f);
+	value = bpf_apply(filter, value);
+	return value;
+}
+
+static float process_fm_sine(Voice* voice, Instrument* instrument, float theta, int sample_rate)
+{
+	float ratio = instrument->fm.ratio;
+	float gain = instrument->fm.gain;
+	voice->phase_step = tau * theta / sample_rate;
+	float fm_theta = ratio * theta;
+	voice->fm_phase_accumulator += voice->fm_phase_step;
+	voice->fm_phase_step = tau * fm_theta / sample_rate;
+	float phase = (gain / fm_theta) * (sin(voice->fm_phase_accumulator - pi_over_2) + 1.0f);
+	return sin(voice->phase_accumulator + phase);
+}
+
 static void generate_oscillation(Stream* stream, int start_frame, int end_frame, Track* track, int track_index, Instrument* instrument, Voice* voices, VoiceEntry* voice_map, int voices_count, int sample_rate, double time, History* history)
 {
 	// These are some pretty absurd macros. Basically, most of the oscillators
 	// have identical loops, but the function called to generate the next sample
-	// is different and may have slightly different parameters. So, the loop is
-	// split to the part before the bit that needs to be different, and the
-	// part after. Then whatever needs to be different is placed between them.
+	// is different.
 	//
 	// Also, to prevent having to check whether the pitch envelope is needed for
 	// every frame, it's easiest to split that into its own loop and just check
 	// once and enter the appropriate loop.
 
-#define JUST_OSCILLATOR_TOP_PART()\
+#define JUST_OSCILLATOR(process)\
 	for(int i = start_frame; i < end_frame; ++i)\
 	{\
 		double t = static_cast<double>(i - start_frame) / sample_rate + time;\
@@ -6358,9 +6696,8 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 			Voice* voice = &voices[result.voices[j]];\
 			int pitch = result.pitches[j];\
 			float theta = pitch_to_frequency(pitch);\
-			voice->phase_accumulator += voice->phase_step;
-
-#define JUST_OSCILLATOR_BOTTOM_PART()\
+			voice->phase_accumulator += voice->phase_step;\
+			float value = process(voice, instrument, theta, sample_rate);\
 			value = envelope_apply(&voice->amp_envelope) * value;\
 			for(int k = 0; k < stream->channels; ++k)\
 			{\
@@ -6369,7 +6706,7 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		}\
 	}
 
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART()\
+#define OSCILLATOR_WITH_PITCH_ENVELOPE(process)\
 	for(int i = start_frame; i < end_frame; ++i)\
 	{\
 		double t = static_cast<double>(i - start_frame) / sample_rate + time;\
@@ -6383,9 +6720,8 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 			float pitched_theta = pitch_to_frequency(pitch + semitones);\
 			float modulation = envelope_apply(&voice->pitch_envelope);\
 			float theta = lerp(unpitched_theta, pitched_theta, modulation);\
-			voice->phase_accumulator += voice->phase_step;
-
-#define OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART()\
+			voice->phase_accumulator += voice->phase_step;\
+			float value = process(voice, instrument, theta, sample_rate);\
 			value = envelope_apply(&voice->amp_envelope) * value;\
 			for(int k = 0; k < stream->channels; ++k)\
 			{\
@@ -6404,17 +6740,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = sin(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_sine);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = sin(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_sine);
 			}
 			break;
 		}
@@ -6422,17 +6752,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = square_wave(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_square);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = square_wave(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_square);
 			}
 			break;
 		}
@@ -6440,17 +6764,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = pulse_wave(voice->phase_accumulator, instrument->pulse.width);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_pulse);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = pulse_wave(voice->phase_accumulator, instrument->pulse.width);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_pulse);
 			}
 			break;
 		}
@@ -6458,17 +6776,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = triangle_wave(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_triangle);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = triangle_wave(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_triangle);
 			}
 			break;
 		}
@@ -6476,17 +6788,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = sawtooth_wave(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_sawtooth);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = theta / sample_rate;
-				float value = sawtooth_wave(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_sawtooth);
 			}
 			break;
 		}
@@ -6494,17 +6800,11 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = rectified_sin(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_rectified_sine);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = rectified_sin(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_rectified_sine);
 			}
 			break;
 		}
@@ -6512,81 +6812,42 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 		{
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = cycloid(voice->phase_accumulator);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_cycloid);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float value = cycloid(voice->phase_accumulator);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_cycloid);
 			}
 			break;
 		}
 		case Oscillator::Noise:
 		{
-			// Since noise is uniform across the frequency spectrum, it can't
-			// be pitched as is, so a band-pass filter is used.
-			float delta_time = 1.0f / sample_rate;
-			int passband_extent = instrument->noise.passband;
-			BPF filter;
-			bpf_reset(&filter);
+			bpf_reset(&instrument->noise.filter);
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.01f);
-				float high = frequency_given_interval(theta, passband_extent);
-				bpf_set_passband(&filter, low, high, delta_time);
-				float value = arandom::float_range(-1.0f, 1.0f);
-				value = bpf_apply(&filter, value);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_noise);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				float low = fmax(frequency_given_interval(theta, -passband_extent), 0.01f);
-				float high = frequency_given_interval(theta, passband_extent);
-				bpf_set_passband(&filter, low, high, delta_time);
-				float value = arandom::float_range(-1.0f, 1.0f);
-				value = bpf_apply(&filter, value);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_noise);
 			}
 			break;
 		}
 		case Oscillator::FM_Sine:
 		{
-			float ratio = instrument->fm.ratio;
-			float gain = instrument->fm.gain;
 			if(use_pitch_envelope)
 			{
-				OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float fm_theta = ratio * theta;
-				voice->fm_phase_accumulator += voice->fm_phase_step;
-				voice->fm_phase_step = tau * fm_theta / sample_rate;
-				float phase = (gain / fm_theta) * (sin(voice->fm_phase_accumulator - pi_over_2) + 1.0f);
-				float value = sin(voice->phase_accumulator + phase);
-				OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART();
+				OSCILLATOR_WITH_PITCH_ENVELOPE(process_fm_sine);
 			}
 			else
 			{
-				JUST_OSCILLATOR_TOP_PART();
-				voice->phase_step = tau * theta / sample_rate;
-				float fm_theta = ratio * theta;
-				float phase = (gain / fm_theta) * (sin(tau * fm_theta * t - pi_over_2) + 1.0f);
-				float value = sin(voice->phase_accumulator + phase);
-				JUST_OSCILLATOR_BOTTOM_PART();
+				JUST_OSCILLATOR(process_fm_sine);
 			}
 			break;
 		}
 	}
-#undef OSCILLATOR_WITH_PITCH_ENVELOPE_TOP_PART
-#undef OSCILLATOR_WITH_PITCH_ENVELOPE_BOTTOM_PART
-#undef JUST_OSCILLATOR_TOP_PART
-#undef JUST_OSCILLATOR_BOTTOM_PART
+#undef OSCILLATOR_WITH_PITCH_ENVELOPE
+#undef JUST_OSCILLATOR
 }
 
 } // namespace audio
@@ -6873,6 +7134,31 @@ static void process_messages_from_the_audio_thread()
 						dancer_position = vector3_zero;
 					}
 				}
+				break;
+			}
+			case audio::Message::Code::Oscilloscope_Settings:
+			{
+				render::oscilloscope.sample_rate = message.oscilloscope_settings.sample_rate;
+				break;
+			}
+			case audio::Message::Code::Oscilloscope_Channel:
+			{
+				int channel_index = message.oscilloscope_channel.index;
+				Oscilloscope::Channel* channel = &render::oscilloscope.channels[channel_index];
+				channel->active = message.oscilloscope_channel.active;
+				break;
+			}
+			case audio::Message::Code::Oscilloscope_Samples:
+			{
+				float* samples = message.oscilloscope_samples.array;
+				int frames = message.oscilloscope_samples.frames;
+				int channels = message.oscilloscope_samples.channels;
+				int samples_count = frames * channels;
+				for(int i = 0; i < channels; ++i)
+				{
+					oscilloscope_sample_data(&render::oscilloscope, i, samples, samples_count, i, channels);
+				}
+				DEALLOCATE(samples);
 				break;
 			}
 			default:
@@ -7538,6 +7824,20 @@ static void send_history_to_main_thread(History* history)
 	history_erase(history);
 }
 
+static void send_oscilloscope_samples_to_main_thread(float* samples, int frames, int channels)
+{
+	int samples_count = frames * channels;
+	float* copy = ALLOCATE(float, samples_count);
+	memcpy(copy, samples, sizeof(float) * samples_count);
+
+	Message message;
+	message.code = Message::Code::Oscilloscope_Samples;
+	message.oscilloscope_samples.array = copy;
+	message.oscilloscope_samples.frames = frames;
+	message.oscilloscope_samples.channels = channels;
+	game_send_message(&message);
+}
+
 static void process_messages_from_main_thread()
 {
 	Message message;
@@ -7740,14 +8040,6 @@ static void* run_mixer_thread(void* argument)
 	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
 	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
 
-	effect = instrument_add_effect(lead, EffectType::Auto_Wah);
-	AutoWah* wah = &effect->auto_wah;
-	svf_set_damping(&wah->filter, 0.2f);
-	wah->breadth = 1250.0f / device_description.sample_rate;
-	wah->depth = 200.0f / device_description.sample_rate;
-	wah->rate = 1.0f / device_description.sample_rate;
-	wah->mix = 0.8f;
-
 	Instrument* rim = &instruments[4];
 	rim->oscillator = Oscillator::Noise;
 	rim->envelope_settings.amp.attack = 0.008f * device_description.sample_rate;
@@ -7755,11 +8047,6 @@ static void* run_mixer_thread(void* argument)
 	rim->envelope_settings.amp.sustain = 0.0f;
 	rim->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
 	rim->envelope_settings.pitch.use = false;
-	rim->envelope_settings.pitch.semitones = 24;
-	rim->envelope_settings.pitch.attack = 0.03f * device_description.sample_rate;
-	rim->envelope_settings.pitch.decay = 0.2f * device_description.sample_rate;
-	rim->envelope_settings.pitch.sustain = 0.0f;
-	rim->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
 	rim->noise.passband = 36;
 
 	effect = instrument_add_effect(rim, EffectType::Resonator);
@@ -7784,6 +8071,25 @@ static void* run_mixer_thread(void* argument)
 
 	streams[4].volume = 0.6f;
 	streams[4].pan = -0.7f;
+
+	// Send some preparatory messages to the main thread.
+	{
+		Message message;
+
+		message.code = Message::Code::Oscilloscope_Channel;
+		message.oscilloscope_channel.index = 0;
+		message.oscilloscope_channel.active = true;
+		game_send_message(&message);
+
+		message.code = Message::Code::Oscilloscope_Channel;
+		message.oscilloscope_channel.index = 1;
+		message.oscilloscope_channel.active = true;
+		game_send_message(&message);
+
+		message.code = Message::Code::Oscilloscope_Settings;
+		message.oscilloscope_settings.sample_rate = device_description.sample_rate;
+		game_send_message(&message);
+	}
 
 	while(atomic_flag_test_and_set(&quit))
 	{
@@ -7847,8 +8153,14 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
+		// Combine the generated audio to a single compact array of samples.
+
 		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
+
+		send_oscilloscope_samples_to_main_thread(mixed_samples, frames, device_description.channels);
+
+		// Pass the completed audio to the device.
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
 		if(!stream_ready)
