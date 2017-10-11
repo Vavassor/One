@@ -1018,6 +1018,18 @@ float complex_angle(Complex x)
 	return atan2(x.i, x.r);
 }
 
+float complex_angle_or_zero(Complex x)
+{
+	if((x.r * x.r) + (x.i * x.i) == 0.0f)
+	{
+		return 0.0f;
+	}
+	else
+	{
+		return complex_angle(x);
+	}
+}
+
 Complex exp(Complex x)
 {
 	Complex result;
@@ -7048,7 +7060,242 @@ void transform(Table* table, Complex* samples, int count, double delta_time, boo
 	}
 }
 
+static void shift(Complex* samples, int samples_count)
+{
+	int n = samples_count / 2;
+	int s = (samples_count + 1) / 2;
+	for(int i = 0; i < n; ++i)
+	{
+	    Complex temp = samples[i];
+	    samples[i] = samples[i + s];
+	    samples[i + s] = temp;
+	}
+}
+
 } // namespace fft
+
+// Phase Vocoder................................................................
+
+static void copy_floats(float* to, float* from, int count)
+{
+	memmove(to, from, sizeof(float) * count);
+}
+
+static void zero_floats(float* x, int count)
+{
+	memset(x, 0, sizeof(float) * count);
+}
+
+static void hann_window(Complex* x, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		x[i].r *= 0.5f * (1.0f - cos(tau * i / static_cast<float>(count)));
+	}
+}
+
+static float wrap_pi(float x)
+{
+	float a = x + pi;
+	float m = -tau;
+	float result = a - m * floor(a / m) + pi;
+	ASSERT(result >= -pi - 1e-3f && result <= pi + 1e-3f);
+	return result;
+}
+
+struct PhaseVocoder
+{
+	fft::Table fft_table;
+	float* omega;
+	Complex* grain;
+	float* phi0;
+	float* psi;
+	float* overlap;
+	float* padded_input;
+	float* output;
+	int output_length;
+	int analysis_length;
+	int synthesis_length;
+	int window_length;
+};
+
+static void phase_vocoder_create(PhaseVocoder* vocoder)
+{
+	int window_length = 1024;
+	int analysis_length = 256;
+	int synthesis_length = 350;
+
+	vocoder->analysis_length = analysis_length;
+	vocoder->synthesis_length = synthesis_length;
+	vocoder->window_length = window_length;
+
+	vocoder->omega = ALLOCATE(float, vocoder->window_length);
+	for(int i = 0; i < window_length; ++i)
+	{
+		vocoder->omega[i] = tau * analysis_length * i / static_cast<float>(window_length);
+	}
+
+	vocoder->grain = ALLOCATE(Complex, vocoder->window_length);
+	vocoder->phi0 = ALLOCATE(float, vocoder->window_length);
+	vocoder->psi = ALLOCATE(float, vocoder->window_length);
+	// This is padded with a zero at the end so the linear interpolation step
+	// uses a zero for the right point on the last sample.
+	vocoder->overlap = ALLOCATE(float, vocoder->window_length + 1);
+
+	vocoder->padded_input = nullptr;
+	vocoder->output = nullptr;
+	vocoder->output_length = 0;
+
+	fft::table_compute(&vocoder->fft_table, vocoder->window_length);
+}
+
+static void phase_vocoder_destroy(PhaseVocoder* vocoder)
+{
+	if(vocoder)
+	{
+		SAFE_DEALLOCATE(vocoder->omega);
+		SAFE_DEALLOCATE(vocoder->grain);
+		SAFE_DEALLOCATE(vocoder->phi0);
+		SAFE_DEALLOCATE(vocoder->psi);
+		SAFE_DEALLOCATE(vocoder->overlap);
+
+		SAFE_DEALLOCATE(vocoder->padded_input);
+		SAFE_DEALLOCATE(vocoder->output);
+
+		fft::table_destroy(&vocoder->fft_table);
+	}
+}
+
+static int phase_vocoder_setup(PhaseVocoder* vocoder, float* samples, int samples_count)
+{
+	int window_length = vocoder->window_length;
+	int analysis_length = vocoder->analysis_length;
+
+	int left_padding = window_length;
+	int right_padding = window_length - samples_count % analysis_length;
+	int padded_length = left_padding + samples_count + right_padding;
+	vocoder->padded_input = REALLOCATE(vocoder->padded_input, float, padded_length);
+	float* padded = vocoder->padded_input;
+	zero_floats(padded, padded_length);
+	copy_floats(&padded[left_padding], samples, samples_count);
+
+	zero_floats(vocoder->phi0, window_length);
+	zero_floats(vocoder->psi, window_length);
+
+	return padded_length;
+}
+
+static void synthesize_hop(PhaseVocoder* vocoder, int i, float hop_ratio)
+{
+	int window_length = vocoder->window_length;
+
+	float* padded = vocoder->padded_input;
+	float* omega = vocoder->omega;
+	Complex* grain = vocoder->grain;
+	float* phi0 = vocoder->phi0;
+	float* psi = vocoder->psi;
+
+	// Take a windowed view of the input samples and transfer it to the
+	// frequency domain.
+	fft::make_complex(&padded[i], grain, window_length, 1);
+	hann_window(grain, window_length);
+	fft::shift(grain, window_length);
+	fft::transform(&vocoder->fft_table, grain, window_length, 1.0f, false);
+
+	// Compute the phase change and accumulate it with the change from
+	// prior iterations.
+	for(int j = 0; j < window_length; ++j)
+	{
+		float phi1 = complex_angle_or_zero(grain[j]);
+		float delta_phi = omega[j] + wrap_pi(phi1 - phi0[j] - omega[j]);
+		psi[j] = wrap_pi(psi[j] + delta_phi * hop_ratio);
+		phi0[j] = phi1;
+	}
+
+	// Recombine with the magnitude of the original window, transfer back
+	// to the time domain and re-window its output.
+	for(int j = 0; j < window_length; ++j)
+	{
+		grain[j] = polar(abs(grain[j]), psi[j]);
+	}
+	fft::transform(&vocoder->fft_table, grain, window_length, 1.0f, true);
+	fft::shift(grain, window_length);
+	hann_window(grain, window_length);
+}
+
+static void dilate_time(PhaseVocoder* vocoder, float* samples, int samples_count)
+{
+	int analysis_length = vocoder->analysis_length;
+	int synthesis_length = vocoder->synthesis_length;
+	int window_length = vocoder->window_length;
+	float hop_ratio = synthesis_length / static_cast<float>(analysis_length);
+
+	int padded_length = phase_vocoder_setup(vocoder, samples, samples_count);
+
+	int result_content_length = ceil(padded_length * hop_ratio);
+	int result_padded_length = result_content_length + window_length;
+	vocoder->output = REALLOCATE(vocoder->output, float, result_padded_length);
+	vocoder->output_length = result_content_length;
+	zero_floats(vocoder->output, result_padded_length);
+
+	Complex* grain = vocoder->grain;
+	float* result = vocoder->output;
+	int end = padded_length - window_length;
+
+	for(int i0 = 0, i1 = 0; i0 < end; i0 += analysis_length, i1 += synthesis_length)
+	{
+		synthesize_hop(vocoder, i0, hop_ratio);
+
+		for(int j = 0; j < window_length; ++j)
+		{
+			result[i1 + j] += grain[j].r;
+		}
+	}
+
+	copy_floats(result, &result[window_length], result_content_length);
+}
+
+static void pitch_shift(PhaseVocoder* vocoder, float* samples, int samples_count)
+{
+	int analysis_length = vocoder->analysis_length;
+	int synthesis_length = vocoder->synthesis_length;
+	int window_length = vocoder->window_length;
+	float hop_ratio = synthesis_length / static_cast<float>(analysis_length);
+
+	int padded_length = phase_vocoder_setup(vocoder, samples, samples_count);
+
+	int lx = floor(window_length * analysis_length / static_cast<float>(synthesis_length));
+	int result_padded_length = lx + padded_length;
+	int result_content_length = samples_count;
+	vocoder->output = REALLOCATE(vocoder->output, float, result_padded_length);
+	vocoder->output_length = result_content_length;
+	zero_floats(vocoder->output, result_padded_length);
+
+	float* result = vocoder->output;
+	Complex* grain = vocoder->grain;
+	float* ov = vocoder->overlap;
+	int end = padded_length - window_length;
+
+	for(int i = 0; i < end; i += analysis_length)
+	{
+		synthesize_hop(vocoder, i, hop_ratio);
+		for(int j = 0; j < window_length; ++j)
+		{
+			ov[j] = grain[j].r;
+		}
+
+		// Interpolate and add into the result.
+		for(int j = 0; j < lx; ++j)
+		{
+			float x = j * window_length / static_cast<float>(lx);
+			int ix = floor(x);
+			float fx = x - ix;
+			result[i + j] += lerp(ov[ix], ov[ix + 1], fx);
+		}
+	}
+
+	copy_floats(result, &result[window_length], result_content_length);
+}
 
 // §5.1 Game Functions..........................................................
 
@@ -7826,6 +8073,8 @@ static void send_history_to_main_thread(History* history)
 
 static void send_oscilloscope_samples_to_main_thread(float* samples, int frames, int channels)
 {
+	// TODO: This allocates a buffer for every message and deallocates it on the
+	// receiving side. It's … not the best.
 	int samples_count = frames * channels;
 	float* copy = ALLOCATE(float, samples_count);
 	memcpy(copy, samples, sizeof(float) * samples_count);
