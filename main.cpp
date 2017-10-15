@@ -186,6 +186,18 @@ static bool is_power_of_two(unsigned int x)
 	return (x != 0) && !(x & (x - 1));
 }
 
+static u32 get_next_power_of_two(u32 x)
+{
+	x -= 1;
+	x |= x >> 1;
+	x |= x >> 2;
+	x |= x >> 4;
+	x |= x >> 8;
+	x |= x >> 16;
+	x += 1;
+	return x;
+}
+
 const float tau = 6.28318530717958647692f;
 const float pi = 3.14159265358979323846f;
 const float pi_over_2 = 1.57079632679489661923f;
@@ -6980,6 +6992,14 @@ void make_complex(float* samples, Complex* result, int count, int channels)
 	}
 }
 
+void make_real(Complex* samples, float* result, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		result[i] = samples[i].r;
+	}
+}
+
 void make_amplitude_spectrum(Complex* samples, float* result, int count)
 {
 	for(int i = 0; i < count; ++i)
@@ -7086,11 +7106,24 @@ static void zero_floats(float* x, int count)
 	memset(x, 0, sizeof(float) * count);
 }
 
+static float hann(int i, int count)
+{
+	return 0.5f * (1.0f - cos(tau * i / static_cast<float>(count)));
+}
+
 static void hann_window(Complex* x, int count)
 {
 	for(int i = 0; i < count; ++i)
 	{
 		x[i].r *= 0.5f * (1.0f - cos(tau * i / static_cast<float>(count)));
+	}
+}
+
+static void hann_window(float* x, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		x[i] *= 0.5f * (1.0f - cos(tau * i / static_cast<float>(count)));
 	}
 }
 
@@ -7123,7 +7156,7 @@ static void phase_vocoder_create(PhaseVocoder* vocoder)
 {
 	int window_length = 1024;
 	int analysis_length = 256;
-	int synthesis_length = 350;
+	int synthesis_length = 208;
 
 	vocoder->analysis_length = analysis_length;
 	vocoder->synthesis_length = synthesis_length;
@@ -7295,6 +7328,133 @@ static void pitch_shift(PhaseVocoder* vocoder, float* samples, int samples_count
 	}
 
 	copy_floats(result, &result[window_length], result_content_length);
+}
+
+// Waveform Similarity and Overlap Add..........................................
+
+static int find_greatest_cross_correlation(float* s0, int s0_count, float* s1, int s1_count, int max_lag)
+{
+	int max_index = 0;
+	float max = -FLT_MAX;
+	for(int i = -max_lag; i <= max_lag; ++i)
+	{
+		float sum = 0.0f;
+		for(int j0 = 0; j0 < s0_count; ++j0)
+		{
+			int j1 = j0 + i;
+			if(j1 >= 0 && j1 < s1_count)
+			{
+				sum += s0[j0] * s1[j1];
+			}
+		}
+		// The normalized cross correlation would be the sum at this point
+		// divided by the square root of the product of the sums of s0 and s1.
+		// Like: √(Σs₀×Σs₁) But only the index of the maximum correlation is
+		// needed and not its actual value, so the normalization is skipped.
+		if(sum > max)
+		{
+			max = sum;
+			max_index = i + max_lag;
+		}
+	}
+	return max_index;
+}
+
+struct WSOLA
+{
+	float* output;
+	float* window_effect;
+	int output_count;
+	int analysis_shift;
+	int analysis_count;
+	int deltas;
+	float scale_factor;
+};
+
+static void wsola_create(WSOLA* dilator)
+{
+	dilator->output = nullptr;
+	dilator->window_effect = nullptr;
+	dilator->output_count = 0;
+	dilator->analysis_shift = 256;
+	dilator->analysis_count = 1024;
+	dilator->deltas = 128;
+	dilator->scale_factor = 2.0f;
+}
+
+static void wsola_destroy(WSOLA* dilator)
+{
+	if(dilator)
+	{
+		SAFE_DEALLOCATE(dilator->output);
+		SAFE_DEALLOCATE(dilator->window_effect);
+	}
+}
+
+static void wsola_dilate_time(WSOLA* dilator, float* samples, int samples_count)
+{
+	int analysis_shift = dilator->analysis_shift;
+	int analysis_count = dilator->analysis_count;
+	int deltas = dilator->deltas;
+	float scale_factor = dilator->scale_factor;
+
+	int dilated_count = floor(samples_count / scale_factor + analysis_count + 0.5f);
+	float* result = REALLOCATE(dilator->output, float, dilated_count);
+	dilator->output = result;
+	dilator->output_count = dilated_count;
+	float* window_effect = REALLOCATE(dilator->window_effect, float, dilated_count);
+	dilator->window_effect = window_effect;
+
+	int index0 = analysis_shift;
+	int index1;
+	int alpha = 0;
+	int result_index = 0;
+
+	while(index0 + analysis_count < samples_count && alpha + analysis_count + deltas + scale_factor * analysis_shift < samples_count)
+	{
+		// Determine the bounds of two segments of the signal to analyse.
+		alpha += round(scale_factor * analysis_shift);
+		index1 = MAX(alpha - deltas, 0);
+		int segment1_count = (alpha + analysis_count - 1 + deltas) - index1;
+		result_index += analysis_shift;
+
+		// Find the matching point in the two segments of the signal.
+		int max_index = find_greatest_cross_correlation(&samples[index0], analysis_count, &samples[index1], segment1_count, deltas);
+
+		// Overlap and add the result samples, using the matching point to
+		// position it. Also, keep a window normalization record for later.
+		int offset = alpha - deltas + max_index;
+		for(int i = 0; i < analysis_count; ++i)
+		{
+			float window_factor = hann(i, analysis_count);
+			result[result_index + i] += window_factor * samples[offset + i];
+			window_effect[result_index + i] += window_factor;
+		}
+
+		// Also set up the next analysis phase relative to the matching point.
+		index0 = offset + analysis_shift;
+	}
+
+	// The windowing process causes amplitude fluctuation in the output that
+	// needs to be normalised out. The epsilon just prevents dividing by zero
+	// in places where succeeding windows may not overlap and leave a space of
+	// non-windowed silence.
+	for(int i = 0; i < dilated_count; ++i)
+	{
+		result[i] /= window_effect[i] + FLT_EPSILON;
+	}
+}
+
+static void resample_linear(float* samples, int samples_count, float* result, int result_count)
+{
+	float ratio = (samples_count - 1) / static_cast<float>(result_count);
+	for(int i = 0; i < result_count; ++i)
+	{
+		float x = i * ratio;
+		int xi = floor(x);
+		float xf = x - xi;
+		result[i] = lerp(samples[xi], samples[xi + 1], xf);
+	}
 }
 
 // §5.1 Game Functions..........................................................
@@ -8194,7 +8354,7 @@ static void* run_mixer_thread(void* argument)
 
 	// Setup test instruments and streams.
 
-	int streams_count = tracks_count + 1;
+	int streams_count = tracks_count + 2;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
@@ -8340,6 +8500,45 @@ static void* run_mixer_thread(void* argument)
 		game_send_message(&message);
 	}
 
+	struct
+	{
+		float* samples;
+		float* dilated;
+		float* shifted;
+		int samples_count;
+		int dilated_count;
+		int shifted_count;
+	} weep;
+	weep.samples_count = 8192;
+	weep.samples = ALLOCATE(float, weep.samples_count);
+	weep.shifted_count = weep.samples_count;
+	weep.shifted = ALLOCATE(float, weep.shifted_count);
+	{
+		float theta = 440.0f;
+		float phase_accumulator = 0.0f;
+		float phase_step = tau * theta / device_description.sample_rate;
+		for(int i = 0; i < weep.samples_count; ++i)
+		{
+			theta -= 0.03f;
+			phase_accumulator += phase_step;
+			weep.samples[i] = sin(phase_accumulator);
+			phase_step = tau * theta / device_description.sample_rate;
+		}
+	}
+
+	WSOLA dilator;
+	wsola_create(&dilator);
+	wsola_dilate_time(&dilator, weep.samples, weep.samples_count);
+	weep.dilated = dilator.output;
+	weep.dilated_count = dilator.output_count;
+	resample_linear(weep.dilated, weep.dilated_count, weep.shifted, weep.shifted_count);
+
+	streams[0].volume = 0.0f;
+	streams[1].volume = 0.0f;
+	streams[2].volume = 0.0f;
+	streams[3].volume = 0.0f;
+	streams[4].volume = 0.0f;
+
 	while(atomic_flag_test_and_set(&quit))
 	{
 		send_history_to_main_thread(&history);
@@ -8402,6 +8601,33 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
+		stream = &streams[6];
+		{
+			static int played = 0;
+			static bool fired = false;
+			if(!fired && time < 0.1)
+			{
+				played = 0;
+				fired = true;
+			}
+			else if(time > 1.0)
+			{
+				fired = false;
+			}
+			int left = weep.shifted_count - played;
+			int to_play = MIN(left, frames);
+			fill_with_silence(stream->samples, 0, stream->samples_count);
+			for(int i = 0; i < to_play; ++i)
+			{
+				float value = weep.shifted[played + i];
+				for(int j = 0; j < stream->channels; ++j)
+				{
+					stream->samples[stream->channels * i + j] = value;
+				}
+			}
+			played += to_play;
+		}
+
 		// Combine the generated audio to a single compact array of samples.
 
 		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
@@ -8461,6 +8687,9 @@ static void* run_mixer_thread(void* argument)
 	{
 		instrument_destroy(&instruments[i]);
 	}
+	DEALLOCATE(weep.samples);
+	wsola_destroy(&dilator);
+	DEALLOCATE(weep.shifted);
 
 	LOG_DEBUG("Audio thread shut down.");
 
