@@ -359,11 +359,36 @@ struct Vector2
 	float x, y;
 };
 
+static const Vector2 vector2_zero = {0.0f, 0.0f};
+
+Vector2 operator + (Vector2 v0, Vector2 v1)
+{
+	Vector2 result;
+	result.x = v0.x + v1.x;
+	result.y = v0.y + v1.y;
+	return result;
+}
+
+Vector2& operator += (Vector2& v0, Vector2 v1)
+{
+	v0.x += v1.x;
+	v0.y += v1.y;
+	return v0;
+}
+
 Vector2 operator - (Vector2 v0, Vector2 v1)
 {
 	Vector2 result;
 	result.x = v0.x - v1.x;
 	result.y = v0.y - v1.y;
+	return result;
+}
+
+Vector2 pointwise_multiply(Vector2 v0, Vector2 v1)
+{
+	Vector2 result;
+	result.x = v0.x * v1.x;
+	result.y = v0.y * v1.y;
 	return result;
 }
 
@@ -577,6 +602,15 @@ Vector3 operator * (Quaternion q, Vector3 v)
     Vector3 vector_part = {q.x, q.y, q.z};
     Vector3 t = 2.0f * cross(vector_part, v);
     return v + (q.w * t) + cross(vector_part, t);
+}
+
+Quaternion& operator /= (Quaternion& q, float s)
+{
+	q.w /= s;
+	q.x /= s;
+	q.y /= s;
+	q.z /= s;
+	return q;
 }
 
 Quaternion axis_angle_rotation(Vector3 axis, float angle)
@@ -3057,6 +3091,178 @@ static const Vector3 colour_cyan = {0.0f, 1.0f, 1.0f};
 static const Vector3 colour_magenta = {1.0f, 0.0f, 1.0f};
 static const Vector3 colour_yellow = {1.0f, 1.0f, 0.0f};
 
+// Text Drawing.................................................................
+
+// CHEAT ZONE!!! Hardcoded data ahead
+static u32 ascii_to_16_segment_table[94] =
+{
+	0b10000000000001100, // !
+	0b00000001000000100, // "
+	0b01010101000111100, // #
+	0b01010101010111011, // $
+	0b01110111010011001, // %
+	0b01001001101110001, // &
+	0b00000001000000000, // '
+	0b00001010000000000, // (
+	0b00100000100000000, // )
+	0b01111111100000000, // *
+	0b01010101000000000, // +
+	0b00100000000000000, // ,
+	0b01000100000000000, // -
+	0b10000000000000000, // .
+	0b00100010000000000, // /
+	0b00100010011111111, // 0
+	0b00000010000001100, // 1
+	0b01000100001110111, // 2
+	0b00000100000111111, // 3
+	0b01000100010001100, // 4
+	0b01001000010110011, // 5
+	0b01000100011111011, // 6
+	0b00000000000001111, // 7
+	0b01000100011111111, // 8
+	0b01000100010111111, // 9
+	0b00010001000000000, // :
+	0b00100001000000000, // ;
+	0b01001010000000000, // <
+	0b01000100000110000, // =
+	0b00100100100000000, // >
+	0b10010100000000111, // ?
+	0b00000101011110111, // @
+	0b01000100011001111, // A
+	0b00010101000111111, // B
+	0b00000000011110011, // C
+	0b00010001000111111, // D
+	0b01000000011110011, // E
+	0b01000000011000011, // F
+	0b00000100011111011, // G
+	0b01000100011001100, // H
+	0b00010001000110011, // I
+	0b00000000001111100, // J
+	0b01001010011000000, // K
+	0b00000000011110000, // L
+	0b00000010111001100, // M
+	0b00001000111001100, // N
+	0b00000000011111111, // O
+	0b01000100011000111, // P
+	0b00001000011111111, // Q
+	0b01001100011000111, // R
+	0b01000100010111011, // S
+	0b00010001000000011, // T
+	0b00000000011111100, // U
+	0b00100010011000000, // V
+	0b00101000011001100, // W
+	0b00101010100000000, // X
+	0b01000100010111100, // Y
+	0b00100010000110011, // Z
+	0b00010001000010010, // [
+	0b00001000100000000, /* \ */
+	0b00010001000100001, // ]
+	0b00101000000000000, // ^
+	0b00000000000110000, // _
+	0b00000000100000000, // `
+	0b01010000001110000, // a
+	0b01010000011100000, // b
+	0b01000000001100000, // c
+	0b00010100000011100, // d
+	0b01100000001100000, // e
+	0b01010101000000010, // f
+	0b01010001010100001, // g
+	0b01010000011000000, // h
+	0b00010000000000000, // i
+	0b00010001001100000, // j
+	0b00011011000000000, // k
+	0b00000000011000000, // l
+	0b01010100001001000, // m
+	0b01010000001000000, // n
+	0b01010000001100000, // o
+	0b01000001011000001, // p
+	0b01010001010000001, // q
+	0b01000000001000000, // r
+	0b01010000010100001, // s
+	0b01000000011100000, // t
+	0b00010000001100000, // u
+	0b00100000001000000, // v
+	0b00101000001001000, // w
+	0b00101010100000000, // x
+	0b00000101000011100, // y
+	0b01100000000100000, // z
+	0b01010001000010010, // {
+	0b00010001000000000, // |
+	0b00010101000100001, // }
+	0b01100110000000000, // ~
+};
+
+static Vector2 segment_lines[17][2] =
+{
+	{{0.25f, 1.0f}, {0.75f, 1.0f}},
+	{{0.75f, 1.0f}, {1.25f, 1.0f}},
+	{{1.25f, 1.0f}, {1.125f, 0.5f}},
+	{{1.125f, 0.5f}, {1.0f, 0.0f}},
+	{{0.5f, 0.0f}, {1.0f, 0.0f}},
+	{{0.0f, 0.0f}, {0.5f, 0.0f}},
+	{{0.0f, 0.0f}, {0.125f, 0.5f}},
+	{{0.125f, 0.5f}, {0.25f, 1.0f}},
+	{{0.25f, 1.0f}, {0.625f, 0.5f}},
+	{{0.625f, 0.5f}, {0.75f, 1.0f}},
+	{{0.625f, 0.5f}, {1.25f, 1.0f}},
+	{{0.625f, 0.5f}, {1.125f, 0.5f}},
+	{{0.625f, 0.5f}, {1.0f, 0.0f}},
+	{{0.5f, 0.0f}, {0.625f, 0.5f}},
+	{{0.0f, 0.0f}, {0.625f, 0.5f}},
+	{{0.125f, 0.5f}, {0.625f, 0.5f}},
+	{{1.25f, 0.0f}, {1.25f, 0.25f}},
+};
+// CHEAT ZONE exited, thank god
+
+static u32 ascii_to_16_segment_code(char c)
+{
+	ASSERT(c >= '!' && c <= '~');
+	return ascii_to_16_segment_table[c - '!'];
+}
+
+static void draw_segments(int s, Vector2 bottom_left, Vector2 glyph_dimensions, Vector3 colour)
+{
+	ASSERT(s >=0 && s <= 17);
+	Vector2 s0 = segment_lines[s][0];
+	Vector2 s1 = segment_lines[s][1];
+	s0 = pointwise_multiply(glyph_dimensions, s0) + bottom_left;
+	s1 = pointwise_multiply(glyph_dimensions, s1) + bottom_left;
+	Vector3 start = {s0.x, s0.y, 0.0f};
+	Vector3 end   = {s1.x, s1.y, 0.0f};
+	immediate::add_line(start, end, colour);
+}
+
+static void draw_16_segment_text(char* text, Vector2 bottom_left)
+{
+	const Vector2 glyph_dimensions = {15.0f, 24.0f};
+	float line_spacing = glyph_dimensions.y + 10.0f;
+	const float tracking = 10.0f;
+
+	Vector2 cursor = bottom_left;
+	while(*text)
+	{
+		char c = *text;
+		if(c == '\n')
+		{
+			cursor.y += line_spacing;
+		}
+		else if(c != ' ')
+		{
+			u32 code = ascii_to_16_segment_code(c);
+			for(int i = 0; i < 17; ++i)
+			{
+				if(code & (1 << i))
+				{
+					draw_segments(i, cursor, glyph_dimensions, colour_white);
+				}
+			}
+		}
+		cursor.x += glyph_dimensions.x + tracking;
+		text += 1;
+	}
+	immediate::draw();
+}
+
 // Oscilloscope.................................................................
 
 static const int oscilloscope_channel_samples_count = 32768;
@@ -4194,6 +4400,14 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 			trace_oscilloscope_channel(&traces[i], &oscilloscope, i);
 			draw_trace(&traces[i], -256.0, y[i], 512.0f, 128.0f);
 		}
+	}
+
+	// Draw a test for text readout.
+	{
+		char text[32];
+		snprintf(text, sizeof(text), "POSITION= %+.3f %+.3f %+.3f", position.x, position.y, position.z);
+		Vector2 bottom_left = {-370.0f, -280.0f};
+		draw_16_segment_text(text, bottom_left);
 	}
 
 	glDepthMask(GL_TRUE);
@@ -6690,7 +6904,7 @@ void system_send_message(Message* message);
 
 } // namespace audio
 
-// Waveform Similarity and Overlap Add..........................................
+// Waveform Similarity based Overlap-Add..........................................
 
 static float hann_window(int i, int count)
 {
@@ -6756,7 +6970,7 @@ static void wsola_destroy(WSOLA* dilator)
 	}
 }
 
-static void wsola_dilate_time(WSOLA* dilator, float* samples, int samples_count)
+static void dilate_time(WSOLA* dilator, float* samples, int samples_count)
 {
 	int analysis_shift = dilator->analysis_shift;
 	int analysis_count = dilator->analysis_count;
@@ -6820,6 +7034,13 @@ static void resample_linear(float* samples, int samples_count, float* result, in
 		float xf = x - xi;
 		result[i] = lerp(samples[xi], samples[xi + 1], xf);
 	}
+}
+
+static void shift_pitch(WSOLA* dilator, float* samples, int samples_count, int semitones)
+{
+	dilator->scale_factor = 1.0f / pow(2.0f, semitones / 12.0f);
+	dilate_time(dilator, samples, samples_count);
+	resample_linear(dilator->output, dilator->output_count, samples, samples_count);
 }
 
 // §5.1 Game Functions..........................................................
@@ -7719,7 +7940,7 @@ static void* run_mixer_thread(void* argument)
 
 	// Setup test instruments and streams.
 
-	int streams_count = tracks_count + 2;
+	int streams_count = tracks_count + 1;
 	Stream streams[streams_count];
 	for(int i = 0; i < streams_count; ++i)
 	{
@@ -7865,45 +8086,6 @@ static void* run_mixer_thread(void* argument)
 		game_send_message(&message);
 	}
 
-	struct
-	{
-		float* samples;
-		float* dilated;
-		float* shifted;
-		int samples_count;
-		int dilated_count;
-		int shifted_count;
-	} weep;
-	weep.samples_count = 8192;
-	weep.samples = ALLOCATE(float, weep.samples_count);
-	weep.shifted_count = weep.samples_count;
-	weep.shifted = ALLOCATE(float, weep.shifted_count);
-	{
-		float theta = 440.0f;
-		float phase_accumulator = 0.0f;
-		float phase_step = tau * theta / device_description.sample_rate;
-		for(int i = 0; i < weep.samples_count; ++i)
-		{
-			theta -= 0.03f;
-			phase_accumulator += phase_step;
-			weep.samples[i] = sin(phase_accumulator);
-			phase_step = tau * theta / device_description.sample_rate;
-		}
-	}
-
-	WSOLA dilator;
-	wsola_create(&dilator);
-	wsola_dilate_time(&dilator, weep.samples, weep.samples_count);
-	weep.dilated = dilator.output;
-	weep.dilated_count = dilator.output_count;
-	resample_linear(weep.dilated, weep.dilated_count, weep.shifted, weep.shifted_count);
-
-	streams[0].volume = 0.0f;
-	streams[1].volume = 0.0f;
-	streams[2].volume = 0.0f;
-	streams[3].volume = 0.0f;
-	streams[4].volume = 0.0f;
-
 	while(atomic_flag_test_and_set(&quit))
 	{
 		send_history_to_main_thread(&history);
@@ -7966,33 +8148,6 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
-		stream = &streams[6];
-		{
-			static int played = 0;
-			static bool fired = false;
-			if(!fired && time < 0.1)
-			{
-				played = 0;
-				fired = true;
-			}
-			else if(time > 1.0)
-			{
-				fired = false;
-			}
-			int left = weep.shifted_count - played;
-			int to_play = MIN(left, frames);
-			fill_with_silence(stream->samples, 0, stream->samples_count);
-			for(int i = 0; i < to_play; ++i)
-			{
-				float value = weep.shifted[played + i];
-				for(int j = 0; j < stream->channels; ++j)
-				{
-					stream->samples[stream->channels * i + j] = value;
-				}
-			}
-			played += to_play;
-		}
-
 		// Combine the generated audio to a single compact array of samples.
 
 		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
@@ -8052,9 +8207,6 @@ static void* run_mixer_thread(void* argument)
 	{
 		instrument_destroy(&instruments[i]);
 	}
-	DEALLOCATE(weep.samples);
-	wsola_destroy(&dilator);
-	DEALLOCATE(weep.shifted);
 
 	LOG_DEBUG("Audio thread shut down.");
 
