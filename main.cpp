@@ -384,6 +384,26 @@ Vector2 operator - (Vector2 v0, Vector2 v1)
 	return result;
 }
 
+Vector2& operator -= (Vector2& v0, Vector2 v1)
+{
+	v0.x -= v1.x;
+	v0.y -= v1.y;
+	return v0;
+}
+
+Vector2 operator / (Vector2 v, float s)
+{
+	Vector2 result;
+	result.x = v.x / s;
+	result.y = v.y / s;
+	return result;
+}
+
+Vector2 operator - (Vector2 v)
+{
+	return {-v.x, -v.y};
+}
+
 Vector2 pointwise_multiply(Vector2 v0, Vector2 v1)
 {
 	Vector2 result;
@@ -3093,106 +3113,225 @@ static const Vector3 colour_yellow = {1.0f, 1.0f, 0.0f};
 
 // Text Drawing.................................................................
 
-// CHEAT ZONE!!! Hardcoded data ahead
-static u32 ascii_to_16_segment_table[94] =
+struct Rect
 {
-	0b10000000000001100, // !
-	0b00000001000000100, // "
-	0b01010101000111100, // #
-	0b01010101010111011, // $
-	0b01110111010011001, // %
-	0b01001001101110001, // &
-	0b00000001000000000, // '
-	0b00001010000000000, // (
-	0b00100000100000000, // )
-	0b01111111100000000, // *
-	0b01010101000000000, // +
-	0b00100000000000000, // ,
-	0b01000100000000000, // -
-	0b10000000000000000, // .
-	0b00100010000000000, // /
-	0b00100010011111111, // 0
-	0b00000010000001100, // 1
-	0b01000100001110111, // 2
-	0b00000100000111111, // 3
-	0b01000100010001100, // 4
-	0b01001000010110011, // 5
-	0b01000100011111011, // 6
-	0b00000000000001111, // 7
-	0b01000100011111111, // 8
-	0b01000100010111111, // 9
-	0b00010001000000000, // :
-	0b00100001000000000, // ;
-	0b01001010000000000, // <
-	0b01000100000110000, // =
-	0b00100100100000000, // >
-	0b10010100000000111, // ?
-	0b00000101011110111, // @
-	0b01000100011001111, // A
-	0b00010101000111111, // B
-	0b00000000011110011, // C
-	0b00010001000111111, // D
-	0b01000000011110011, // E
-	0b01000000011000011, // F
-	0b00000100011111011, // G
-	0b01000100011001100, // H
-	0b00010001000110011, // I
-	0b00000000001111100, // J
-	0b01001010011000000, // K
-	0b00000000011110000, // L
-	0b00000010111001100, // M
-	0b00001000111001100, // N
-	0b00000000011111111, // O
-	0b01000100011000111, // P
-	0b00001000011111111, // Q
-	0b01001100011000111, // R
-	0b01000100010111011, // S
-	0b00010001000000011, // T
-	0b00000000011111100, // U
-	0b00100010011000000, // V
-	0b00101000011001100, // W
-	0b00101010100000000, // X
-	0b01000100010111100, // Y
-	0b00100010000110011, // Z
-	0b00010001000010010, // [
-	0b00001000100000000, /* \ */
-	0b00010001000100001, // ]
-	0b00101000000000000, // ^
-	0b00000000000110000, // _
-	0b00000000100000000, // `
-	0b01010000001110000, // a
-	0b01010000011100000, // b
-	0b01000000001100000, // c
-	0b00010100000011100, // d
-	0b01100000001100000, // e
-	0b01010101000000010, // f
-	0b01010001010100001, // g
-	0b01010000011000000, // h
-	0b00010000000000000, // i
-	0b00010001001100000, // j
-	0b00011011000000000, // k
-	0b00000000011000000, // l
-	0b01010100001001000, // m
-	0b01010000001000000, // n
-	0b01010000001100000, // o
-	0b01000001011000001, // p
-	0b01010001010000001, // q
-	0b01000000001000000, // r
-	0b01010000010100001, // s
-	0b01000000011100000, // t
-	0b00010000001100000, // u
-	0b00100000001000000, // v
-	0b00101000001001000, // w
-	0b00101010100000000, // x
-	0b00000101000011100, // y
-	0b01100000000100000, // z
-	0b01010001000010010, // {
-	0b00010001000000000, // |
-	0b00010101000100001, // }
-	0b01100110000000000, // ~
+	Vector2 bottom_left;
+	Vector2 dimensions;
 };
 
-static Vector2 segment_lines[17][2] =
+static bool clip_test(float q, float p, float* te, float* tl)
+{
+	if(p == 0.0f)
+	{
+		return q < 0.0f;
+	}
+	float t = q / p;
+	if(p > 0.0f)
+	{
+		if(t > *tl)
+		{
+			return false;
+		}
+		if(t > *te)
+		{
+			*te = t;
+		}
+	}
+	else
+	{
+		if(t < *te)
+		{
+			return false;
+		}
+		if(t < *tl)
+		{
+			*tl = t;
+		}
+	}
+	return true;
+}
+
+static bool almost_zero(float x)
+{
+	return x > -1e-6f && x < 1e-6f;
+}
+
+static bool clip_line(Rect rect, Vector2* p0, Vector2* p1)
+{
+	// This uses the Liang–Barsky line clipping algorithm.
+
+	float x0 = p0->x;
+	float y0 = p0->y;
+	float x1 = p1->x;
+	float y1 = p1->y;
+
+	// the rectangle's boundaries
+	float x_min = rect.bottom_left.x;
+	float x_max = rect.bottom_left.x + rect.dimensions.x;
+	float y_min = rect.bottom_left.y;
+	float y_max = rect.bottom_left.y + rect.dimensions.y;
+
+	// for the line segment (x0, y0) to (x1, y1), derive the parametric form
+	// of its line:
+	// x = x0 + t * (x1 - x0)
+	// y = y0 + t * (y1 - y0)
+
+	float dx = x1 - x0;
+	float dy = y1 - y0;
+
+	if((almost_zero(dx) && almost_zero(dy)) && (x0 < x_min || x0 > x_max || y0 < y_min || y0 > y_max))
+	{
+		// The line is a point and is outside the rectangle.
+		return false;
+	}
+
+	float te = 0.0f; // entering
+	float tl = 1.0f; // leaving
+	if(
+		clip_test(x_min - x0, +dx, &te, &tl) &&
+		clip_test(x0 - x_max, -dx, &te, &tl) &&
+		clip_test(y_min - y0, +dy, &te, &tl) &&
+		clip_test(y0 - y_max, -dy, &te, &tl))
+	{
+		if(tl < 1.0f)
+		{
+			x1 = x0 + (tl * dx);
+			y1 = y0 + (tl * dy);
+		}
+		if(te > 0.0f)
+		{
+			x0 += te * dx;
+			y0 += te * dy;
+		}
+
+		p0->x = x0;
+		p0->y = y0;
+		p1->x = x1;
+		p1->y = y1;
+		return true;
+	}
+	else
+	{
+		// The line must be entirely outside rectangle.
+		return false;
+	}
+}
+
+// 16-Segment Display Numbering:
+//
+//  -0--|--1-
+// |\   9   /|
+// | 8  |  10|
+// 7  \ | /  2
+// --15- -11--
+// 6  / | \  3
+// | 14 | 12 |
+// |/   13  \|
+//  -5--|--4-
+//
+// The number is also the bit number in the 16-segment code. So segment 0
+// being on/off is the least significant bit, and 15, the most significant.
+
+// CHEAT ZONE!!! Hardcoded data ahead
+static u16 ascii_to_16_segment_table[94] =
+{
+	0b0000000000001100, // !
+	0b0000001000000100, // "
+	0b1010101000111100, // #
+	0b1010101010111011, // $
+	0b1110111010011001, // %
+	0b1001001101110001, // &
+	0b0000001000000000, // '
+	0b0001010000000000, // (
+	0b0100000100000000, // )
+	0b1111111100000000, // *
+	0b1010101000000000, // +
+	0b0100000000000000, // ,
+	0b1000100000000000, // -
+	0b0001000000000000, // .
+	0b0100010000000000, // /
+	0b0100010011111111, // 0
+	0b0000010000001100, // 1
+	0b1000100001110111, // 2
+	0b0000100000111111, // 3
+	0b1000100010001100, // 4
+	0b1001000010110011, // 5
+	0b1000100011111011, // 6
+	0b0000000000001111, // 7
+	0b1000100011111111, // 8
+	0b1000100010111111, // 9
+	0b0000000000110011, // :
+	0b0100000000000011, // ;
+	0b1001010000000000, // <
+	0b1000100000110000, // =
+	0b0100100100000000, // >
+	0b0010100000000111, // ?
+	0b0000101011110111, // @
+	0b1000100011001111, // A
+	0b0010101000111111, // B
+	0b0000000011110011, // C
+	0b0010001000111111, // D
+	0b1000000011110011, // E
+	0b1000000011000011, // F
+	0b0000100011111011, // G
+	0b1000100011001100, // H
+	0b0010001000110011, // I
+	0b0000000001111100, // J
+	0b1001010011000000, // K
+	0b0000000011110000, // L
+	0b0000010111001100, // M
+	0b0001000111001100, // N
+	0b0000000011111111, // O
+	0b1000100011000111, // P
+	0b0001000011111111, // Q
+	0b1001100011000111, // R
+	0b1000100010111011, // S
+	0b0010001000000011, // T
+	0b0000000011111100, // U
+	0b0100010011000000, // V
+	0b0101000011001100, // W
+	0b0101010100000000, // X
+	0b0010010100000000, // Y
+	0b0100010000110011, // Z
+	0b0010001000010010, // [
+	0b0001000100000000, /* \ */
+	0b0010001000100001, // ]
+	0b0101000000000000, // ^
+	0b0000000000110000, // _
+	0b0000000100000000, // `
+	0b1010000001110000, // a
+	0b1000100011111000, // b
+	0b1000100001110000, // c
+	0b1000100001111100, // d
+	0b1100000001110000, // e
+	0b1010101000000010, // f
+	0b1000100010111111, // g
+	0b1000100011001000, // h
+	0b0010000000000000, // i
+	0b0000000000111000, // j
+	0b1001100011000000, // k
+	0b0000000001110000, // l
+	0b1010100001001000, // m
+	0b1000100001001000, // n
+	0b1000100001111000, // o
+	0b1000100011000111, // p
+	0b1000100010001111, // q
+	0b1000100001000000, // r
+	0b0001100000110000, // s
+	0b1010101000010000, // t
+	0b0000000001111000, // u
+	0b0100000001000000, // v
+	0b0101000001001000, // w
+	0b1101100000000000, // x
+	0b1000100010111100, // y
+	0b1100000000110000, // z
+	0b1010001000010010, // {
+	0b0010001000000000, // |
+	0b0010101000100001, // }
+	0b0000000000000011, // ~
+};
+
+static Vector2 segment_lines[16][2] =
 {
 	{{0.25f, 1.0f}, {0.75f, 1.0f}},
 	{{0.75f, 1.0f}, {1.25f, 1.0f}},
@@ -3210,57 +3349,324 @@ static Vector2 segment_lines[17][2] =
 	{{0.5f, 0.0f}, {0.625f, 0.5f}},
 	{{0.0f, 0.0f}, {0.625f, 0.5f}},
 	{{0.125f, 0.5f}, {0.625f, 0.5f}},
-	{{1.25f, 0.0f}, {1.25f, 0.25f}},
 };
 // CHEAT ZONE exited, thank god
 
-static u32 ascii_to_16_segment_code(char c)
+static u16 ascii_to_16_segment_code(char c)
 {
 	ASSERT(c >= '!' && c <= '~');
 	return ascii_to_16_segment_table[c - '!'];
 }
 
-static void draw_segments(int s, Vector2 bottom_left, Vector2 glyph_dimensions, Vector3 colour)
+static Vector3 make_vector3(Vector2 v)
 {
-	ASSERT(s >=0 && s <= 17);
-	Vector2 s0 = segment_lines[s][0];
-	Vector2 s1 = segment_lines[s][1];
-	s0 = pointwise_multiply(glyph_dimensions, s0) + bottom_left;
-	s1 = pointwise_multiply(glyph_dimensions, s1) + bottom_left;
-	Vector3 start = {s0.x, s0.y, 0.0f};
-	Vector3 end   = {s1.x, s1.y, 0.0f};
-	immediate::add_line(start, end, colour);
+	return {v.x, v.y, 0.0f};
 }
 
-static void draw_16_segment_text(char* text, Vector2 bottom_left)
+static void draw_16_segment_glyph(u16 code, Rect glyph, Rect clip, Vector3 colour)
 {
-	const Vector2 glyph_dimensions = {15.0f, 24.0f};
-	float line_spacing = glyph_dimensions.y + 10.0f;
-	const float tracking = 10.0f;
-
-	Vector2 cursor = bottom_left;
-	while(*text)
+	for(int i = 0; i < 16; ++i)
 	{
-		char c = *text;
-		if(c == '\n')
+		if(code & (1 << i))
 		{
-			cursor.y += line_spacing;
-		}
-		else if(c != ' ')
-		{
-			u32 code = ascii_to_16_segment_code(c);
-			for(int i = 0; i < 17; ++i)
+			Vector2 s0 = segment_lines[i][0];
+			Vector2 s1 = segment_lines[i][1];
+			s0 = pointwise_multiply(glyph.dimensions, s0) + glyph.bottom_left;
+			s1 = pointwise_multiply(glyph.dimensions, s1) + glyph.bottom_left;
+			if(clip_line(clip, &s0, &s1))
 			{
-				if(code & (1 << i))
-				{
-					draw_segments(i, cursor, glyph_dimensions, colour_white);
-				}
+				Vector3 start = make_vector3(s0);
+				Vector3 end = make_vector3(s1);
+				immediate::add_line(start, end, colour);
 			}
 		}
-		cursor.x += glyph_dimensions.x + tracking;
+	}
+}
+
+struct Font
+{
+	Vector2 glyph_dimensions;
+	float bearing_left;
+	float bearing_right;
+	float tracking;
+	float leading;
+};
+
+static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* font, Vector3 colour)
+{
+	if(!text)
+	{
+		return;
+	}
+
+	Vector2 glyph_dimensions = font->glyph_dimensions;
+	float advance = font->bearing_left + font->glyph_dimensions.x + font->bearing_right;
+	float leading = font->leading;
+	float tracking = font->tracking;
+
+	Vector2 pen = bottom_left;
+	while(*text)
+	{
+		char next_char = *text;
+		if(next_char == '\n')
+		{
+			pen.y -= leading;
+			pen.x = bottom_left.x;
+		}
+		else if(next_char != ' ')
+		{
+			u16 code = ascii_to_16_segment_code(next_char);
+			Rect glyph_rect = {pen, glyph_dimensions};
+			draw_16_segment_glyph(code, glyph_rect, clip_rect, colour);
+			pen.x += advance + tracking;
+		}
+		else
+		{
+			pen.x += advance + tracking;
+		}
 		text += 1;
 	}
 	immediate::draw();
+}
+
+// Tweaker......................................................................
+
+static const int tweaker_lines_count = 16;
+
+struct Tweaker
+{
+	char* lines[tweaker_lines_count];
+	Font font;
+	Vector2 dimensions;
+	float scroll;
+	int lines_count;
+	int selected;
+	int prior_selected;
+	bool on;
+};
+
+static float tweaker_get_max_scroll(Tweaker* tweaker)
+{
+	const float weird_offset = 0.5f;
+	return (tweaker->font.leading * tweaker->lines_count) - tweaker->dimensions.y + weird_offset;
+}
+
+static void tweaker_set_scroll(Tweaker* tweaker, float scroll)
+{
+	float max_scroll = tweaker_get_max_scroll(tweaker);
+	tweaker->scroll = clamp(scroll, 0.0f, max_scroll);
+}
+
+static int mod(int x, int n)
+{
+	return (x % n + n) % n;
+}
+
+static void tweaker_set_selection(Tweaker* tweaker, int index)
+{
+	int selected = mod(index, tweaker->lines_count);
+	if(index == -1 && selected == tweaker->lines_count - 1)
+	{
+		float max_scroll = tweaker_get_max_scroll(tweaker);
+		tweaker_set_scroll(tweaker, max_scroll);
+		tweaker->prior_selected = selected;
+	}
+	else if(selected == 0 && index == tweaker->lines_count)
+	{
+		tweaker_set_scroll(tweaker, 0.0f);
+		tweaker->prior_selected = selected;
+	}
+	else
+	{
+		tweaker->prior_selected = tweaker->selected;
+	}
+	tweaker->selected = selected;
+}
+
+static Vector3 tweaker_get_line_colour(Tweaker* tweaker, int index)
+{
+	if(index == tweaker->selected)
+	{
+		return colour_black;
+	}
+	return colour_white;
+}
+
+static void tweaker_scroll(Tweaker* tweaker, float delta, float target)
+{
+	float distance = abs(delta);
+	const float scroll_speed = 4.0f;
+	if(distance < scroll_speed)
+	{
+		tweaker_set_scroll(tweaker, target);
+	}
+	else
+	{
+		float move = scroll_speed * delta / distance;
+		tweaker_set_scroll(tweaker, tweaker->scroll + move);
+	}
+}
+
+static void tweaker_update(Tweaker* tweaker)
+{
+	int selected = tweaker->selected;
+	int prior_selected = tweaker->prior_selected;
+
+	if(selected == prior_selected)
+	{
+		return;
+	}
+
+	float threshold = 2.0f * tweaker->font.leading;
+	float scroll = tweaker->scroll;
+
+	if(selected < prior_selected)
+	{
+		float target = (tweaker->font.leading * selected) - threshold;
+		float scroll_top = scroll;
+		if(target < scroll_top)
+		{
+			float delta = target - scroll_top;
+			tweaker_scroll(tweaker, delta, target);
+		}
+	}
+	else
+	{
+		float target = (tweaker->font.leading * (selected + 1)) + threshold;
+		float scroll_bottom = scroll + tweaker->dimensions.y;
+		if(target > scroll_bottom)
+		{
+			float delta = target - scroll_bottom;
+			float actual_target = target - tweaker->dimensions.y;
+			tweaker_scroll(tweaker, delta, actual_target);
+		}
+	}
+}
+
+static Quad rect_to_quad(Rect r)
+{
+	float left = r.bottom_left.x;
+	float right = r.bottom_left.x + r.dimensions.x;
+	float bottom = r.bottom_left.y;
+	float top = r.bottom_left.y + r.dimensions.y;
+
+	Quad result;
+	result.vertices[0] = {left, bottom, 0.0f};
+	result.vertices[1] = {right, bottom, 0.0f};
+	result.vertices[2] = {right, top, 0.0f};
+	result.vertices[3] = {left, top, 0.0f};
+	return result;
+}
+
+static bool clip_rects(Rect inner, Rect outer, Rect* result)
+{
+	float i_right = inner.bottom_left.x + inner.dimensions.x;
+	float o_right = outer.bottom_left.x + outer.dimensions.x;
+	i_right = fmin(i_right, o_right);
+
+	float i_top = inner.bottom_left.y + inner.dimensions.y;
+	float o_top = outer.bottom_left.y + outer.dimensions.y;
+	i_top = fmin(i_top, o_top);
+
+	float x = fmax(inner.bottom_left.x, outer.bottom_left.x);
+	float y = fmax(inner.bottom_left.y, outer.bottom_left.y);
+	float width = i_right - x;
+	float height = i_top - y;
+
+	if(width <= 0.0f && height <= 0.0f)
+	{
+		return false;
+	}
+	else
+	{
+		result->bottom_left.x = x;
+		result->bottom_left.y = y;
+		result->dimensions.x = width;
+		result->dimensions.y = height;
+		return true;
+	}
+}
+
+static void draw_rect(Rect rect, Vector3 colour)
+{
+	Quad quad = rect_to_quad(rect);
+	immediate::add_quad(&quad, colour);
+	immediate::draw();
+}
+
+static void draw_tweaker(Tweaker* tweaker)
+{
+	if(!tweaker->on)
+	{
+		// peace right out
+		return;
+	}
+
+	tweaker_update(tweaker);
+
+	// Draw the background.
+
+	Rect background_rect;
+	{
+		Vector2 dimensions = tweaker->dimensions;
+		Vector2 position = -dimensions / 2.0f;
+		background_rect = {position, dimensions};
+		draw_rect(background_rect, colour_black);
+	}
+
+	float scroll = tweaker->scroll;
+	float leading = tweaker->font.leading;
+	int selected = tweaker->selected;
+
+	// Draw the scrollbar.
+
+	const float scrollbar_width = 16.0f;
+	{
+		float right = background_rect.bottom_left.x + background_rect.dimensions.x;
+		float x = right - scrollbar_width;
+		float width = scrollbar_width;
+
+		float max_height = background_rect.dimensions.y;
+		float top = background_rect.bottom_left.y + max_height;
+		float height = max_height / ((leading * tweaker->lines_count) / max_height);
+		height = clamp(height, scrollbar_width, max_height);
+		float max_scroll = (leading * tweaker->lines_count) - max_height;
+		float y = top - height - scroll * (max_height - height) / max_scroll;
+
+		Rect rect = {{x, y}, {width, height}};
+		draw_rect(rect, colour_white);
+	}
+
+	Rect scroll_area = background_rect;
+	scroll_area.dimensions.x -= scrollbar_width;
+	float top = scroll_area.bottom_left.y + scroll_area.dimensions.y;
+
+	// Draw the background of the selected line.
+	{
+		float x = scroll_area.bottom_left.x;
+		float y = -(leading * (selected + 1)) + top + scroll;
+		Rect rect = {{x, y}, {scroll_area.dimensions.x, leading}};
+		if(clip_rects(rect, scroll_area, &rect))
+		{
+			draw_rect(rect, colour_white);
+		}
+	}
+
+	// Draw the lines of text themselves.
+
+	int start_index = scroll / leading;
+	start_index = MAX(start_index, 0);
+	int end_index = ceil((scroll + scroll_area.dimensions.y) / leading);
+	end_index = MIN(end_index, tweaker->lines_count);
+
+	for(int i = start_index; i < end_index; ++i)
+	{
+		float x = scroll_area.bottom_left.x;
+		float y = -(leading * (i + 1)) + top + scroll;
+		Vector2 glyph_position = {x, y};
+		Vector3 colour = tweaker_get_line_colour(tweaker, i);
+		draw_text(tweaker->lines[i], glyph_position, scroll_area, &tweaker->font, colour);
+	}
 }
 
 // Oscilloscope.................................................................
@@ -4240,7 +4646,7 @@ static void resize_viewport(int width, int height)
 	glViewport(0, 0, width, height);
 }
 
-static void system_update(Vector3 position, Vector3 dancer_position, World* world)
+static void system_update(Vector3 position, Vector3 dancer_position, World* world, Tweaker* tweaker)
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -4402,13 +4808,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		}
 	}
 
-	// Draw a test for text readout.
-	{
-		char text[32];
-		snprintf(text, sizeof(text), "POSITION= %+.3f %+.3f %+.3f", position.x, position.y, position.z);
-		Vector2 bottom_left = {-370.0f, -280.0f};
-		draw_16_segment_text(text, bottom_left);
-	}
+	draw_tweaker(tweaker);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -7045,7 +7445,7 @@ static void shift_pitch(WSOLA* dilator, float* samples, int samples_count, int s
 
 // §5.1 Game Functions..........................................................
 
-enum class UserKey {Space, Left, Up, Right, Down};
+enum class UserKey {Space, Left, Up, Right, Down, Tilde};
 
 namespace
 {
@@ -7053,7 +7453,7 @@ namespace
 	const int window_width = 800;
 	const int window_height = 600;
 	const double frame_frequency = 1.0 / 60.0;
-	const int key_count = 5;
+	const int key_count = 6;
 
 	bool keys_pressed[key_count];
 	bool old_keys_pressed[key_count];
@@ -7064,6 +7464,7 @@ namespace
 	World world;
 	Vector3 dancer_position;
 	audio::MessageQueue message_queue;
+	Tweaker tweaker;
 }
 
 static bool key_tapped(UserKey key)
@@ -7092,6 +7493,21 @@ static void game_create()
 	collider->triangles_count = render::terrain_triangles_count;
 	bool built = bih::build_tree(&collider->tree, collider->triangles, collider->triangles_count);
 	ASSERT(built);
+
+	// Setup the tweaker.
+	{
+		tweaker.lines[0] = "Unbelievably Strong";
+		tweaker.lines[4] = "Troll traits??";
+		tweaker.lines[10] = "But listen.";
+		tweaker.lines[15] = "Any length they can ^^";
+		tweaker.font.glyph_dimensions = {12.0f, 24.0f};
+		tweaker.font.bearing_left = 2.0f;
+		tweaker.font.bearing_right = 2.0f;
+		tweaker.font.leading = 34.0f;
+		tweaker.font.tracking = 0.0f;
+		tweaker.dimensions = {600.0f, 400.0f};
+		tweaker.lines_count = tweaker_lines_count;
+	}
 }
 
 static void game_destroy()
@@ -7182,47 +7598,67 @@ static void main_update()
 		}
 	}
 
-	// Update the player's movement state with the input.
-	Vector2 d = {0.0f, 0.0f};
-	if(key_pressed(UserKey::Left))
+	if(key_tapped(UserKey::Tilde))
 	{
-		d.x -= 1.0f;
+		tweaker.on = !tweaker.on;
 	}
-	if(key_pressed(UserKey::Right))
-	{
-		d.x += 1.0f;
-	}
-	if(key_pressed(UserKey::Up))
-	{
-		d.y += 1.0f;
-	}
-	if(key_pressed(UserKey::Down))
-	{
-		d.y -= 1.0f;
-	}
-	float l = length(d);
+
 	Vector3 velocity = vector3_zero;
-	if(l != 0.0f)
+	if(tweaker.on)
 	{
-		d.x /= l;
-		d.y /= l;
-		const float speed = 0.08f;
-		velocity.x += speed * d.x;
-		velocity.y += speed * d.y;
+		// Apply the input to the tweaker.
+		if(key_tapped(UserKey::Up))
+		{
+			tweaker_set_selection(&tweaker, tweaker.selected - 1);
+		}
+		if(key_tapped(UserKey::Down))
+		{
+			tweaker_set_selection(&tweaker, tweaker.selected + 1);
+		}
 	}
-	if(key_tapped(UserKey::Space))
+	else
 	{
-		audio::Message message;
-		message.code = audio::Message::Code::Boop;
-		message.boop.on = true;
-		audio::system_send_message(&message);
-	}
-	if(key_released(UserKey::Space))
-	{
-		audio::Message message;
-		message.code = audio::Message::Code::Boop;
-		message.boop.on = false;
-		audio::system_send_message(&message);
+		// Update the player's movement state with the input.
+		Vector2 d = {0.0f, 0.0f};
+		if(key_pressed(UserKey::Left))
+		{
+			d.x -= 1.0f;
+		}
+		if(key_pressed(UserKey::Right))
+		{
+			d.x += 1.0f;
+		}
+		if(key_pressed(UserKey::Up))
+		{
+			d.y += 1.0f;
+		}
+		if(key_pressed(UserKey::Down))
+		{
+			d.y -= 1.0f;
+		}
+		float l = length(d);
+		if(l != 0.0f)
+		{
+			d.x /= l;
+			d.y /= l;
+			const float speed = 0.08f;
+			velocity.x += speed * d.x;
+			velocity.y += speed * d.y;
+		}
+		if(key_tapped(UserKey::Space))
+		{
+			audio::Message message;
+			message.code = audio::Message::Code::Boop;
+			message.boop.on = true;
+			audio::system_send_message(&message);
+		}
+		if(key_released(UserKey::Space))
+		{
+			audio::Message message;
+			message.code = audio::Message::Code::Boop;
+			message.boop.on = false;
+			audio::system_send_message(&message);
+		}
 	}
 
 	Vector3 radius = {0.3f, 0.3f, 0.5f};
@@ -7234,12 +7670,15 @@ static void main_update()
 		position = vector3_zero;
 	}
 
-	render::system_update(position, dancer_position, &world);
+	render::system_update(position, dancer_position, &world, &tweaker);
 }
 
 // 6. OpenGL Function Loading...................................................
 
 #if defined(OS_LINUX)
+// glx.h includes X.h which has a typedef called Font. Defining _XTYPEDEF_FONT
+// causes this typedef to not be included.
+#define _XTYPEDEF_FONT
 #include <GL/glx.h>
 #if defined(Complex)
 #undef Complex
@@ -8408,7 +8847,7 @@ static void main_loop()
 		// Get key states for input.
 		char keys[32];
 		XQueryKeymap(display, keys);
-		int keysyms[key_count] = {XK_space, XK_Left, XK_Up, XK_Right, XK_Down};
+		int keysyms[key_count] = {XK_space, XK_Left, XK_Up, XK_Right, XK_Down, XK_asciitilde};
 		for(int i = 0; i < key_count; ++i)
 		{
 			int code = XKeysymToKeycode(display, keysyms[i]);
