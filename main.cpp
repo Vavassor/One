@@ -3431,19 +3431,130 @@ static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* fon
 
 // Tweaker......................................................................
 
-static const int tweaker_lines_count = 16;
+static const int tweaker_map_entries_count = 16;
+
+struct TweakerMap
+{
+	enum class EntryType
+	{
+		Int,
+		Float,
+		Bool,
+	};
+
+	struct Entry
+	{
+		union
+		{
+			struct
+			{
+				int* value;
+				int step;
+			} an_int;
+
+			struct
+			{
+				float* value;
+				float step;
+			} a_float;
+
+			struct
+			{
+				bool* value;
+			} a_bool;
+		};
+		const char* name;
+		EntryType type;
+	} entries[tweaker_map_entries_count];
+	int count;
+};
+
+static bool register_tweaker_bool(TweakerMap* map, const char* name, bool* value, bool initial)
+{
+	map->entries[map->count].a_bool.value = value;
+	map->entries[map->count].name = name;
+	map->entries[map->count].type = TweakerMap::EntryType::Bool;
+	map->count += 1;
+	ASSERT(map->count < tweaker_map_entries_count);
+	return initial;
+}
+
+static int register_tweaker_int(TweakerMap* map, const char* name, int* value, int initial)
+{
+	map->entries[map->count].an_int.value = value;
+	map->entries[map->count].an_int.step = 1;
+	map->entries[map->count].name = name;
+	map->entries[map->count].type = TweakerMap::EntryType::Int;
+	map->count += 1;
+	ASSERT(map->count < tweaker_map_entries_count);
+	return initial;
+}
+
+static float register_tweaker_float(TweakerMap* map, const char* name, float* value, float initial)
+{
+	map->entries[map->count].a_float.value = value;
+	map->entries[map->count].a_float.step = 0.1f;
+	map->entries[map->count].name = name;
+	map->entries[map->count].type = TweakerMap::EntryType::Float;
+	map->count += 1;
+	ASSERT(map->count < tweaker_map_entries_count);
+	return initial;
+}
+
+static const int tweaker_lines_count = tweaker_map_entries_count;
+static const int tweaker_line_char_limit = 24;
 
 struct Tweaker
 {
-	char* lines[tweaker_lines_count];
+	enum class Mode
+	{
+		Select,
+		Adjust_Value,
+		Adjust_Step,
+	};
+
+	enum class Key
+	{
+		Up,
+		Down,
+		Left,
+		Right,
+		Home,
+		End,
+		Page_Up,
+		Page_Down,
+		Enter,
+		Value,
+		Step,
+	};
+
+	char lines[tweaker_lines_count][tweaker_line_char_limit];
 	Font font;
+
+	struct
+	{
+		char value[tweaker_line_char_limit];
+		char step[tweaker_line_char_limit];
+	} readout;
+
 	Vector2 dimensions;
+	Mode mode;
 	float scroll;
 	int lines_count;
 	int selected;
 	int prior_selected;
 	bool on;
 };
+
+static void tweaker_turn_on(Tweaker* tweaker, bool on)
+{
+	if(!tweaker->on && on)
+	{
+		// When the tweaker is turned on, make sure the following is true.
+		tweaker->mode = Tweaker::Mode::Select;
+	}
+	tweaker->on = on;
+}
 
 static float tweaker_get_max_scroll(Tweaker* tweaker)
 {
@@ -3507,38 +3618,356 @@ static void tweaker_scroll(Tweaker* tweaker, float delta, float target)
 	}
 }
 
-static void tweaker_update(Tweaker* tweaker)
+static void adjust_value(TweakerMap* map, int selected, bool upward)
 {
-	int selected = tweaker->selected;
-	int prior_selected = tweaker->prior_selected;
+	TweakerMap::Entry* entry = &map->entries[selected];
+	switch(entry->type)
+	{
+		case TweakerMap::EntryType::Bool:
+		{
+			bool value = *entry->a_bool.value;
+			*entry->a_bool.value = !value;
+			break;
+		}
+		case TweakerMap::EntryType::Int:
+		{
+			if(upward)
+			{
+				*entry->an_int.value += entry->an_int.step;
+			}
+			else
+			{
+				*entry->an_int.value -= entry->an_int.step;
+			}
+			break;
+		}
+		case TweakerMap::EntryType::Float:
+		{
+			if(upward)
+			{
+				*entry->a_float.value += entry->a_float.step;
+			}
+			else
+			{
+				*entry->a_float.value -= entry->a_float.step;
+			}
+			break;
+		}
+	}
+}
 
-	if(selected == prior_selected)
+static void adjust_step(TweakerMap* map, int selected, bool upward)
+{
+	TweakerMap::Entry* entry = &map->entries[selected];
+	switch(entry->type)
+	{
+		case TweakerMap::EntryType::Bool:
+		{
+			// These have no step adjustment, so ignore any input.
+			break;
+		}
+		case TweakerMap::EntryType::Int:
+		{
+			int step = entry->an_int.step;
+			if(upward)
+			{
+				step *= 10;
+				step = MIN(step, 1e6);
+			}
+			else
+			{
+				step /= 10;
+				step = MAX(step, 1);
+			}
+			entry->an_int.step = step;
+			break;
+		}
+		case TweakerMap::EntryType::Float:
+		{
+			float step = entry->a_float.step;
+			if(upward)
+			{
+				step *= 10.0f;
+				step = fmin(step, 1e6f);
+			}
+			else
+			{
+				step /= 10.0f;
+				step = fmax(step, -1e-6f);
+			}
+			entry->a_float.step = step;
+			break;
+		}
+	}
+}
+
+static void try_to_enter_adjust_step_mode(Tweaker* tweaker, TweakerMap* map)
+{
+	TweakerMap::EntryType type = map->entries[tweaker->selected].type;
+	bool is_step_adjustable =
+		type == TweakerMap::EntryType::Int ||
+		type == TweakerMap::EntryType::Float;
+	if(is_step_adjustable)
+	{
+		tweaker->mode = Tweaker::Mode::Adjust_Step;
+	}
+}
+
+static void tweaker_handle_key(Tweaker* tweaker, TweakerMap* map, Tweaker::Key key)
+{
+	switch(tweaker->mode)
+	{
+		case Tweaker::Mode::Select:
+		{
+			switch(key)
+			{
+				case Tweaker::Key::Value:
+				{
+					tweaker->mode = Tweaker::Mode::Adjust_Value;
+					break;
+				}
+				case Tweaker::Key::Step:
+				{
+					try_to_enter_adjust_step_mode(tweaker, map);
+					break;
+				}
+				case Tweaker::Key::Up:
+				{
+					tweaker_set_selection(tweaker, tweaker->selected - 1);
+					break;
+				}
+				case Tweaker::Key::Down:
+				{
+					tweaker_set_selection(tweaker, tweaker->selected + 1);
+					break;
+				}
+				case Tweaker::Key::Home:
+				{
+					tweaker_set_selection(tweaker, tweaker_lines_count);
+					break;
+				}
+				case Tweaker::Key::End:
+				{
+					tweaker_set_selection(tweaker, -1);
+					break;
+				}
+				case Tweaker::Key::Page_Up:
+				{
+					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
+					int selection = MAX(tweaker->selected - lines_per_page, 0);
+					tweaker_set_selection(tweaker, selection);
+					break;
+				}
+				case Tweaker::Key::Page_Down:
+				{
+					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
+					int selection = MIN(tweaker->selected + lines_per_page, tweaker_lines_count - 1);
+					tweaker_set_selection(tweaker, selection);
+					break;
+				}
+				case Tweaker::Key::Enter:
+				case Tweaker::Key::Left:
+				case Tweaker::Key::Right:
+				{
+					break;
+				}
+			}
+			break;
+		}
+		case Tweaker::Mode::Adjust_Value:
+		{
+			switch(key)
+			{
+				case Tweaker::Key::Value:
+				case Tweaker::Key::Enter:
+				{
+					tweaker->mode = Tweaker::Mode::Select;
+					break;
+				}
+				case Tweaker::Key::Step:
+				{
+					try_to_enter_adjust_step_mode(tweaker, map);
+					break;
+				}
+				case Tweaker::Key::Up:
+				case Tweaker::Key::Right:
+				{
+					adjust_value(map, tweaker->selected, true);
+					break;
+				}
+				case Tweaker::Key::Down:
+				case Tweaker::Key::Left:
+				{
+					adjust_value(map, tweaker->selected, false);
+					break;
+				}
+				case Tweaker::Key::Home:
+				case Tweaker::Key::End:
+				case Tweaker::Key::Page_Up:
+				case Tweaker::Key::Page_Down:
+				{
+					break;
+				}
+			}
+			break;
+		}
+		case Tweaker::Mode::Adjust_Step:
+		{
+			switch(key)
+			{
+				case Tweaker::Key::Step:
+				case Tweaker::Key::Enter:
+				{
+					tweaker->mode = Tweaker::Mode::Select;
+					break;
+				}
+				case Tweaker::Key::Value:
+				{
+					tweaker->mode = Tweaker::Mode::Adjust_Value;
+					break;
+				}
+				case Tweaker::Key::Up:
+				case Tweaker::Key::Right:
+				{
+					adjust_step(map, tweaker->selected, true);
+					break;
+				}
+				case Tweaker::Key::Down:
+				case Tweaker::Key::Left:
+				{
+					adjust_step(map, tweaker->selected, false);
+					break;
+				}
+				case Tweaker::Key::Home:
+				case Tweaker::Key::End:
+				case Tweaker::Key::Page_Up:
+				case Tweaker::Key::Page_Down:
+				{
+					break;
+				}
+			}
+			break;
+		}
+	}
+}
+
+static const char* bool_to_string(bool b)
+{
+	if(b)
+	{
+		return "true";
+	}
+	else
+	{
+		return "false";
+	}
+}
+
+// Use this instead of the function strncpy from string.h, because strncpy
+// doesn't guarantee null-termination and should be considered hazardous.
+static int copy_string(char* to, int to_size, const char* from)
+{
+	ASSERT(from);
+	ASSERT(to);
+	int i;
+	for(i = 0; i < to_size - 1; ++i)
+	{
+		if(from[i] == '\0')
+		{
+			break;
+		}
+		to[i] = from[i];
+	}
+	to[i] = '\0';
+	ASSERT(i < to_size);
+	return i;
+}
+
+static void empty_string(char* s)
+{
+	s[0] = '\0';
+}
+
+static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
+{
+	if(!tweaker->on)
 	{
 		return;
 	}
 
-	float threshold = 2.0f * tweaker->font.leading;
-	float scroll = tweaker->scroll;
-
-	if(selected < prior_selected)
+	// Fill out the left panel with entry names.
+	for(int i = 0; i < map->count; ++i)
 	{
-		float target = (tweaker->font.leading * selected) - threshold;
-		float scroll_top = scroll;
-		if(target < scroll_top)
-		{
-			float delta = target - scroll_top;
-			tweaker_scroll(tweaker, delta, target);
-		}
+		copy_string(tweaker->lines[i], tweaker_line_char_limit, map->entries[i].name);
+	}
+
+	// Fill the right panel with the readout value and the step amount.
+
+	int selected = tweaker->selected;
+	int prior_selected = tweaker->prior_selected;
+
+	if(!map->entries[selected].name)
+	{
+		empty_string(tweaker->readout.value);
+		empty_string(tweaker->readout.step);
 	}
 	else
 	{
-		float target = (tweaker->font.leading * (selected + 1)) + threshold;
-		float scroll_bottom = scroll + tweaker->dimensions.y;
-		if(target > scroll_bottom)
+		switch(map->entries[selected].type)
 		{
-			float delta = target - scroll_bottom;
-			float actual_target = target - tweaker->dimensions.y;
-			tweaker_scroll(tweaker, delta, actual_target);
+			case TweakerMap::EntryType::Bool:
+			{
+				bool b = *map->entries[selected].a_bool.value;
+				const char* value = bool_to_string(b);
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
+				empty_string(tweaker->readout.step);
+				break;
+			}
+			case TweakerMap::EntryType::Int:
+			{
+				int value = *map->entries[selected].an_int.value;
+				int step = map->entries[selected].an_int.step;
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
+				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
+				break;
+			}
+			case TweakerMap::EntryType::Float:
+			{
+				float value = *map->entries[selected].a_float.value;
+				float step = map->entries[selected].a_float.step;
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
+				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
+				break;
+			}
+		}
+	}
+
+	// Update the scroll position in the left panel.
+	if(selected != prior_selected)
+	{
+		float threshold = 2.0f * tweaker->font.leading;
+		float scroll = tweaker->scroll;
+
+		if(selected < prior_selected)
+		{
+			float target = (tweaker->font.leading * selected) - threshold;
+			float scroll_top = scroll;
+			if(target < scroll_top)
+			{
+				float delta = target - scroll_top;
+				tweaker_scroll(tweaker, delta, target);
+			}
+		}
+		else
+		{
+			float target = (tweaker->font.leading * (selected + 1)) + threshold;
+			float scroll_bottom = scroll + tweaker->dimensions.y;
+			if(target > scroll_bottom)
+			{
+				float delta = target - scroll_bottom;
+				float actual_target = target - tweaker->dimensions.y;
+				tweaker_scroll(tweaker, delta, actual_target);
+			}
 		}
 	}
 }
@@ -3602,8 +4031,6 @@ static void draw_tweaker(Tweaker* tweaker)
 		return;
 	}
 
-	tweaker_update(tweaker);
-
 	// Draw the background.
 
 	Rect background_rect;
@@ -3614,6 +4041,9 @@ static void draw_tweaker(Tweaker* tweaker)
 		draw_rect(background_rect, colour_black);
 	}
 
+	Rect left_panel = background_rect;
+	left_panel.dimensions.x /= 2.0f;
+
 	float scroll = tweaker->scroll;
 	float leading = tweaker->font.leading;
 	int selected = tweaker->selected;
@@ -3622,12 +4052,12 @@ static void draw_tweaker(Tweaker* tweaker)
 
 	const float scrollbar_width = 16.0f;
 	{
-		float right = background_rect.bottom_left.x + background_rect.dimensions.x;
+		float right = left_panel.bottom_left.x + left_panel.dimensions.x;
 		float x = right - scrollbar_width;
 		float width = scrollbar_width;
 
-		float max_height = background_rect.dimensions.y;
-		float top = background_rect.bottom_left.y + max_height;
+		float max_height = left_panel.dimensions.y;
+		float top = left_panel.bottom_left.y + max_height;
 		float height = max_height / ((leading * tweaker->lines_count) / max_height);
 		height = clamp(height, scrollbar_width, max_height);
 		float max_scroll = (leading * tweaker->lines_count) - max_height;
@@ -3637,7 +4067,7 @@ static void draw_tweaker(Tweaker* tweaker)
 		draw_rect(rect, colour_white);
 	}
 
-	Rect scroll_area = background_rect;
+	Rect scroll_area = left_panel;
 	scroll_area.dimensions.x -= scrollbar_width;
 	float top = scroll_area.bottom_left.y + scroll_area.dimensions.y;
 
@@ -3663,11 +4093,103 @@ static void draw_tweaker(Tweaker* tweaker)
 	{
 		float x = scroll_area.bottom_left.x;
 		float y = -(leading * (i + 1)) + top + scroll;
-		Vector2 glyph_position = {x, y};
+		Vector2 text_position = {x, y};
 		Vector3 colour = tweaker_get_line_colour(tweaker, i);
-		draw_text(tweaker->lines[i], glyph_position, scroll_area, &tweaker->font, colour);
+		draw_text(tweaker->lines[i], text_position, scroll_area, &tweaker->font, colour);
+	}
+
+	// Draw the readout in the right panel.
+
+	Rect right_panel = left_panel;
+	right_panel.bottom_left.x += right_panel.dimensions.x;
+
+	float left = right_panel.bottom_left.x;
+	top = right_panel.bottom_left.y + right_panel.dimensions.y;
+
+	Vector2 text_position = {left, top - leading};
+	draw_text(tweaker->readout.value, text_position, right_panel, &tweaker->font, colour_white);
+	text_position.y -= leading;
+	draw_text(tweaker->readout.step, text_position, right_panel, &tweaker->font, colour_white);
+
+	// Draw indicators for the current mode.
+
+	float right = right_panel.bottom_left.x + right_panel.dimensions.x;
+	top = right_panel.bottom_left.y + right_panel.dimensions.y;
+	text_position = {right - 16.0f, top - leading};
+	char* mode_indicator = const_cast<char*>("<");
+	if(tweaker->mode == Tweaker::Mode::Adjust_Value)
+	{
+		draw_text(mode_indicator, text_position, right_panel, &tweaker->font, colour_white);
+	}
+	text_position.y -= leading;
+	if(tweaker->mode == Tweaker::Mode::Adjust_Step)
+	{
+		draw_text(mode_indicator, text_position, right_panel, &tweaker->font, colour_white);
+	}
+
+	// Draw right panel hints.
+
+	char* hint;
+	if(tweaker->mode == Tweaker::Mode::Adjust_Step)
+	{
+		hint = const_cast<char*>("[Enter] or [S] to\nfinish editing");
+	}
+	else if(tweaker->mode == Tweaker::Mode::Adjust_Value)
+	{
+		hint = const_cast<char*>("[Enter] or [V] to\nfinish editing");
+	}
+	else
+	{
+		hint = nullptr;
+	}
+
+	if(hint)
+	{
+		float bottom = right_panel.bottom_left.y;
+		const float weird_offset = 0.5f;
+		text_position = {left, bottom + leading + weird_offset};
+		draw_text(hint, text_position, right_panel, &tweaker->font, colour_white);
 	}
 }
+
+// The tweaker shouldn't be present in release mode. It isn't needed, but more
+// importantly these macros use initialisation to register its variables which
+// causes structures to become non-POD types. All structures in this file are
+// assumed to be POD, so many behaviours would become undefined. This isn't
+// likely to be any trouble in development but is strictly unacceptable for
+// shipping.
+//
+// Also, the tweaker acts on and monitors variables in a totally non-thread-safe
+// way. This is fine on the X86-based development computer, which treats reads
+// and writes as atomic (effectively), but, again, unacceptable for release.
+#if defined(NDEBUG)
+
+#define TWEAKER_BOOL(name, initial)\
+	bool name;
+
+#define TWEAKER_INT(name, initial)\
+	int name;
+
+#define TWEAKER_FLOAT(name, initial)\
+	float name;
+#else
+
+namespace
+{
+	Tweaker tweaker;
+	TweakerMap tweaker_map;
+}
+
+#define TWEAKER_BOOL(name, initial)\
+	bool name = register_tweaker_bool(&tweaker_map, #name, &name, initial);
+
+#define TWEAKER_INT(name, initial)\
+	int name = register_tweaker_int(&tweaker_map, #name, &name, initial);
+
+#define TWEAKER_FLOAT(name, initial)\
+	float name = register_tweaker_float(&tweaker_map, #name, &name, initial);
+
+#endif // defined(NDEBUG)
 
 // Oscilloscope.................................................................
 
@@ -4197,7 +4719,7 @@ Vector3 hsl_to_rgb(Vector3 hsl)
 	float h = hsl.x;
 	float s = hsl.y;
 	float l = hsl.z;
-	if(s == 0)
+	if(s == 0.0f)
 	{
 		return {l, l, l};
 	}
@@ -4491,8 +5013,9 @@ CallList fade_calls;
 Oscilloscope oscilloscope;
 const int traces_count = 2;
 Trace traces[traces_count];
-bool debug_draw_colliders = false;
-bool debug_show_oscilloscope = true;
+
+TWEAKER_BOOL(debug_draw_colliders, false);
+TWEAKER_BOOL(debug_show_oscilloscope, false);
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
@@ -4805,6 +5328,14 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		{
 			trace_oscilloscope_channel(&traces[i], &oscilloscope, i);
 			draw_trace(&traces[i], -256.0, y[i], 512.0f, 128.0f);
+		}
+	}
+	else
+	{
+		// Maintain the traces' continuity even though they're not drawn.
+		for(int i = 0; i < traces_count; ++i)
+		{
+			trace_oscilloscope_channel(&traces[i], &oscilloscope, i);
 		}
 	}
 
@@ -7445,7 +7976,22 @@ static void shift_pitch(WSOLA* dilator, float* samples, int samples_count, int s
 
 // §5.1 Game Functions..........................................................
 
-enum class UserKey {Space, Left, Up, Right, Down, Tilde};
+enum class UserKey
+{
+	Space,
+	Left,
+	Up,
+	Right,
+	Down,
+	Home,
+	End,
+	Page_Up,
+	Page_Down,
+	Tilde,
+	Enter,
+	S,
+	V,
+};
 
 namespace
 {
@@ -7453,7 +7999,7 @@ namespace
 	const int window_width = 800;
 	const int window_height = 600;
 	const double frame_frequency = 1.0 / 60.0;
-	const int key_count = 6;
+	const int key_count = 13;
 
 	bool keys_pressed[key_count];
 	bool old_keys_pressed[key_count];
@@ -7464,7 +8010,6 @@ namespace
 	World world;
 	Vector3 dancer_position;
 	audio::MessageQueue message_queue;
-	Tweaker tweaker;
 }
 
 static bool key_tapped(UserKey key)
@@ -7496,10 +8041,6 @@ static void game_create()
 
 	// Setup the tweaker.
 	{
-		tweaker.lines[0] = "Unbelievably Strong";
-		tweaker.lines[4] = "Troll traits??";
-		tweaker.lines[10] = "But listen.";
-		tweaker.lines[15] = "Any length they can ^^";
 		tweaker.font.glyph_dimensions = {12.0f, 24.0f};
 		tweaker.font.bearing_left = 2.0f;
 		tweaker.font.bearing_right = 2.0f;
@@ -7600,21 +8141,40 @@ static void main_update()
 
 	if(key_tapped(UserKey::Tilde))
 	{
-		tweaker.on = !tweaker.on;
+		tweaker_turn_on(&tweaker, !tweaker.on);
 	}
 
 	Vector3 velocity = vector3_zero;
 	if(tweaker.on)
 	{
 		// Apply the input to the tweaker.
-		if(key_tapped(UserKey::Up))
+		const int mappings_count = 11;
+		struct
 		{
-			tweaker_set_selection(&tweaker, tweaker.selected - 1);
-		}
-		if(key_tapped(UserKey::Down))
+			UserKey user;
+			Tweaker::Key tweaker;
+		} mappings[mappings_count] =
 		{
-			tweaker_set_selection(&tweaker, tweaker.selected + 1);
+			{UserKey::Left, Tweaker::Key::Left},
+			{UserKey::Up, Tweaker::Key::Up},
+			{UserKey::Right, Tweaker::Key::Right},
+			{UserKey::Down, Tweaker::Key::Down},
+			{UserKey::Home, Tweaker::Key::Home},
+			{UserKey::End, Tweaker::Key::End},
+			{UserKey::Page_Up, Tweaker::Key::Page_Up},
+			{UserKey::Page_Down, Tweaker::Key::Page_Down},
+			{UserKey::Enter, Tweaker::Key::Enter},
+			{UserKey::S, Tweaker::Key::Step},
+			{UserKey::V, Tweaker::Key::Value},
+		};
+		for(int i = 0; i < mappings_count; ++i)
+		{
+			if(key_tapped(mappings[i].user))
+			{
+				tweaker_handle_key(&tweaker, &tweaker_map, mappings[i].tweaker);
+			}
 		}
+		tweaker_update(&tweaker, &tweaker_map);
 	}
 	else
 	{
@@ -7975,6 +8535,7 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 #include <alsa/asoundlib.h>
 
 #include <pthread.h>
+#include <type_traits>
 
 namespace audio {
 
@@ -8242,6 +8803,9 @@ namespace
 	bool boop_on;
 }
 
+TWEAKER_FLOAT(master_volume, 0.75f);
+TWEAKER_INT(boop_pitch, 69);
+
 static void send_history_to_main_thread(History* history)
 {
 	for(int i = 0; i < history->count; ++i)
@@ -8389,8 +8953,6 @@ static void* run_mixer_thread(void* argument)
 	History history;
 	history_erase(&history);
 
-	float volume = 0.75f;
-
 	Instrument instruments[tracks_count];
 
 	Instrument* kick = &instruments[0];
@@ -8506,6 +9068,8 @@ static void* run_mixer_thread(void* argument)
 	streams[4].volume = 0.6f;
 	streams[4].pan = -0.7f;
 
+	ASSERT(std::is_pod<Stream>::value);
+
 	// Send some preparatory messages to the main thread.
 	{
 		Message message;
@@ -8575,7 +9139,7 @@ static void* run_mixer_thread(void* argument)
 			{
 				stream->volume = 1.0f;
 			}
-			const float theta = 440.0f;
+			const float theta = pitch_to_frequency(boop_pitch);
 			for(int i = 0; i < frames; ++i)
 			{
 				float t = static_cast<float>(i) / sample_rate + time;
@@ -8589,7 +9153,7 @@ static void* run_mixer_thread(void* argument)
 
 		// Combine the generated audio to a single compact array of samples.
 
-		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, volume);
+		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, master_volume);
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
 		send_oscilloscope_samples_to_main_thread(mixed_samples, frames, device_description.channels);
@@ -8847,7 +9411,22 @@ static void main_loop()
 		// Get key states for input.
 		char keys[32];
 		XQueryKeymap(display, keys);
-		int keysyms[key_count] = {XK_space, XK_Left, XK_Up, XK_Right, XK_Down, XK_asciitilde};
+		int keysyms[key_count] =
+		{
+			XK_space,
+			XK_Left,
+			XK_Up,
+			XK_Right,
+			XK_Down,
+			XK_Home,
+			XK_End,
+			XK_Page_Up,
+			XK_Page_Down,
+			XK_asciitilde,
+			XK_Return,
+			XK_S,
+			XK_V
+		};
 		for(int i = 0; i < key_count; ++i)
 		{
 			int code = XKeysymToKeycode(display, keysyms[i]);
