@@ -346,6 +346,7 @@ float float_range(float min, float max)
 
 #include <cmath>
 #include <cfloat>
+#include <climits>
 
 using std::abs;
 using std::sqrt;
@@ -2349,6 +2350,7 @@ typedef char GLchar;
 typedef char GLcharARB;
 typedef ptrdiff_t GLsizeiptr;
 
+#define GL_BLEND 0x0BE2
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_CULL_FACE 0x0B44
 #define GL_DEPTH_BUFFER_BIT 0x00000100
@@ -2362,8 +2364,10 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_NEAREST 0x2600
 #define GL_NEAREST_MIPMAP_LINEAR 0x2702
 #define GL_NEAREST_MIPMAP_NEAREST 0x2700
+#define GL_ONE_MINUS_SRC_ALPHA 0x0303
 #define GL_RED 0x1903
 #define GL_REPEAT 0x2901
+#define GL_SRC_ALPHA 0x0302
 #define GL_TEXTURE_2D 0x0DE1
 #define GL_TEXTURE_MAG_FILTER 0x2800
 #define GL_TEXTURE_MIN_FILTER 0x2801
@@ -2405,6 +2409,7 @@ typedef ptrdiff_t GLsizeiptr;
 #define APIENTRYA APIENTRY
 #endif
 
+void (APIENTRYA *p_glBlendFunc)(GLenum sfactor, GLenum dfactor) = nullptr;
 void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
 void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
 void (APIENTRYA *p_glDisable)(GLenum cap) = nullptr;
@@ -2470,6 +2475,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 #define glMapBuffer p_glMapBuffer
 #define glUnmapBuffer p_glUnmapBuffer
 
+#define glBlendFunc p_glBlendFunc
 #define glClear p_glClear
 #define glDepthMask p_glDepthMask
 #define glDisable p_glDisable
@@ -2744,6 +2750,13 @@ enum class DrawMode
 	Triangles,
 };
 
+enum class BlendMode
+{
+	None,
+	Opaque,
+	Transparent,
+};
+
 struct Context
 {
 	VertexPC vertices[context_max_vertices];
@@ -2753,6 +2766,8 @@ struct Context
 	GLuint shader;
 	int filled;
 	DrawMode draw_mode;
+	BlendMode blend_mode;
+	float opacity;
 };
 
 Context* context;
@@ -2810,7 +2825,7 @@ static GLenum get_mode(DrawMode draw_mode)
 void draw()
 {
 	Context* c = context;
-	if(c->filled == 0 || c->draw_mode == DrawMode::None)
+	if(c->filled == 0 || c->draw_mode == DrawMode::None || c->blend_mode == BlendMode::None)
 	{
 		return;
 	}
@@ -2823,13 +2838,33 @@ void draw()
 		glUnmapBuffer(GL_ARRAY_BUFFER);
 	}
 
-	glUseProgram(context->shader);
-	GLint location = glGetUniformLocation(context->shader, "model_view_projection");
+	glUseProgram(c->shader);
+	GLint location = glGetUniformLocation(c->shader, "model_view_projection");
 	glUniformMatrix4fv(location, 1, GL_TRUE, c->view_projection.elements);
+
+	switch(c->blend_mode)
+	{
+		case BlendMode::None:
+		case BlendMode::Opaque:
+		{
+			glDisable(GL_BLEND);
+			break;
+		}
+		case BlendMode::Transparent:
+		{
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			location = glGetUniformLocation(c->shader, "opacity");
+			glUniform1f(location, c->opacity);
+			break;
+		}
+	}
+
 	glBindVertexArray(c->vertex_array);
 	glDrawArrays(get_mode(c->draw_mode), 0, c->filled);
 
 	c->draw_mode = DrawMode::None;
+	c->blend_mode = BlendMode::None;
 	c->filled = 0;
 }
 
@@ -2837,22 +2872,26 @@ void add_line(Vector3 start, Vector3 end, Vector3 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
 	c->vertices[c->filled + 0] = {start, colour};
 	c->vertices[c->filled + 1] = {end, colour};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
+	c->blend_mode = BlendMode::Opaque;
 }
 
 void add_line_gradient(Vector3 start, Vector3 end, Vector3 colour0, Vector3 colour1)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
 	c->vertices[c->filled + 0] = {start, colour0};
 	c->vertices[c->filled + 1] = {end, colour1};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
+	c->blend_mode = BlendMode::Opaque;
 }
 
 // This is an approximate formula for an ellipse's perimeter. It has the
@@ -2911,26 +2950,27 @@ void add_wire_aabb(AABB aabb, Vector3 colour)
 	p[6] += {0.0f, s.y , s.z };
 	p[7] += {s.x , s.y , s.z };
 
-	immediate::add_line(p[0], p[1], colour);
-	immediate::add_line(p[1], p[3], colour);
-	immediate::add_line(p[3], p[2], colour);
-	immediate::add_line(p[2], p[0], colour);
+	add_line(p[0], p[1], colour);
+	add_line(p[1], p[3], colour);
+	add_line(p[3], p[2], colour);
+	add_line(p[2], p[0], colour);
 
-	immediate::add_line(p[0], p[4], colour);
-	immediate::add_line(p[1], p[5], colour);
-	immediate::add_line(p[2], p[6], colour);
-	immediate::add_line(p[3], p[7], colour);
+	add_line(p[0], p[4], colour);
+	add_line(p[1], p[5], colour);
+	add_line(p[2], p[6], colour);
+	add_line(p[3], p[7], colour);
 
-	immediate::add_line(p[4], p[5], colour);
-	immediate::add_line(p[5], p[7], colour);
-	immediate::add_line(p[7], p[6], colour);
-	immediate::add_line(p[6], p[4], colour);
+	add_line(p[4], p[5], colour);
+	add_line(p[5], p[7], colour);
+	add_line(p[7], p[6], colour);
+	add_line(p[6], p[4], colour);
 }
 
 void add_triangle(Triangle* triangle, Vector3 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
 	ASSERT(c->filled + 3 < context_max_vertices);
 	for(int i = 0; i < 3; ++i)
 	{
@@ -2939,12 +2979,14 @@ void add_triangle(Triangle* triangle, Vector3 colour)
 	}
 	c->filled += 3;
 	c->draw_mode = DrawMode::Triangles;
+	c->blend_mode = BlendMode::Opaque;
 }
 
 void add_quad(Quad* quad, Vector3 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
 	ASSERT(c->filled + 6 < context_max_vertices);
 	c->vertices[c->filled + 0].position = quad->vertices[0];
 	c->vertices[c->filled + 1].position = quad->vertices[1];
@@ -2958,12 +3000,14 @@ void add_quad(Quad* quad, Vector3 colour)
 	}
 	c->filled += 6;
 	c->draw_mode = DrawMode::Triangles;
+	c->blend_mode = BlendMode::Opaque;
 }
 
 void add_quad_textured(Quad* quad)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
 	ASSERT(c->filled + 6 < context_max_vertices);
 	c->vertices[c->filled + 0].position = quad->vertices[0];
 	c->vertices[c->filled + 1].position = quad->vertices[1];
@@ -2980,6 +3024,29 @@ void add_quad_textured(Quad* quad)
 	c->vertices[c->filled + 5].colour = {0.0f, 1.0f, 0.0f};
 	c->filled += 6;
 	c->draw_mode = DrawMode::Triangles;
+	c->blend_mode = BlendMode::Opaque;
+}
+
+void add_quad_transparent(Quad* quad, Vector3 colour, float opacity)
+{
+	Context* c = context;
+	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
+	ASSERT(c->blend_mode == BlendMode::Transparent || c->blend_mode == BlendMode::None);
+	ASSERT(c->filled + 6 < context_max_vertices);
+	c->vertices[c->filled + 0].position = quad->vertices[0];
+	c->vertices[c->filled + 1].position = quad->vertices[1];
+	c->vertices[c->filled + 2].position = quad->vertices[2];
+	c->vertices[c->filled + 3].position = quad->vertices[0];
+	c->vertices[c->filled + 4].position = quad->vertices[2];
+	c->vertices[c->filled + 5].position = quad->vertices[3];
+	for(int i = 0; i < 6; ++i)
+	{
+		c->vertices[c->filled + i].colour = colour;
+	}
+	c->filled += 6;
+	c->draw_mode = DrawMode::Triangles;
+	c->blend_mode = BlendMode::Transparent;
+	c->opacity = opacity;
 }
 
 void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector3 colour)
@@ -3110,6 +3177,83 @@ static const Vector3 colour_blue = vector3_unit_z;
 static const Vector3 colour_cyan = {0.0f, 1.0f, 1.0f};
 static const Vector3 colour_magenta = {1.0f, 0.0f, 1.0f};
 static const Vector3 colour_yellow = {1.0f, 1.0f, 0.0f};
+
+float hue_to_rgb(float p, float q, float t)
+{
+	if(t < 0.0f)
+	{
+		t += 1.0f;
+	}
+	else if(t > 1.0f)
+	{
+		t -= 1.0f;
+	}
+	if(t < (1.0f / 6.0f))
+	{
+		return p + 6.0f * t * (q - p);
+	}
+	else if(t < (1.0f / 2.0f))
+	{
+		return q;
+	}
+	else if(t < (2.0f / 3.0f))
+	{
+		return p + 6.0f * ((2.0f / 3.0f) - t) * (q - p);
+	}
+	return p;
+}
+
+Vector3 hsl_to_rgb(Vector3 hsl)
+{
+	float h = hsl.x;
+	float s = hsl.y;
+	float l = hsl.z;
+	if(s == 0.0f)
+	{
+		return {l, l, l};
+	}
+	float q;
+	if(l < 0.0f)
+	{
+		q = l * (1.0f + s);
+	}
+	else
+	{
+		q = l + s - (l * s);
+	}
+	float p = (2.0f * l) - q;
+	Vector3 result;
+	result.x = hue_to_rgb(p, q, h + (1.0f / 3.0f));
+	result.y = hue_to_rgb(p, q, h);
+	result.z = hue_to_rgb(p, q, h - (1.0f / 3.0f));
+	return result;
+}
+
+// Based on Dave Green's public domain (Unlicense license) Fortran 77
+// implementation for cube helix colour table generation.
+static void cube_helix(Vector3* colours, int levels, float start_hue, float rotations, float saturation_min, float saturation_max, float lightness_min, float lightness_max, float gamma)
+{
+	for(int i = 0; i < levels; ++i)
+	{
+		float fraction = lerp(lightness_min, lightness_max, i / static_cast<float>(levels));
+		float saturation = lerp(saturation_min, saturation_max, fraction);
+		float angle = tau * (start_hue / 3.0f + 1.0f + rotations * fraction);
+		fraction = pow(fraction, gamma);
+		float amplitude = saturation * fraction * (1.0f - fraction) / 2.0f;
+		float r = -0.14861f * cos(angle) + 1.78277f * sin(angle);
+		float g = -0.29227f * cos(angle) - 0.90649f * sin(angle);
+		float b = 1.97294f * cos(angle);
+		r = fraction + amplitude * r;
+		g = fraction + amplitude * g;
+		b = fraction + amplitude * b;
+		r = clamp(r, 0.0f, 1.0f);
+		g = clamp(g, 0.0f, 1.0f);
+		b = clamp(b, 0.0f, 1.0f);
+		colours[i].x = r;
+		colours[i].y = g;
+		colours[i].z = b;
+	}
+}
 
 // Text Drawing.................................................................
 
@@ -3450,12 +3594,16 @@ struct TweakerMap
 			{
 				int* value;
 				int step;
+				int range_min;
+				int range_max;
 			} an_int;
 
 			struct
 			{
 				float* value;
 				float step;
+				float range_min;
+				float range_max;
 			} a_float;
 
 			struct
@@ -3479,10 +3627,12 @@ static bool register_tweaker_bool(TweakerMap* map, const char* name, bool* value
 	return initial;
 }
 
-static int register_tweaker_int(TweakerMap* map, const char* name, int* value, int initial)
+static int register_tweaker_int(TweakerMap* map, const char* name, int* value, int initial, int range_min, int range_max)
 {
 	map->entries[map->count].an_int.value = value;
 	map->entries[map->count].an_int.step = 1;
+	map->entries[map->count].an_int.range_min = range_min;
+	map->entries[map->count].an_int.range_max = range_max;
 	map->entries[map->count].name = name;
 	map->entries[map->count].type = TweakerMap::EntryType::Int;
 	map->count += 1;
@@ -3490,10 +3640,12 @@ static int register_tweaker_int(TweakerMap* map, const char* name, int* value, i
 	return initial;
 }
 
-static float register_tweaker_float(TweakerMap* map, const char* name, float* value, float initial)
+static float register_tweaker_float(TweakerMap* map, const char* name, float* value, float initial, float range_min, float range_max)
 {
 	map->entries[map->count].a_float.value = value;
 	map->entries[map->count].a_float.step = 0.1f;
+	map->entries[map->count].a_float.range_min = range_min;
+	map->entries[map->count].a_float.range_max = range_max;
 	map->entries[map->count].name = name;
 	map->entries[map->count].type = TweakerMap::EntryType::Float;
 	map->count += 1;
@@ -3535,6 +3687,7 @@ struct Tweaker
 	{
 		char value[tweaker_line_char_limit];
 		char step[tweaker_line_char_limit];
+		char range[tweaker_line_char_limit];
 	} readout;
 
 	Vector2 dimensions;
@@ -3631,26 +3784,34 @@ static void adjust_value(TweakerMap* map, int selected, bool upward)
 		}
 		case TweakerMap::EntryType::Int:
 		{
+			int value = *entry->an_int.value;
 			if(upward)
 			{
-				*entry->an_int.value += entry->an_int.step;
+				value += entry->an_int.step;
+				value = MIN(value, entry->an_int.range_max);
 			}
 			else
 			{
-				*entry->an_int.value -= entry->an_int.step;
+				 value -= entry->an_int.step;
+				 value = MAX(value, entry->an_int.range_min);
 			}
+			*entry->an_int.value = value;
 			break;
 		}
 		case TweakerMap::EntryType::Float:
 		{
+			float value = *entry->a_float.value;
 			if(upward)
 			{
-				*entry->a_float.value += entry->a_float.step;
+				value += entry->a_float.step;
+				value = fmin(value, entry->a_float.range_max);
 			}
 			else
 			{
-				*entry->a_float.value -= entry->a_float.step;
+				value -= entry->a_float.step;
+				value = fmax(value, entry->a_float.range_min);
 			}
+			*entry->a_float.value = value;
 			break;
 		}
 	}
@@ -3755,14 +3916,18 @@ static void tweaker_handle_key(Tweaker* tweaker, TweakerMap* map, Tweaker::Key k
 				{
 					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
 					int selection = MAX(tweaker->selected - lines_per_page, 0);
+					tweaker_set_scroll(tweaker, tweaker->scroll - tweaker->dimensions.y);
 					tweaker_set_selection(tweaker, selection);
+					tweaker->prior_selected = tweaker->selected;
 					break;
 				}
 				case Tweaker::Key::Page_Down:
 				{
 					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
 					int selection = MIN(tweaker->selected + lines_per_page, tweaker_lines_count - 1);
+					tweaker_set_scroll(tweaker, tweaker->scroll + tweaker->dimensions.y);
 					tweaker_set_selection(tweaker, selection);
+					tweaker->prior_selected = tweaker->selected;
 					break;
 				}
 				case Tweaker::Key::Enter:
@@ -3910,6 +4075,7 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 	{
 		empty_string(tweaker->readout.value);
 		empty_string(tweaker->readout.step);
+		empty_string(tweaker->readout.range);
 	}
 	else
 	{
@@ -3921,22 +4087,43 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				const char* value = bool_to_string(b);
 				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
 				empty_string(tweaker->readout.step);
+				empty_string(tweaker->readout.range);
 				break;
 			}
 			case TweakerMap::EntryType::Int:
 			{
 				int value = *map->entries[selected].an_int.value;
 				int step = map->entries[selected].an_int.step;
+				int range_min = map->entries[selected].an_int.range_min;
+				int range_max = map->entries[selected].an_int.range_max;
 				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
 				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
+				if(range_min == INT_MIN && range_max == INT_MAX)
+				{
+					empty_string(tweaker->readout.range);
+				}
+				else
+				{
+					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%d,%d]", range_min, range_max);
+				}
 				break;
 			}
 			case TweakerMap::EntryType::Float:
 			{
 				float value = *map->entries[selected].a_float.value;
 				float step = map->entries[selected].a_float.step;
+				float range_min = map->entries[selected].a_float.range_min;
+				float range_max = map->entries[selected].a_float.range_max;
 				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
 				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
+				if(range_min == -FLT_MAX && range_max == FLT_MAX)
+				{
+					empty_string(tweaker->readout.range);
+				}
+				else
+				{
+					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%g,%g]", range_min, range_max);
+				}
 				break;
 			}
 		}
@@ -4023,6 +4210,13 @@ static void draw_rect(Rect rect, Vector3 colour)
 	immediate::draw();
 }
 
+static void draw_rect_transparent(Rect rect, Vector3 colour, float opacity)
+{
+	Quad quad = rect_to_quad(rect);
+	immediate::add_quad_transparent(&quad, colour, opacity);
+	immediate::draw();
+}
+
 static void draw_tweaker(Tweaker* tweaker)
 {
 	if(!tweaker->on)
@@ -4038,7 +4232,7 @@ static void draw_tweaker(Tweaker* tweaker)
 		Vector2 dimensions = tweaker->dimensions;
 		Vector2 position = -dimensions / 2.0f;
 		background_rect = {position, dimensions};
-		draw_rect(background_rect, colour_black);
+		draw_rect_transparent(background_rect, colour_black, 0.5f);
 	}
 
 	Rect left_panel = background_rect;
@@ -4110,6 +4304,8 @@ static void draw_tweaker(Tweaker* tweaker)
 	draw_text(tweaker->readout.value, text_position, right_panel, &tweaker->font, colour_white);
 	text_position.y -= leading;
 	draw_text(tweaker->readout.step, text_position, right_panel, &tweaker->font, colour_white);
+	text_position.y -= leading;
+	draw_text(tweaker->readout.range, text_position, right_panel, &tweaker->font, colour_white);
 
 	// Draw indicators for the current mode.
 
@@ -4170,7 +4366,13 @@ static void draw_tweaker(Tweaker* tweaker)
 #define TWEAKER_INT(name, initial)\
 	int name;
 
+#define TWEAKER_INT_RANGE(name, initial, min, max)\
+	int name;
+
 #define TWEAKER_FLOAT(name, initial)\
+	float name;
+
+#define TWEAKER_FLOAT_RANGE(name, initial, min, max)\
 	float name;
 #else
 
@@ -4184,10 +4386,16 @@ namespace
 	bool name = register_tweaker_bool(&tweaker_map, #name, &name, initial);
 
 #define TWEAKER_INT(name, initial)\
-	int name = register_tweaker_int(&tweaker_map, #name, &name, initial);
+	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, INT_MIN, INT_MAX);
+
+#define TWEAKER_INT_RANGE(name, initial, min, max)\
+	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, min, max);
 
 #define TWEAKER_FLOAT(name, initial)\
-	float name = register_tweaker_float(&tweaker_map, #name, &name, initial);
+	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, -FLT_MAX, FLT_MAX);
+
+#define TWEAKER_FLOAT_RANGE(name, initial, min, max)\
+	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, min, max);
 
 #endif // defined(NDEBUG)
 
@@ -4329,7 +4537,8 @@ static void oscilloscope_detect_trigger(Oscilloscope* scope, int channel_index)
 		}
 	} while(i != start);
 
-	LOG_DEBUG("Failed to detect a trigger!");
+	// If no trigger is detected, act the same as when triggering is disabled.
+	oscilloscope_set_trigger(channel, start);
 }
 
 static void oscilloscope_sample_data(Oscilloscope* scope, int channel_index, float* samples, int samples_count, int offset, int stride)
@@ -4472,13 +4681,16 @@ layout(location = 0) in vec3 position;
 layout(location = 2) in vec3 colour;
 
 uniform mat4x4 model_view_projection;
+uniform float opacity;
 
 out vec3 surface_colour;
+out float surface_opacity;
 
 void main()
 {
 	gl_Position = model_view_projection * vec4(position, 1.0);
 	surface_colour = colour;
+	surface_opacity = opacity;
 }
 )";
 
@@ -4488,10 +4700,11 @@ const char* fragment_source_vertex_colour = R"(
 layout(location = 0) out vec4 output_colour;
 
 in vec3 surface_colour;
+in float surface_opacity;
 
 void main()
 {
-	output_colour = vec4(surface_colour, 1.0);
+	output_colour = vec4(surface_colour, surface_opacity);
 }
 )";
 
@@ -4687,57 +4900,6 @@ static void object_generate_player(Object* object, AABB* bounds)
 	}
 	object_set_surface(object, floor.vertices, floor.vertices_count, floor.indices, floor.indices_count);
 	floor_destroy(&floor);
-}
-
-float hue_to_rgb(float p, float q, float t)
-{
-	if(t < 0.0f)
-	{
-		t += 1.0f;
-	}
-	else if(t > 1.0f)
-	{
-		t -= 1.0f;
-	}
-	if(t < (1.0f / 6.0f))
-	{
-		return p + 6.0f * t * (q - p);
-	}
-	else if(t < (1.0f / 2.0f))
-	{
-		return q;
-	}
-	else if(t < (2.0f / 3.0f))
-	{
-		return p + 6.0f * ((2.0f / 3.0f) - t) * (q - p);
-	}
-	return p;
-}
-
-Vector3 hsl_to_rgb(Vector3 hsl)
-{
-	float h = hsl.x;
-	float s = hsl.y;
-	float l = hsl.z;
-	if(s == 0.0f)
-	{
-		return {l, l, l};
-	}
-	float q;
-	if(l < 0.0f)
-	{
-		q = l * (1.0f + s);
-	}
-	else
-	{
-		q = l + s - (l * s);
-	}
-	float p = (2.0f * l) - q;
-	Vector3 result;
-	result.x = hue_to_rgb(p, q, h + (1.0f / 3.0f));
-	result.y = hue_to_rgb(p, q, h);
-	result.z = hue_to_rgb(p, q, h - (1.0f / 3.0f));
-	return result;
 }
 
 static void object_generate_terrain(Object* object, AABB* bounds, Triangle** triangles, int* triangles_count)
@@ -4957,32 +5119,6 @@ void object_generate_sky(Object* object)
 
 	DEALLOCATE(vertices);
 	DEALLOCATE(indices);
-}
-
-// Based on Dave Green's public domain (Unlicense license) Fortran 77
-// implementation for cube helix colour table generation.
-static void cube_helix(Vector3* colours, int levels, float start_hue, float rotations, float saturation_min, float saturation_max, float lightness_min, float lightness_max, float gamma)
-{
-	for(int i = 0; i < levels; ++i)
-	{
-		float fraction = lerp(lightness_min, lightness_max, i / static_cast<float>(levels));
-		float saturation = lerp(saturation_min, saturation_max, fraction);
-		float angle = tau * (start_hue / 3.0f + 1.0f + rotations * fraction);
-		fraction = pow(fraction, gamma);
-		float amplitude = saturation * fraction * (1.0f - fraction) / 2.0f;
-		float r = -0.14861f * cos(angle) + 1.78277f * sin(angle);
-		float g = -0.29227f * cos(angle) - 0.90649f * sin(angle);
-		float b = 1.97294f * cos(angle);
-		r = fraction + amplitude * r;
-		g = fraction + amplitude * g;
-		b = fraction + amplitude * b;
-		r = clamp(r, 0.0f, 1.0f);
-		g = clamp(g, 0.0f, 1.0f);
-		b = clamp(b, 0.0f, 1.0f);
-		colours[i].x = r;
-		colours[i].y = g;
-		colours[i].z = b;
-	}
 }
 
 // Whole system
@@ -8282,6 +8418,7 @@ static PROC windows_get_proc_address(const char* name)
 
 static bool ogl_load_functions()
 {
+	p_glBlendFunc = reinterpret_cast<void (APIENTRYA*)(GLenum sfactor, GLenum dfactor)>(GET_PROC("glBlendFunc"));
 	p_glClear = reinterpret_cast<void (APIENTRYA*)(GLbitfield)>(GET_PROC("glClear"));
 	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
 	p_glDisable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glDisable"));
@@ -8338,6 +8475,7 @@ static bool ogl_load_functions()
 
 	int failure_count = 0;
 
+	failure_count += p_glBlendFunc == nullptr;
 	failure_count += p_glClear == nullptr;
 	failure_count += p_glDepthMask == nullptr;
 	failure_count += p_glDisable == nullptr;
@@ -8535,7 +8673,6 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 #include <alsa/asoundlib.h>
 
 #include <pthread.h>
-#include <type_traits>
 
 namespace audio {
 
@@ -8803,7 +8940,7 @@ namespace
 	bool boop_on;
 }
 
-TWEAKER_FLOAT(master_volume, 0.75f);
+TWEAKER_FLOAT_RANGE(master_volume, 0.0f, 0.0f, 1.0f);
 TWEAKER_INT(boop_pitch, 69);
 
 static void send_history_to_main_thread(History* history)
@@ -9067,8 +9204,6 @@ static void* run_mixer_thread(void* argument)
 
 	streams[4].volume = 0.6f;
 	streams[4].pan = -0.7f;
-
-	ASSERT(std::is_pod<Stream>::value);
 
 	// Send some preparatory messages to the main thread.
 	{
