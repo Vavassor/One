@@ -185,6 +185,11 @@ static bool is_power_of_two(unsigned int x)
 	return (x != 0) && !(x & (x - 1));
 }
 
+static int mod(int x, int n)
+{
+	return (x % n + n) % n;
+}
+
 const float tau = 6.28318530717958647692f;
 const float pi = 3.14159265358979323846f;
 const float pi_over_2 = 1.57079632679489661923f;
@@ -241,15 +246,16 @@ long atomic_int_subtract(AtomicInt* minuend, long subtrahend);
 // §1.5 Immediate Mode Drawing Declarations.....................................
 
 struct Vector3;
+struct Vector4;
 struct AABB;
 struct Triangle;
 
 namespace immediate {
 
 void draw();
-void add_line(Vector3 start, Vector3 end, Vector3 colour);
-void add_wire_aabb(AABB aabb, Vector3 colour);
-void add_triangle(Triangle* triangle, Vector3 colour);
+void add_line(Vector3 start, Vector3 end, Vector4 colour);
+void add_wire_aabb(AABB aabb, Vector4 colour);
+void add_triangle(Triangle* triangle, Vector4 colour);
 
 } // namespace immediate
 
@@ -597,6 +603,24 @@ Vector3 reciprocal(Vector3 v)
 	result.y = 1.0f / v.y;
 	result.z = 1.0f / v.z;
 	return result;
+}
+
+static Vector3 make_vector3(Vector2 v)
+{
+	return {v.x, v.y, 0.0f};
+}
+
+struct Vector4
+{
+	float x;
+	float y;
+	float z;
+	float w;
+};
+
+static Vector4 make_vector4(Vector3 v)
+{
+	return {v.x, v.y, v.z, 0.0f};
 }
 
 // §1.8 Quaternions.............................................................
@@ -2627,20 +2651,135 @@ static GLuint load_shader_program(const char* vertex_source, const char* fragmen
 	return program;
 }
 
-// §3.3 Floor Functions.........................................................
+// Vertex types and packing.....................................................
+
+union Pack4x8
+{
+	struct
+	{
+		u8 r, g, b, a;
+	};
+	u32 packed;
+};
+
+static u32 pack_unorm4x8(Vector4 v)
+{
+	Pack4x8 u;
+	u.r = 0xff * v.x;
+	u.g = 0xff * v.y;
+	u.b = 0xff * v.z;
+	u.a = 0xff * v.w;
+	return u.packed;
+}
+
+static u32 pack_unorm3x8(Vector3 v)
+{
+	Pack4x8 u;
+	u.r = 0xff * v.x;
+	u.g = 0xff * v.y;
+	u.b = 0xff * v.z;
+	u.a = 0xff;
+	return u.packed;
+}
+
+static u32 pack_snorm3x10(Vector3 v)
+{
+	union
+	{
+		struct
+		{
+			int x : 10;
+			int y : 10;
+			int z : 10;
+			int w : 2;
+		};
+		u32 packed;
+	} u;
+	u.x = round(v.x * 511.0f);
+	u.y = round(v.y * 511.0f);
+	u.z = round(v.z * 511.0f);
+	u.w = 0;
+	return u.packed;
+}
+
+static u32 pack_unorm16x2(Vector2 v)
+{
+	union
+	{
+		struct
+		{
+			u16 x;
+			u16 y;
+		};
+		u32 packed;
+	} u;
+	u.x = 0xffff * v.x;
+	u.y = 0xffff * v.y;
+	return u.packed;
+}
+
+static bool is_snorm(float x)
+{
+	return x >= -1.0f && x <= 1.0f;
+}
+
+static bool is_unorm(float x)
+{
+	return x >= 0.0f && x <= 1.0f;
+}
+
+static u32 rgba_to_u32(Vector4 c)
+{
+	ASSERT(is_unorm(c.x));
+	ASSERT(is_unorm(c.y));
+	ASSERT(is_unorm(c.z));
+	ASSERT(is_unorm(c.w));
+	return pack_unorm4x8(c);
+}
+
+static u32 rgb_to_u32(Vector3 c)
+{
+	ASSERT(is_unorm(c.x));
+	ASSERT(is_unorm(c.y));
+	ASSERT(is_unorm(c.z));
+	return pack_unorm3x8(c);
+}
+
+static u32 normal_to_u32(Vector3 v)
+{
+	ASSERT(is_snorm(v.x));
+	ASSERT(is_snorm(v.y));
+	ASSERT(is_snorm(v.z));
+	return pack_snorm3x10(v);
+}
+
+static u32 texcoord_to_u32(Vector2 v)
+{
+	ASSERT(is_unorm(v.x));
+	ASSERT(is_unorm(v.y));
+	return pack_unorm16x2(v);
+}
 
 struct VertexPC
 {
 	Vector3 position;
-	Vector3 colour;
+	u32 colour;
 };
 
 struct VertexPNC
 {
 	Vector3 position;
 	Vector3 normal;
-	Vector3 colour;
+	u32 colour;
 };
+
+struct VertexPT
+{
+	Vector3 position;
+	u32 texcoord;
+};
+
+// §3.3 Floor Functions.........................................................
 
 struct Floor
 {
@@ -2711,7 +2850,8 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 	for(int i = 0; i < 16; ++i)
 	{
 		float rando = arandom::float_range(0.0f, 1.0f);
-		floor->vertices[o + i].colour = {0.0f, 1.0f, rando};
+		Vector3 colour = {0.0f, 1.0f, rando};
+		floor->vertices[o + i].colour = rgb_to_u32(colour);
 	}
 	floor->vertices_count += 16;
 
@@ -2742,6 +2882,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 namespace immediate {
 
 static const int context_max_vertices = 8192;
+static const int context_vertex_type_count = 2;
 
 enum class DrawMode
 {
@@ -2757,17 +2898,29 @@ enum class BlendMode
 	Transparent,
 };
 
+enum class VertexType
+{
+	None,
+	Colour,
+	Texture,
+};
+
 struct Context
 {
-	VertexPC vertices[context_max_vertices];
+	union
+	{
+		VertexPC vertices[context_max_vertices];
+		VertexPT vertices_textured[context_max_vertices];
+	};
 	Matrix4 view_projection;
-	GLuint vertex_array;
-	GLuint buffer;
-	GLuint shader;
+	GLuint vertex_arrays[context_vertex_type_count];
+	GLuint buffers[context_vertex_type_count];
+	GLuint shaders[context_vertex_type_count];
 	int filled;
 	DrawMode draw_mode;
 	BlendMode blend_mode;
-	float opacity;
+	VertexType vertex_type;
+	bool blend_mode_changed;
 };
 
 Context* context;
@@ -2777,20 +2930,32 @@ static void context_create()
 	context = ALLOCATE(Context, 1);
 	Context* c = context;
 
-	glGenVertexArrays(1, &c->vertex_array);
-	glBindVertexArray(c->vertex_array);
+	glGenVertexArrays(context_vertex_type_count, c->vertex_arrays);
+	glGenBuffers(context_vertex_type_count, c->buffers);
 
-	glGenBuffers(1, &c->buffer);
-	glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
+	glBindVertexArray(c->vertex_arrays[0]);
+	glBindBuffer(GL_ARRAY_BUFFER, c->buffers[0]);
 
 	glBufferData(GL_ARRAY_BUFFER, sizeof(c->vertices), nullptr, GL_DYNAMIC_DRAW);
 
 	GLvoid* offset0 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, position));
 	GLvoid* offset1 = reinterpret_cast<GLvoid*>(offsetof(VertexPC, colour));
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset0);
-	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPC), offset1);
+	glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(VertexPC), offset1);
 	glEnableVertexAttribArray(0);
 	glEnableVertexAttribArray(2);
+
+	glBindVertexArray(c->vertex_arrays[1]);
+	glBindBuffer(GL_ARRAY_BUFFER, c->buffers[1]);
+
+	glBufferData(GL_ARRAY_BUFFER, sizeof(c->vertices_textured), nullptr, GL_DYNAMIC_DRAW);
+
+	offset0 = reinterpret_cast<GLvoid*>(offsetof(VertexPT, position));
+	offset1 = reinterpret_cast<GLvoid*>(offsetof(VertexPT, texcoord));
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexPT), offset0);
+	glVertexAttribPointer(3, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(VertexPT), offset1);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(3);
 
 	glBindVertexArray(0);
 }
@@ -2801,8 +2966,8 @@ static void context_destroy()
 	{
 		Context* c = context;
 
-		glDeleteBuffers(1, &c->buffer);
-		glDeleteVertexArrays(1, &c->vertex_array);
+		glDeleteBuffers(context_vertex_type_count, c->buffers);
+		glDeleteVertexArrays(context_vertex_type_count, c->vertex_arrays);
 		DEALLOCATE(c);
 	}
 }
@@ -2810,6 +2975,15 @@ static void context_destroy()
 static void set_matrices(Matrix4 view, Matrix4 projection)
 {
 	context->view_projection = projection * view;
+}
+
+static void set_blend_mode(BlendMode mode)
+{
+	if(context->blend_mode != mode)
+	{
+		context->blend_mode = mode;
+		context->blend_mode_changed = true;
+	}
 }
 
 static GLenum get_mode(DrawMode draw_mode)
@@ -2825,73 +2999,94 @@ static GLenum get_mode(DrawMode draw_mode)
 void draw()
 {
 	Context* c = context;
-	if(c->filled == 0 || c->draw_mode == DrawMode::None || c->blend_mode == BlendMode::None)
+	if(c->filled == 0 || c->draw_mode == DrawMode::None || c->vertex_type == VertexType::None)
 	{
 		return;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, c->buffer);
-	GLvoid* mapped_buffer = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
-	if(mapped_buffer)
+	if(c->blend_mode_changed)
 	{
-		memcpy(mapped_buffer, c->vertices, sizeof(VertexPC) * c->filled);
-		glUnmapBuffer(GL_ARRAY_BUFFER);
+		switch(c->blend_mode)
+		{
+			case BlendMode::None:
+			case BlendMode::Opaque:
+			{
+				glDisable(GL_BLEND);
+				glDepthMask(GL_TRUE);
+				glEnable(GL_CULL_FACE);
+				break;
+			}
+			case BlendMode::Transparent:
+			{
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				glDepthMask(GL_FALSE);
+				glDisable(GL_CULL_FACE);
+				break;
+			}
+		}
+		c->blend_mode_changed = false;
 	}
 
-	glUseProgram(c->shader);
-	GLint location = glGetUniformLocation(c->shader, "model_view_projection");
+	GLuint shader;
+	switch(c->vertex_type)
+	{
+		case VertexType::None:
+		case VertexType::Colour:
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, c->buffers[0]);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(VertexPC) * c->filled, c->vertices, GL_DYNAMIC_DRAW);
+			glBindVertexArray(c->vertex_arrays[0]);
+			shader = c->shaders[0];
+			break;
+		}
+		case VertexType::Texture:
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, c->buffers[1]);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(VertexPT) * c->filled, c->vertices_textured, GL_DYNAMIC_DRAW);
+			glBindVertexArray(c->vertex_arrays[1]);
+			shader = c->shaders[1];
+			break;
+		}
+	}
+
+	glUseProgram(shader);
+	GLint location = glGetUniformLocation(shader, "model_view_projection");
 	glUniformMatrix4fv(location, 1, GL_TRUE, c->view_projection.elements);
 
-	switch(c->blend_mode)
-	{
-		case BlendMode::None:
-		case BlendMode::Opaque:
-		{
-			glDisable(GL_BLEND);
-			break;
-		}
-		case BlendMode::Transparent:
-		{
-			glEnable(GL_BLEND);
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			location = glGetUniformLocation(c->shader, "opacity");
-			glUniform1f(location, c->opacity);
-			break;
-		}
-	}
-
-	glBindVertexArray(c->vertex_array);
 	glDrawArrays(get_mode(c->draw_mode), 0, c->filled);
 
 	c->draw_mode = DrawMode::None;
-	c->blend_mode = BlendMode::None;
+	set_blend_mode(BlendMode::None);
+	c->vertex_type = VertexType::None;
 	c->filled = 0;
 }
 
-void add_line(Vector3 start, Vector3 end, Vector3 colour)
+void add_line(Vector3 start, Vector3 end, Vector4 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
+	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
-	c->vertices[c->filled + 0] = {start, colour};
-	c->vertices[c->filled + 1] = {end, colour};
+	u32 colour_u32 = rgba_to_u32(colour);
+	c->vertices[c->filled + 0] = {start, colour_u32};
+	c->vertices[c->filled + 1] = {end, colour_u32};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
-	c->blend_mode = BlendMode::Opaque;
+	c->vertex_type = VertexType::Colour;
 }
 
-void add_line_gradient(Vector3 start, Vector3 end, Vector3 colour0, Vector3 colour1)
+void add_line_gradient(Vector3 start, Vector3 end, Vector4 colour0, Vector4 colour1)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
+	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
 	ASSERT(c->filled + 2 < context_max_vertices);
-	c->vertices[c->filled + 0] = {start, colour0};
-	c->vertices[c->filled + 1] = {end, colour1};
+	c->vertices[c->filled + 0] = {start, rgba_to_u32(colour0)};
+	c->vertices[c->filled + 1] = {end, rgba_to_u32(colour1)};
 	c->filled += 2;
 	c->draw_mode = DrawMode::Lines;
-	c->blend_mode = BlendMode::Opaque;
+	c->vertex_type = VertexType::Colour;
 }
 
 // This is an approximate formula for an ellipse's perimeter. It has the
@@ -2901,7 +3096,7 @@ static float ellipse_perimeter(float a, float b)
 	return tau * sqrt(((a * a) + (b * b)) / 2.0f);
 }
 
-static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 radius, Vector3 colour)
+static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 radius, Vector4 colour)
 {
 	Context* c = context;
 
@@ -2922,7 +3117,7 @@ static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 rad
 	}
 }
 
-static void add_wire_ellipsoid(Vector3 center, Vector3 radius, Vector3 colour)
+static void add_wire_ellipsoid(Vector3 center, Vector3 radius, Vector4 colour)
 {
 	Quaternion q0 = axis_angle_rotation(vector3_unit_y, +pi_over_2);
 	Quaternion q1 = axis_angle_rotation(vector3_unit_x, -pi_over_2);
@@ -2932,7 +3127,7 @@ static void add_wire_ellipsoid(Vector3 center, Vector3 radius, Vector3 colour)
 	add_wire_ellipse(center, q2, {radius.x, radius.y}, colour);
 }
 
-void add_wire_aabb(AABB aabb, Vector3 colour)
+void add_wire_aabb(AABB aabb, Vector4 colour)
 {
 	Vector3 s = aabb.max - aabb.min;
 
@@ -2966,27 +3161,27 @@ void add_wire_aabb(AABB aabb, Vector3 colour)
 	add_line(p[6], p[4], colour);
 }
 
-void add_triangle(Triangle* triangle, Vector3 colour)
+void add_triangle(Triangle* triangle, Vector4 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
+	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
 	ASSERT(c->filled + 3 < context_max_vertices);
 	for(int i = 0; i < 3; ++i)
 	{
 		c->vertices[c->filled + i].position = triangle->vertices[i];
-		c->vertices[c->filled + i].colour = colour;
+		c->vertices[c->filled + i].colour = rgba_to_u32(colour);
 	}
 	c->filled += 3;
 	c->draw_mode = DrawMode::Triangles;
-	c->blend_mode = BlendMode::Opaque;
+	c->vertex_type = VertexType::Colour;
 }
 
-void add_quad(Quad* quad, Vector3 colour)
+void add_quad(Quad* quad, Vector4 colour)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
+	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
 	ASSERT(c->filled + 6 < context_max_vertices);
 	c->vertices[c->filled + 0].position = quad->vertices[0];
 	c->vertices[c->filled + 1].position = quad->vertices[1];
@@ -2996,60 +3191,37 @@ void add_quad(Quad* quad, Vector3 colour)
 	c->vertices[c->filled + 5].position = quad->vertices[3];
 	for(int i = 0; i < 6; ++i)
 	{
-		c->vertices[c->filled + i].colour = colour;
+		c->vertices[c->filled + i].colour = rgba_to_u32(colour);
 	}
 	c->filled += 6;
 	c->draw_mode = DrawMode::Triangles;
-	c->blend_mode = BlendMode::Opaque;
+	c->vertex_type = VertexType::Colour;
 }
 
 void add_quad_textured(Quad* quad)
 {
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Opaque || c->blend_mode == BlendMode::None);
+	ASSERT(c->vertex_type == VertexType::Texture || c->vertex_type == VertexType::None);
 	ASSERT(c->filled + 6 < context_max_vertices);
-	c->vertices[c->filled + 0].position = quad->vertices[0];
-	c->vertices[c->filled + 1].position = quad->vertices[1];
-	c->vertices[c->filled + 2].position = quad->vertices[2];
-	c->vertices[c->filled + 3].position = quad->vertices[0];
-	c->vertices[c->filled + 4].position = quad->vertices[2];
-	c->vertices[c->filled + 5].position = quad->vertices[3];
-	// The texcoord is stored in the colour attribute because I'm lazy.
-	c->vertices[c->filled + 0].colour = {0.0f, 0.0f, 0.0f};
-	c->vertices[c->filled + 1].colour = {1.0f, 0.0f, 0.0f};
-	c->vertices[c->filled + 2].colour = {1.0f, 1.0f, 0.0f};
-	c->vertices[c->filled + 3].colour = {0.0f, 0.0f, 0.0f};
-	c->vertices[c->filled + 4].colour = {1.0f, 1.0f, 0.0f};
-	c->vertices[c->filled + 5].colour = {0.0f, 1.0f, 0.0f};
+	c->vertices_textured[c->filled + 0].position = quad->vertices[0];
+	c->vertices_textured[c->filled + 1].position = quad->vertices[1];
+	c->vertices_textured[c->filled + 2].position = quad->vertices[2];
+	c->vertices_textured[c->filled + 3].position = quad->vertices[0];
+	c->vertices_textured[c->filled + 4].position = quad->vertices[2];
+	c->vertices_textured[c->filled + 5].position = quad->vertices[3];
+	c->vertices_textured[c->filled + 0].texcoord = texcoord_to_u32({0.0f, 0.0f});
+	c->vertices_textured[c->filled + 1].texcoord = texcoord_to_u32({1.0f, 0.0f});
+	c->vertices_textured[c->filled + 2].texcoord = texcoord_to_u32({1.0f, 1.0f});
+	c->vertices_textured[c->filled + 3].texcoord = texcoord_to_u32({0.0f, 0.0f});
+	c->vertices_textured[c->filled + 4].texcoord = texcoord_to_u32({1.0f, 1.0f});
+	c->vertices_textured[c->filled + 5].texcoord = texcoord_to_u32({0.0f, 1.0f});
 	c->filled += 6;
 	c->draw_mode = DrawMode::Triangles;
-	c->blend_mode = BlendMode::Opaque;
+	c->vertex_type = VertexType::Texture;
 }
 
-void add_quad_transparent(Quad* quad, Vector3 colour, float opacity)
-{
-	Context* c = context;
-	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
-	ASSERT(c->blend_mode == BlendMode::Transparent || c->blend_mode == BlendMode::None);
-	ASSERT(c->filled + 6 < context_max_vertices);
-	c->vertices[c->filled + 0].position = quad->vertices[0];
-	c->vertices[c->filled + 1].position = quad->vertices[1];
-	c->vertices[c->filled + 2].position = quad->vertices[2];
-	c->vertices[c->filled + 3].position = quad->vertices[0];
-	c->vertices[c->filled + 4].position = quad->vertices[2];
-	c->vertices[c->filled + 5].position = quad->vertices[3];
-	for(int i = 0; i < 6; ++i)
-	{
-		c->vertices[c->filled + i].colour = colour;
-	}
-	c->filled += 6;
-	c->draw_mode = DrawMode::Triangles;
-	c->blend_mode = BlendMode::Transparent;
-	c->opacity = opacity;
-}
-
-void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector3 colour)
+void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector4 colour)
 {
 	Matrix4 inverse = inverse_view_matrix(view) * inverse_perspective_matrix(projection);
 
@@ -3089,7 +3261,7 @@ void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector3 colour)
 
 // Debug Drawing Functions......................................................
 
-static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector3 colour)
+static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector4 colour)
 {
 	Vector3 plane_corner = aabb.min;
 	plane_corner[axis] = clip;
@@ -3128,11 +3300,12 @@ static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector3 colour
 			break;
 		}
 	}
-	immediate::add_line(p[0], p[1], colour);
-	immediate::add_line(p[1], p[2], colour);
-	immediate::add_line(p[2], p[3], colour);
-	immediate::add_line(p[3], p[0], colour);
-	immediate::add_line(p[0], p[2], colour);
+	Quad quad;
+	for(int i = 0; i < 4; ++i)
+	{
+		quad.vertices[i] = p[i];
+	}
+	immediate::add_quad(&quad, colour);
 }
 
 static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int depth, int target_depth)
@@ -3145,7 +3318,7 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 		left.max[axis] = node->clip[0];
 		if(depth == target_depth || target_depth < 0)
 		{
-			add_aabb_plane(bounds, axis, node->clip[0], {1.0f, 0.0f, 0.0f});
+			add_aabb_plane(bounds, axis, node->clip[0], {1.0f, 0.0f, 0.0f, 0.3f});
 		}
 		add_bih_node(nodes, &nodes[node->index], left, depth + 1, target_depth);
 
@@ -3153,7 +3326,7 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 		right.min[axis] = node->clip[1];
 		if(depth == target_depth || target_depth < 0)
 		{
-			add_aabb_plane(bounds, axis, node->clip[1], {0.0f, 0.0f, 1.0f});
+			add_aabb_plane(bounds, axis, node->clip[1], {0.0f, 0.0f, 1.0f, 0.3f});
 		}
 		add_bih_node(nodes, &nodes[node->index + 1], right, depth + 1, target_depth);
 	}
@@ -3164,19 +3337,20 @@ static void draw_bih_tree(bih::Tree* tree, int target_depth)
 	bih::Node* root = &tree->nodes[0];
 	AABB bounds = tree->bounds;
 	add_bih_node(tree->nodes, root, bounds, 0, target_depth);
+	immediate::set_blend_mode(immediate::BlendMode::Transparent);
 	immediate::draw();
 }
 
 // Colour.......................................................................
 
-static const Vector3 colour_white = vector3_one;
-static const Vector3 colour_black = vector3_zero;
-static const Vector3 colour_red = vector3_unit_x;
-static const Vector3 colour_green = vector3_unit_y;
-static const Vector3 colour_blue = vector3_unit_z;
-static const Vector3 colour_cyan = {0.0f, 1.0f, 1.0f};
-static const Vector3 colour_magenta = {1.0f, 0.0f, 1.0f};
-static const Vector3 colour_yellow = {1.0f, 1.0f, 0.0f};
+static const Vector4 colour_white = {1.0f, 1.0f, 1.0f, 1.0f};
+static const Vector4 colour_black = {0.0f, 0.0f, 0.0f, 1.0f};
+static const Vector4 colour_red = {1.0f, 0.0f, 0.0f, 1.0f};
+static const Vector4 colour_green = {0.0f, 1.0f, 0.0f, 1.0f};
+static const Vector4 colour_blue = {0.0f, 0.0f, 1.0f, 1.0f};
+static const Vector4 colour_cyan = {0.0f, 1.0f, 1.0f, 1.0f};
+static const Vector4 colour_magenta = {1.0f, 0.0f, 1.0f, 1.0f};
+static const Vector4 colour_yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
 float hue_to_rgb(float p, float q, float t)
 {
@@ -3502,12 +3676,7 @@ static u16 ascii_to_16_segment_code(char c)
 	return ascii_to_16_segment_table[c - '!'];
 }
 
-static Vector3 make_vector3(Vector2 v)
-{
-	return {v.x, v.y, 0.0f};
-}
-
-static void draw_16_segment_glyph(u16 code, Rect glyph, Rect clip, Vector3 colour)
+static void draw_16_segment_glyph(u16 code, Rect glyph, Rect clip, Vector4 colour)
 {
 	for(int i = 0; i < 16; ++i)
 	{
@@ -3536,7 +3705,7 @@ struct Font
 	float leading;
 };
 
-static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* font, Vector3 colour)
+static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* font, Vector4 colour)
 {
 	if(!text)
 	{
@@ -3721,11 +3890,6 @@ static void tweaker_set_scroll(Tweaker* tweaker, float scroll)
 	tweaker->scroll = clamp(scroll, 0.0f, max_scroll);
 }
 
-static int mod(int x, int n)
-{
-	return (x % n + n) % n;
-}
-
 static void tweaker_set_selection(Tweaker* tweaker, int index)
 {
 	int selected = mod(index, tweaker->lines_count);
@@ -3747,7 +3911,7 @@ static void tweaker_set_selection(Tweaker* tweaker, int index)
 	tweaker->selected = selected;
 }
 
-static Vector3 tweaker_get_line_colour(Tweaker* tweaker, int index)
+static Vector4 tweaker_get_line_colour(Tweaker* tweaker, int index)
 {
 	if(index == tweaker->selected)
 	{
@@ -4203,17 +4367,18 @@ static bool clip_rects(Rect inner, Rect outer, Rect* result)
 	}
 }
 
-static void draw_rect(Rect rect, Vector3 colour)
+static void draw_rect(Rect rect, Vector4 colour)
 {
 	Quad quad = rect_to_quad(rect);
 	immediate::add_quad(&quad, colour);
 	immediate::draw();
 }
 
-static void draw_rect_transparent(Rect rect, Vector3 colour, float opacity)
+static void draw_rect_transparent(Rect rect, Vector4 colour)
 {
 	Quad quad = rect_to_quad(rect);
-	immediate::add_quad_transparent(&quad, colour, opacity);
+	immediate::add_quad(&quad, colour);
+	immediate::set_blend_mode(immediate::BlendMode::Transparent);
 	immediate::draw();
 }
 
@@ -4232,7 +4397,8 @@ static void draw_tweaker(Tweaker* tweaker)
 		Vector2 dimensions = tweaker->dimensions;
 		Vector2 position = -dimensions / 2.0f;
 		background_rect = {position, dimensions};
-		draw_rect_transparent(background_rect, colour_black, 0.5f);
+		Vector4 colour = {0.0f, 0.0f, 0.0f, 0.5f};
+		draw_rect_transparent(background_rect, colour);
 	}
 
 	Rect left_panel = background_rect;
@@ -4288,7 +4454,7 @@ static void draw_tweaker(Tweaker* tweaker)
 		float x = scroll_area.bottom_left.x;
 		float y = -(leading * (i + 1)) + top + scroll;
 		Vector2 text_position = {x, y};
-		Vector3 colour = tweaker_get_line_colour(tweaker, i);
+		Vector4 colour = tweaker_get_line_colour(tweaker, i);
 		draw_text(tweaker->lines[i], text_position, scroll_area, &tweaker->font, colour);
 	}
 
@@ -4605,7 +4771,7 @@ static void trace_oscilloscope_channel(Trace* trace, Oscilloscope* scope, int ch
 
 static void draw_trace(Trace* trace, float x, float y, float width, float height)
 {
-	Vector3 colour = colour_white;
+	Vector4 colour = colour_white;
 	float scale_y = height / 2.0f;
 	for(int i = 0; i < trace_points_count - 1; ++i)
 	{
@@ -4620,6 +4786,177 @@ static void draw_trace(Trace* trace, float x, float y, float width, float height
 	immediate::draw();
 }
 
+// Jittered Grid................................................................
+
+static void draw_particles(Vector2* points, int points_count, Vector3 bottom_left)
+{
+	const float radius = 0.02f;
+	Vector3 offsets[4] =
+	{
+		{-radius, -radius, 0.0f},
+		{+radius, -radius, 0.0f},
+		{+radius, +radius, 0.0f},
+		{-radius, +radius, 0.0f},
+	};
+	for(int i = 0; i < points_count; ++i)
+	{
+		Quad quad;
+		for(int j = 0; j < 4; ++j)
+		{
+			quad.vertices[j] = bottom_left + make_vector3(points[i]) + offsets[j];
+		}
+		immediate::add_quad(&quad, colour_white);
+	}
+	immediate::draw();
+}
+
+static Vector3 reflect(Vector3 v, Vector3 n)
+{
+	return v - (2.0f * dot(v, n) / squared_length(n)) * n;
+}
+
+static Vector3 pick_point_in_triangle(Vector3 u, Vector3 v)
+{
+	float a0 = arandom::float_range(0.0f, 1.0f);
+	float a1 = arandom::float_range(0.0f, 1.0f);
+	Vector3 parallelogram_point = (a0 * u) + (a1 * v);
+	Vector3 triangle_point = parallelogram_point;
+	if(a0 + a1 > 1.0f)
+	{
+		// If it's in the half of the parallelogram outside the triangle
+		// reflect it back into the triangle using the center plane.
+		Vector3 normal = -(u + v) / 2.0f;
+		triangle_point = reflect(parallelogram_point, normal);
+	}
+	return triangle_point;
+}
+
+static Vector3* create_particles(int* result_count)
+{
+	const int width = 16;
+	const int height = 16;
+	const float spacing = 0.4f;
+	const float altitude = sqrt(3.0f) / 2.0f;
+	int points_count = width * height;
+	Vector3* points = ALLOCATE(Vector3, points_count);
+	Vector3 uv[3] =
+	{
+		{spacing * 0.5f, spacing * -altitude, 0.0f},
+		{spacing, 0.0f, 0.0f},
+		{spacing * 0.5f, spacing * +altitude, 0.0f},
+	};
+	for(int i = 0; i < height; ++i)
+	{
+		int row_flip = i % 2;
+		float half_base = 0.5f * row_flip;
+		for(int j = 0; j < width; ++j)
+		{
+			float x = spacing * (j + half_base);
+			float y = spacing * altitude * i;
+			float z = 0.0f;
+			Vector3 point = {x, y, z};
+			Vector3 u = uv[row_flip];
+			Vector3 v = uv[row_flip + 1];
+			Vector3 nudge = pick_point_in_triangle(u, v);
+			points[width * i + j] = point + nudge;
+		}
+	}
+	*result_count = points_count;
+	return points;
+}
+
+// Blue Noise using Mitchell's Best Candidate...................................
+
+static float toroidal_distance_squared(Vector2 v0, Vector2 v1, float circumference)
+{
+	float dx = abs(v1.x - v0.x);
+	float dy = abs(v1.y - v0.y);
+	if(dx > circumference / 2.0f)
+	{
+		dx = circumference - dx;
+	}
+	if(dy > circumference / 2.0f)
+	{
+		dy = circumference - dy;
+	}
+	return (dx * dx) + (dy * dy);
+}
+
+static const int spash_cell_indices_capacity = 6;
+
+// Spatial Hash Cell
+struct SpashCell
+{
+	int indices[spash_cell_indices_capacity];
+	int count;
+};
+
+static Vector2* create_blue_noise(int* result_count, int samples, float side)
+{
+	const float factor = 1.0f;
+	int points_capacity = samples;
+	int points_count = 0;
+	Vector2* points = ALLOCATE(Vector2, points_capacity);
+	int grid_side = sqrt(samples) / 3;
+	grid_side *= grid_side;
+	SpashCell* grid = ALLOCATE(SpashCell, grid_side * grid_side);
+	for(int i = 0; i < points_capacity; ++i, ++points_count)
+	{
+		// Generate some number of candidate points and choose the sample
+		// furthest from all the existing points.
+		int candidates = factor * points_count + 1;
+		Vector2 best_candidate = vector2_zero;
+		float best_distance = 0.0f;
+		int best_cell_x = 0;
+		int best_cell_y = 0;
+		for(int j = 0; j < candidates; ++j)
+		{
+			float x = arandom::float_range(0.0f, side);
+			float y = arandom::float_range(0.0f, side);
+			Vector2 candidate = {x, y};
+			// Search the grid cell where the candidate is for potentially
+			// close points.
+			int gx = (grid_side - 1) * (x / side);
+			int gy = (grid_side - 1) * (y / side);
+			float min = FLT_MAX;
+			SpashCell* cell = &grid[grid_side * gy + gx];
+			for(int k = 0; k < cell->count; ++k)
+			{
+				int index = cell->indices[k];
+				Vector2 close = points[index];
+				float d = toroidal_distance_squared(candidate, close, side);
+				min = fmin(min, d);
+			}
+			// If the closest point to this candidate is further than any prior
+			// candidate, then it's the new best.
+			if(min > best_distance)
+			{
+				best_distance = min;
+				best_candidate = candidate;
+				best_cell_x = gx;
+				best_cell_y = gy;
+			}
+		}
+		// Add the picked index to the containing grid cell and its neighbors.
+		for(int j = -1; j <= 1; ++j)
+		{
+			for(int k = -1; k <= 1; ++k)
+			{
+				int x = mod(best_cell_x + k, grid_side);
+				int y = mod(best_cell_y + j, grid_side);
+				SpashCell* cell = &grid[grid_side * y + x];
+				cell->indices[cell->count] = i;
+				cell->count = MIN(cell->count + 1, spash_cell_indices_capacity - 1);
+				ASSERT(cell->count < spash_cell_indices_capacity - 1);
+			}
+		}
+		points[i] = best_candidate;
+	}
+	SAFE_DEALLOCATE(grid);
+	*result_count = points_count;
+	return points;
+}
+
 // §3.5 Render System...........................................................
 
 namespace render {
@@ -4631,7 +4968,7 @@ const char* default_vertex_source = R"(
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
-layout(location = 2) in vec3 colour;
+layout(location = 2) in vec4 colour;
 
 uniform mat4x4 model_view_projection;
 uniform mat4x4 normal_matrix;
@@ -4643,7 +4980,7 @@ void main()
 {
 	gl_Position = model_view_projection * vec4(position, 1.0);
 	surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
-	surface_colour = colour;
+	surface_colour = colour.rgb;
 }
 )";
 
@@ -4678,19 +5015,16 @@ const char* vertex_source_vertex_colour = R"(
 #version 330
 
 layout(location = 0) in vec3 position;
-layout(location = 2) in vec3 colour;
+layout(location = 2) in vec4 colour;
 
 uniform mat4x4 model_view_projection;
-uniform float opacity;
 
-out vec3 surface_colour;
-out float surface_opacity;
+out vec4 surface_colour;
 
 void main()
 {
 	gl_Position = model_view_projection * vec4(position, 1.0);
 	surface_colour = colour;
-	surface_opacity = opacity;
 }
 )";
 
@@ -4699,12 +5033,11 @@ const char* fragment_source_vertex_colour = R"(
 
 layout(location = 0) out vec4 output_colour;
 
-in vec3 surface_colour;
-in float surface_opacity;
+in vec4 surface_colour;
 
 void main()
 {
-	output_colour = vec4(surface_colour, surface_opacity);
+	output_colour = surface_colour;
 }
 )";
 
@@ -4712,7 +5045,7 @@ const char* vertex_source_texture_only = R"(
 #version 330
 
 layout(location = 0) in vec3 position;
-layout(location = 2) in vec3 colour;
+layout(location = 3) in vec2 texcoord;
 
 uniform mat4x4 model_view_projection;
 
@@ -4721,8 +5054,7 @@ out vec2 surface_texcoord;
 void main()
 {
 	gl_Position = model_view_projection * vec4(position, 1.0);
-	// The texcoord is stored as a vertex colour because I'm lazy.
-	surface_texcoord = colour.xy;
+	surface_texcoord = texcoord;
 }
 )";
 
@@ -4746,7 +5078,7 @@ const char* vertex_source_camera_fade = R"(
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
-layout(location = 2) in vec3 colour;
+layout(location = 2) in vec4 colour;
 
 uniform mat4x4 model_view_projection;
 uniform mat4x4 normal_matrix;
@@ -4763,7 +5095,7 @@ void main()
 	vec4 position = model_view_projection * vec4(position, 1.0);
 	gl_Position = position;
 	surface_normal = (normal_matrix * vec4(normal, 0.0)).xyz;
-	surface_colour = colour;
+	surface_colour = colour.rgb;
 
 	float z_ndc = 2.0 * (position.z / position.w) - 1.0;
 	float z_eye = 2.0 * near * far / (far + near - z_ndc * (far - near));
@@ -4833,7 +5165,7 @@ static void object_set_surface(Object* object, VertexPNC* vertices, int vertices
 	glBufferData(GL_ARRAY_BUFFER, vertices_size, vertices, GL_STATIC_DRAW);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, vertex_size, nullptr);
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, vertex_size, offset1);
-	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, vertex_size, offset2);
+	glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, vertex_size, offset2);
 	glEnableVertexAttribArray(0);
 	glEnableVertexAttribArray(1);
 	glEnableVertexAttribArray(2);
@@ -4941,7 +5273,9 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 		float h = arandom::float_range(0.0f, 0.1f);
 		float s = arandom::float_range(0.7f, 0.9f);
 		float l = arandom::float_range(0.5f, 1.0f);
-		vertices[i].colour = hsl_to_rgb({h, s, l});
+		Vector3 rgb = hsl_to_rgb({h, s, l});
+		Vector4 rgba = make_vector4(rgb);
+		vertices[i].colour = rgba_to_u32(rgba);
 	}
 
 	// Generate the triangle indices.
@@ -5046,7 +5380,7 @@ void object_generate_sky(Object* object)
 	const Vector3 bottom_colour = {0.1f, 0.7f, 0.6f};
 	vertices[0].position = radius * vector3_unit_z;
 	vertices[0].normal = -vector3_unit_z;
-	vertices[0].colour = top_colour;
+	vertices[0].colour = rgb_to_u32(top_colour);
 	for(int i = 0; i < parallels; ++i)
 	{
 		float step = (i + 1) / static_cast<float>(rings);
@@ -5062,12 +5396,12 @@ void object_generate_sky(Object* object)
 			VertexPNC* vertex = &vertices[meridians * i + j + 1];
 			vertex->position = position;
 			vertex->normal = -normalise(position);
-			vertex->colour = ring_colour;
+			vertex->colour = rgb_to_u32(ring_colour);
 		}
 	}
 	vertices[vertices_count - 1].position = radius * -vector3_unit_z;
 	vertices[vertices_count - 1].normal = vector3_unit_z;
-	vertices[vertices_count - 1].colour = bottom_colour;
+	vertices[vertices_count - 1].colour = rgb_to_u32(bottom_colour);
 
 	int indices_count = 6 * meridians * rings;
 	u16* indices = ALLOCATE(u16, indices_count);
@@ -5149,9 +5483,13 @@ CallList fade_calls;
 Oscilloscope oscilloscope;
 const int traces_count = 2;
 Trace traces[traces_count];
+Vector2* particles;
+int particles_count;
 
 TWEAKER_BOOL(debug_draw_colliders, false);
+TWEAKER_INT_RANGE(debug_bih_tree_depth, 0, -1, 16);
 TWEAKER_BOOL(debug_show_oscilloscope, false);
+TWEAKER_BOOL(debug_show_texture_gallery, false);
 
 const float near_plane = 0.05f;
 const float far_plane = 12.0f;
@@ -5171,10 +5509,10 @@ static bool system_initialise()
 	};
 	VertexPNC vertices[4] =
 	{
-		{positions[0], { 0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{positions[1], {-0.816497f, 0.0f, -0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{positions[2], { 0.0f, 0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
-		{positions[3], { 0.0f,-0.816497f, +0.57735f}, {1.0f, 1.0f, 1.0f}},
+		{positions[0], { 0.816497f, 0.0f, -0.57735f}, 0xffffffff},
+		{positions[1], {-0.816497f, 0.0f, -0.57735f}, 0xffffffff},
+		{positions[2], { 0.0f, 0.816497f, +0.57735f}, 0xffffffff},
+		{positions[3], { 0.0f,-0.816497f, +0.57735f}, 0xffffffff},
 	};
 	u16 indices[12] =
 	{
@@ -5271,9 +5609,12 @@ static bool system_initialise()
 	}
 
 	immediate::context_create();
-	immediate::context->shader = shader_vertex_colour;
+	immediate::context->shaders[0] = shader_vertex_colour;
+	immediate::context->shaders[1] = shader_texture_only;
 
 	oscilloscope_default(&oscilloscope);
+
+	particles = create_blue_noise(&particles_count, 512, 5.0f);
 
 	return true;
 }
@@ -5293,6 +5634,7 @@ static void system_terminate(bool functions_loaded)
 		glDeleteProgram(shader_camera_fade);
 		glDeleteTextures(1, &camera_fade_dither_pattern);
 		immediate::context_destroy();
+		SAFE_DEALLOCATE(particles);
 	}
 }
 
@@ -5434,8 +5776,13 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 		for(int i = 0; i < world->colliders_count; ++i)
 		{
-			draw_bih_tree(&world->colliders[i].tree, 0);
+			draw_bih_tree(&world->colliders[i].tree, debug_bih_tree_depth);
 		}
+	}
+
+	{
+		Vector3 bottom_left = {-3.0f, -1.0f, 0.0f};
+		draw_particles(particles, particles_count, bottom_left);
 	}
 
 	// Draw the sky behind everything else.
@@ -5473,6 +5820,17 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		{
 			trace_oscilloscope_channel(&traces[i], &oscilloscope, i);
 		}
+	}
+
+	if(debug_show_texture_gallery)
+	{
+		const float side = 64.0f;
+		Rect rect;
+		rect.bottom_left = {-350.0f, -250.0f};
+		rect.dimensions = {side, side};
+		Quad quad = rect_to_quad(rect);
+		immediate::add_quad_textured(&quad);
+		immediate::draw();
 	}
 
 	draw_tweaker(tweaker);
