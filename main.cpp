@@ -109,6 +109,10 @@ Table Of Contents...............................................................
 #include <cstdlib>
 #include <cstring>
 #include <stdint.h>
+#include <cmath>
+
+using std::fmin;
+using std::fmax;
 
 // §1.1 Globally-Useful Things..................................................
 
@@ -172,6 +176,11 @@ static bool ensure_array_size(void** array, int* capacity, int item_size, int ex
 #define MIN(a, b)\
 	(((a) < (b)) ? (a) : (b))
 
+static float clamp(float a, float min, float max)
+{
+	return fmin(fmax(a, min), max);
+}
+
 static int string_size(const char* string)
 {
 	ASSERT(string);
@@ -185,9 +194,34 @@ static bool is_power_of_two(unsigned int x)
 	return (x != 0) && !(x & (x - 1));
 }
 
+static u32 next_power_of_two(u32 x)
+{
+	x |= x >> 1;
+	x |= x >> 2;
+	x |= x >> 4;
+	x |= x >> 8;
+	x |= x >> 16;
+	return x + 1;
+}
+
+static bool can_use_bitwise_and_to_cycle(int count)
+{
+	return is_power_of_two(count);
+}
+
 static int mod(int x, int n)
 {
 	return (x % n + n) % n;
+}
+
+static bool almost_zero(float x)
+{
+	return x > -1e-6f && x < 1e-6f;
+}
+
+static bool almost_one(float x)
+{
+	return abs(x - 1.0f) <= 0.5e-7f;
 }
 
 const float tau = 6.28318530717958647692f;
@@ -204,6 +238,8 @@ struct Clock
 void initialise_clock(Clock* clock);
 double get_time(Clock* clock);
 void go_to_sleep(Clock* clock, double amount_to_sleep);
+
+u64 get_timestamp_from_system();
 
 // §1.3 Logging Declarations....................................................
 
@@ -242,6 +278,85 @@ void atomic_int_store(AtomicInt* i, long value);
 long atomic_int_load(AtomicInt* i);
 long atomic_int_add(AtomicInt* augend, long addend);
 long atomic_int_subtract(AtomicInt* minuend, long subtrahend);
+
+bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired);
+
+// Profile Declarations.........................................................
+
+#if !defined(NDEBUG)
+#define PROFILE_ENABLED
+#endif
+
+#define PROFILE_MACRO_PASTE2(a, b) a##b
+#define PROFILE_MACRO_PASTE(a, b)\
+	PROFILE_MACRO_PASTE2(a, b)
+
+#if defined(_MSC_VER)
+#define PROFILE_FUNCTION_NAME __FUNCSIG__
+#elif defined(__GNUC__)
+#define PROFILE_FUNCTION_NAME __PRETTY_FUNCTION__
+#endif
+
+#if defined(PROFILE_ENABLED)
+
+#define PROFILE_BEGIN()\
+	profile::begin_period(PROFILE_FUNCTION_NAME)
+#define PROFILE_BEGIN_NAMED(name)\
+	profile::begin_period(name)
+#define PROFILE_END()\
+	profile::end_period()
+
+#define PROFILE_SCOPED()\
+	profile::ScopedBlock PROFILE_MACRO_PASTE(profile_scoped_, __LINE__)(PROFILE_FUNCTION_NAME)
+#define PROFILE_SCOPED_NAMED(name)\
+	profile::ScopedBlock PROFILE_MACRO_PASTE(profile_scoped_, __LINE__)(name)
+
+#define PROFILE_THREAD_ENTER()\
+	profile::enter_thread(PROFILE_FUNCTION_NAME)
+#define PROFILE_THREAD_ENTER_NAMED(name)\
+	profile::enter_thread(name)
+#define PROFILE_THREAD_EXIT()\
+	profile::exit_thread()
+
+#else
+
+#define PROFILE_BEGIN_NAMED(name)
+#define PROFILE_BEGIN()
+#define PROFILE_END()
+
+#define PROFILE_SCOPED()
+#define PROFILE_SCOPED_NAMED(name)
+
+#define PROFILE_THREAD_ENTER()
+#define PROFILE_THREAD_ENTER_NAMED(name)
+#define PROFILE_THREAD_EXIT()
+
+#endif
+
+namespace profile {
+
+void begin_period(const char* name);
+void end_period();
+void pause_period();
+void unpause_period();
+void enter_thread(const char* name);
+void exit_thread();
+void reset_thread();
+void cleanup();
+
+struct ScopedBlock
+{
+	ScopedBlock(const char* name)
+	{
+		PROFILE_BEGIN_NAMED(name);
+	}
+	~ScopedBlock()
+	{
+		PROFILE_END();
+	}
+};
+
+} // namespace profile
 
 // §1.5 Immediate Mode Drawing Declarations.....................................
 
@@ -350,7 +465,6 @@ float float_range(float min, float max)
 
 // §1.7 Vectors.................................................................
 
-#include <cmath>
 #include <cfloat>
 #include <climits>
 
@@ -398,6 +512,29 @@ Vector2& operator -= (Vector2& v0, Vector2 v1)
 	return v0;
 }
 
+Vector2 operator * (Vector2 v, float s)
+{
+	Vector2 result;
+	result.x = v.x * s;
+	result.y = v.y * s;
+	return result;
+}
+
+Vector2 operator * (float s, Vector2 v)
+{
+	Vector2 result;
+	result.x = s * v.x;
+	result.y = s * v.y;
+	return result;
+}
+
+Vector2& operator *= (Vector2& v, float s)
+{
+	v.x *= s;
+	v.y *= s;
+	return v;
+}
+
 Vector2 operator / (Vector2 v, float s)
 {
 	Vector2 result;
@@ -406,9 +543,43 @@ Vector2 operator / (Vector2 v, float s)
 	return result;
 }
 
+Vector2& operator /= (Vector2& v, float s)
+{
+	v.x /= s;
+	v.y /= s;
+	return v;
+}
+
 Vector2 operator - (Vector2 v)
 {
 	return {-v.x, -v.y};
+}
+
+Vector2 perp(Vector2 v)
+{
+	return {v.y, -v.x};
+}
+
+float squared_length(Vector2 v)
+{
+	return (v.x * v.x) + (v.y * v.y);
+}
+
+float length(Vector2 v)
+{
+	return sqrt(squared_length(v));
+}
+
+Vector2 normalise(Vector2 v)
+{
+	float l = length(v);
+	ASSERT(l != 0.0f && isfinite(l));
+	return v / l;
+}
+
+float dot(Vector2 v0, Vector2 v1)
+{
+	return (v0.x * v1.x) + (v0.y * v1.y);
 }
 
 Vector2 pointwise_multiply(Vector2 v0, Vector2 v1)
@@ -417,21 +588,6 @@ Vector2 pointwise_multiply(Vector2 v0, Vector2 v1)
 	result.x = v0.x * v1.x;
 	result.y = v0.y * v1.y;
 	return result;
-}
-
-Vector2 perp(Vector2 v)
-{
-	return {v.y, -v.x};
-}
-
-float dot(Vector2 v0, Vector2 v1)
-{
-	return (v0.x * v1.x) + (v0.y * v1.y);
-}
-
-float length(Vector2 v)
-{
-	return sqrt((v.x * v.x) + (v.y * v.y));
 }
 
 struct Vector3
@@ -625,11 +781,6 @@ static Vector4 make_vector4(Vector3 v)
 
 // §1.8 Quaternions.............................................................
 
-static bool float_almost_one(float x)
-{
-	return abs(x - 1.0f) <= 0.0000005f;
-}
-
 struct Quaternion
 {
 	float w, x, y, z;
@@ -672,7 +823,7 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 	result.y = v.y * phase;
 	result.z = v.z * phase;
 	// Rotations must be unit quaternions.
-	ASSERT(float_almost_one(norm(result)));
+	ASSERT(almost_one(norm(result)));
 	return result;
 }
 
@@ -1905,11 +2056,6 @@ struct CollisionPacket
 	bool found_collision;
 };
 
-static float clamp(float a, float min, float max)
-{
-	return fmin(fmax(a, min), max);
-}
-
 static bool point_in_triangle(Vector3 point, Vector3 pa, Vector3 pb, Vector3 pc)
 {
 	Vector3 e10 = pb - pa;
@@ -2881,7 +3027,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 
 namespace immediate {
 
-static const int context_max_vertices = 8192;
+static const int context_vertices_cap = 8192;
 static const int context_vertex_type_count = 2;
 
 enum class DrawMode
@@ -2909,8 +3055,8 @@ struct Context
 {
 	union
 	{
-		VertexPC vertices[context_max_vertices];
-		VertexPT vertices_textured[context_max_vertices];
+		VertexPC vertices[context_vertices_cap];
+		VertexPT vertices_textured[context_vertices_cap];
 	};
 	Matrix4 view_projection;
 	GLuint vertex_arrays[context_vertex_type_count];
@@ -3067,7 +3213,7 @@ void add_line(Vector3 start, Vector3 end, Vector4 colour)
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
 	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
-	ASSERT(c->filled + 2 < context_max_vertices);
+	ASSERT(c->filled + 2 < context_vertices_cap);
 	u32 colour_u32 = rgba_to_u32(colour);
 	c->vertices[c->filled + 0] = {start, colour_u32};
 	c->vertices[c->filled + 1] = {end, colour_u32};
@@ -3081,7 +3227,7 @@ void add_line_gradient(Vector3 start, Vector3 end, Vector4 colour0, Vector4 colo
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Lines || c->draw_mode == DrawMode::None);
 	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
-	ASSERT(c->filled + 2 < context_max_vertices);
+	ASSERT(c->filled + 2 < context_vertices_cap);
 	c->vertices[c->filled + 0] = {start, rgba_to_u32(colour0)};
 	c->vertices[c->filled + 1] = {end, rgba_to_u32(colour1)};
 	c->filled += 2;
@@ -3104,7 +3250,7 @@ static void add_wire_ellipse(Vector3 center, Quaternion orientation, Vector2 rad
 	float a = radius.x;
 	float b = radius.y;
 	int segments = ellipse_perimeter(a, b) / min_spacing;
-	ASSERT(c->filled + 2 * segments < context_max_vertices);
+	ASSERT(c->filled + 2 * segments < context_vertices_cap);
 	Vector3 point = {a, 0.0f, 0.0f};
 	Vector3 position = center + (orientation * point);
 	for(int i = 1; i <= segments; ++i)
@@ -3166,7 +3312,7 @@ void add_triangle(Triangle* triangle, Vector4 colour)
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
 	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
-	ASSERT(c->filled + 3 < context_max_vertices);
+	ASSERT(c->filled + 3 < context_vertices_cap);
 	for(int i = 0; i < 3; ++i)
 	{
 		c->vertices[c->filled + i].position = triangle->vertices[i];
@@ -3182,7 +3328,7 @@ void add_quad(Quad* quad, Vector4 colour)
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
 	ASSERT(c->vertex_type == VertexType::Colour || c->vertex_type == VertexType::None);
-	ASSERT(c->filled + 6 < context_max_vertices);
+	ASSERT(c->filled + 6 < context_vertices_cap);
 	c->vertices[c->filled + 0].position = quad->vertices[0];
 	c->vertices[c->filled + 1].position = quad->vertices[1];
 	c->vertices[c->filled + 2].position = quad->vertices[2];
@@ -3203,7 +3349,7 @@ void add_quad_textured(Quad* quad)
 	Context* c = context;
 	ASSERT(c->draw_mode == DrawMode::Triangles || c->draw_mode == DrawMode::None);
 	ASSERT(c->vertex_type == VertexType::Texture || c->vertex_type == VertexType::None);
-	ASSERT(c->filled + 6 < context_max_vertices);
+	ASSERT(c->filled + 6 < context_vertices_cap);
 	c->vertices_textured[c->filled + 0].position = quad->vertices[0];
 	c->vertices_textured[c->filled + 1].position = quad->vertices[1];
 	c->vertices_textured[c->filled + 2].position = quad->vertices[2];
@@ -3467,11 +3613,6 @@ static bool clip_test(float q, float p, float* te, float* tl)
 		}
 	}
 	return true;
-}
-
-static bool almost_zero(float x)
-{
-	return x > -1e-6f && x < 1e-6f;
 }
 
 static bool clip_line(Rect rect, Vector2* p0, Vector2* p1)
@@ -3742,7 +3883,347 @@ static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* fon
 	immediate::draw();
 }
 
+// Input........................................................................
+
+enum class UserKey
+{
+	Space,
+	Left,
+	Up,
+	Right,
+	Down,
+	Home,
+	End,
+	Page_Up,
+	Page_Down,
+	Tilde,
+	Enter,
+	S,
+	V,
+	F2,
+};
+
+namespace
+{
+	const int key_count = 14;
+
+	bool keys_pressed[key_count];
+	bool old_keys_pressed[key_count];
+	// This counts the frames since the last time the key state changed.
+	int edge_counts[key_count];
+}
+
+static void update_input_states()
+{
+	for(int i = 0; i < key_count; ++i)
+	{
+		if(keys_pressed[i] != old_keys_pressed[i])
+		{
+			edge_counts[i] = 0;
+			old_keys_pressed[i] = keys_pressed[i];
+		}
+		else
+		{
+			edge_counts[i] += 1;
+		}
+	}
+}
+
+static bool key_tapped(UserKey key)
+{
+	int which = static_cast<int>(key);
+	return keys_pressed[which] && edge_counts[which] == 0;
+}
+
+static bool key_released(UserKey key)
+{
+	int which = static_cast<int>(key);
+	return !keys_pressed[which] && edge_counts[which] == 0;
+}
+
+static bool key_pressed(UserKey key)
+{
+	int which = static_cast<int>(key);
+	return keys_pressed[which];
+}
+
+// Scroll Panel.................................................................
+
+static const int scroll_panel_lines_cap = 32;
+static const int scroll_panel_line_char_limit = 24;
+
+struct ScrollPanel
+{
+	char lines[scroll_panel_lines_cap][scroll_panel_line_char_limit];
+	Vector2 bottom_left;
+	Vector2 dimensions;
+	float scroll;
+	float line_height;
+	int selected;
+	int prior_selected;
+	int lines_count;
+};
+
+static float get_max_scroll(ScrollPanel* panel)
+{
+	const float weird_offset = 0.5f;
+	float max = (panel->line_height * panel->lines_count) - panel->dimensions.y + weird_offset;
+	max = fmax(max, 0.0f);
+	return max;
+}
+
+static void set_scroll(ScrollPanel* panel, float scroll)
+{
+	float max_scroll = get_max_scroll(panel);
+	panel->scroll = clamp(scroll, 0.0f, max_scroll);
+}
+
+static void scroll_panel(ScrollPanel* panel, float delta, float target)
+{
+	float distance = abs(delta);
+	const float scroll_speed = 4.0f;
+	if(distance < scroll_speed)
+	{
+		set_scroll(panel, target);
+	}
+	else
+	{
+		float move = scroll_speed * delta / distance;
+		set_scroll(panel, panel->scroll + move);
+	}
+}
+
+static void set_selection(ScrollPanel* panel, int index)
+{
+	int selected = mod(index, panel->lines_count);
+	if(index == -1 && selected == panel->lines_count - 1)
+	{
+		float max_scroll = get_max_scroll(panel);
+		set_scroll(panel, max_scroll);
+		panel->prior_selected = selected;
+	}
+	else if(selected == 0 && index == panel->lines_count)
+	{
+		set_scroll(panel, 0.0f);
+		panel->prior_selected = selected;
+	}
+	else
+	{
+		panel->prior_selected = panel->selected;
+	}
+	panel->selected = selected;
+}
+
+static void scroll_panel_update(ScrollPanel* panel)
+{
+	int selected = panel->selected;
+	int prior_selected = panel->prior_selected;
+
+	if(selected != prior_selected)
+	{
+		float threshold = 2.0f * panel->line_height;
+		float scroll = panel->scroll;
+
+		if(selected < prior_selected)
+		{
+			float target = (panel->line_height * selected) - threshold;
+			float scroll_top = scroll;
+			if(target < scroll_top)
+			{
+				float delta = target - scroll_top;
+				scroll_panel(panel, delta, target);
+			}
+		}
+		else
+		{
+			float target = (panel->line_height * (selected + 1)) + threshold;
+			float scroll_bottom = scroll + panel->dimensions.y;
+			if(target > scroll_bottom)
+			{
+				float delta = target - scroll_bottom;
+				float actual_target = target - panel->dimensions.y;
+				scroll_panel(panel, delta, actual_target);
+			}
+		}
+	}
+}
+
+static void scroll_panel_handle_input(ScrollPanel* panel)
+{
+	if(key_tapped(UserKey::Up))
+	{
+		set_selection(panel, panel->selected - 1);
+	}
+	if(key_tapped(UserKey::Down))
+	{
+		set_selection(panel, panel->selected + 1);
+	}
+	if(key_tapped(UserKey::Home))
+	{
+		set_selection(panel, panel->lines_count);
+	}
+	if(key_tapped(UserKey::End))
+	{
+		set_selection(panel, -1);
+	}
+	if(key_tapped(UserKey::Page_Up))
+	{
+		int lines_per_page = panel->dimensions.y / panel->line_height;
+		int selection = MAX(panel->selected - lines_per_page, 0);
+		set_scroll(panel, panel->scroll - panel->dimensions.y);
+		set_selection(panel, selection);
+		panel->prior_selected = panel->selected;
+	}
+	if(key_tapped(UserKey::Page_Down))
+	{
+		int lines_per_page = panel->dimensions.y / panel->line_height;
+		int selection = MIN(panel->selected + lines_per_page, panel->lines_count - 1);
+		set_scroll(panel, panel->scroll + panel->dimensions.y);
+		set_selection(panel, selection);
+		panel->prior_selected = panel->selected;
+	}
+}
+
+static Vector4 get_line_colour(ScrollPanel* panel, int index)
+{
+	if(index == panel->selected)
+	{
+		return colour_black;
+	}
+	return colour_white;
+}
+
+static Quad rect_to_quad(Rect r)
+{
+	float left = r.bottom_left.x;
+	float right = r.bottom_left.x + r.dimensions.x;
+	float bottom = r.bottom_left.y;
+	float top = r.bottom_left.y + r.dimensions.y;
+
+	Quad result;
+	result.vertices[0] = {left, bottom, 0.0f};
+	result.vertices[1] = {right, bottom, 0.0f};
+	result.vertices[2] = {right, top, 0.0f};
+	result.vertices[3] = {left, top, 0.0f};
+	return result;
+}
+
+static bool clip_rects(Rect inner, Rect outer, Rect* result)
+{
+	float i_right = inner.bottom_left.x + inner.dimensions.x;
+	float o_right = outer.bottom_left.x + outer.dimensions.x;
+	i_right = fmin(i_right, o_right);
+
+	float i_top = inner.bottom_left.y + inner.dimensions.y;
+	float o_top = outer.bottom_left.y + outer.dimensions.y;
+	i_top = fmin(i_top, o_top);
+
+	float x = fmax(inner.bottom_left.x, outer.bottom_left.x);
+	float y = fmax(inner.bottom_left.y, outer.bottom_left.y);
+	float width = i_right - x;
+	float height = i_top - y;
+
+	if(width <= 0.0f && height <= 0.0f)
+	{
+		return false;
+	}
+	else
+	{
+		result->bottom_left.x = x;
+		result->bottom_left.y = y;
+		result->dimensions.x = width;
+		result->dimensions.y = height;
+		return true;
+	}
+}
+
+static void draw_rect(Rect rect, Vector4 colour)
+{
+	Quad quad = rect_to_quad(rect);
+	immediate::add_quad(&quad, colour);
+	immediate::draw();
+}
+
+static void draw_rect_transparent(Rect rect, Vector4 colour)
+{
+	Quad quad = rect_to_quad(rect);
+	immediate::add_quad(&quad, colour);
+	immediate::set_blend_mode(immediate::BlendMode::Transparent);
+	immediate::draw();
+}
+
+static void scroll_panel_draw(ScrollPanel* panel, Font* font)
+{
+	// Draw the background.
+
+	Rect background_rect;
+	{
+		Vector2 dimensions = panel->dimensions;
+		Vector2 position = panel->bottom_left;
+		background_rect = {position, dimensions};
+		Vector4 colour = {0.0f, 0.0f, 0.0f, 0.5f};
+		draw_rect_transparent(background_rect, colour);
+	}
+
+	float scroll = panel->scroll;
+	float leading = font->leading;
+	int selected = panel->selected;
+
+	// Draw the scrollbar.
+
+	const float scrollbar_width = 16.0f;
+	{
+		float right = background_rect.bottom_left.x + background_rect.dimensions.x;
+		float x = right - scrollbar_width;
+		float width = scrollbar_width;
+
+		float max_height = background_rect.dimensions.y;
+		float top = background_rect.bottom_left.y + max_height;
+		float height = max_height / ((leading * panel->lines_count) / max_height);
+		height = clamp(height, scrollbar_width, max_height);
+		float max_scroll = (leading * panel->lines_count) - max_height;
+		float y = top - height - scroll * (max_height - height) / max_scroll;
+
+		Rect rect = {{x, y}, {width, height}};
+		draw_rect(rect, colour_white);
+	}
+
+	Rect scroll_area = background_rect;
+	scroll_area.dimensions.x -= scrollbar_width;
+	float top = scroll_area.bottom_left.y + scroll_area.dimensions.y;
+
+	// Draw the background of the selected line.
+	{
+		float x = scroll_area.bottom_left.x;
+		float y = -(leading * (selected + 1)) + top + scroll;
+		Rect rect = {{x, y}, {scroll_area.dimensions.x, leading}};
+		if(clip_rects(rect, scroll_area, &rect))
+		{
+			draw_rect(rect, colour_white);
+		}
+	}
+
+	// Draw the lines of text themselves.
+
+	int start_index = scroll / leading;
+	start_index = MAX(start_index, 0);
+	int end_index = ceil((scroll + scroll_area.dimensions.y) / leading);
+	end_index = MIN(end_index, panel->lines_count);
+
+	for(int i = start_index; i < end_index; ++i)
+	{
+		float x = scroll_area.bottom_left.x;
+		float y = -(leading * (i + 1)) + top + scroll;
+		Vector2 text_position = {x, y};
+		Vector4 colour = get_line_colour(panel, i);
+		draw_text(panel->lines[i], text_position, scroll_area, font, colour);
+	}
+}
+
 // Tweaker......................................................................
+//    This is my version of Jessica Mak's tweaker. It's a tool that lets you set
+//    simple variables like numbers and booleans while the game is running. It's
+//    only for testing and doesn't save the variables when changed.
 
 static const int tweaker_map_entries_count = 16;
 
@@ -3822,7 +4303,6 @@ static float register_tweaker_float(TweakerMap* map, const char* name, float* va
 	return initial;
 }
 
-static const int tweaker_lines_count = tweaker_map_entries_count;
 static const int tweaker_line_char_limit = 24;
 
 struct Tweaker
@@ -3834,24 +4314,6 @@ struct Tweaker
 		Adjust_Step,
 	};
 
-	enum class Key
-	{
-		Up,
-		Down,
-		Left,
-		Right,
-		Home,
-		End,
-		Page_Up,
-		Page_Down,
-		Enter,
-		Value,
-		Step,
-	};
-
-	char lines[tweaker_lines_count][tweaker_line_char_limit];
-	Font font;
-
 	struct
 	{
 		char value[tweaker_line_char_limit];
@@ -3859,12 +4321,9 @@ struct Tweaker
 		char range[tweaker_line_char_limit];
 	} readout;
 
-	Vector2 dimensions;
+	ScrollPanel scroll_panel;
+	Font font;
 	Mode mode;
-	float scroll;
-	int lines_count;
-	int selected;
-	int prior_selected;
 	bool on;
 };
 
@@ -3876,63 +4335,6 @@ static void tweaker_turn_on(Tweaker* tweaker, bool on)
 		tweaker->mode = Tweaker::Mode::Select;
 	}
 	tweaker->on = on;
-}
-
-static float tweaker_get_max_scroll(Tweaker* tweaker)
-{
-	const float weird_offset = 0.5f;
-	return (tweaker->font.leading * tweaker->lines_count) - tweaker->dimensions.y + weird_offset;
-}
-
-static void tweaker_set_scroll(Tweaker* tweaker, float scroll)
-{
-	float max_scroll = tweaker_get_max_scroll(tweaker);
-	tweaker->scroll = clamp(scroll, 0.0f, max_scroll);
-}
-
-static void tweaker_set_selection(Tweaker* tweaker, int index)
-{
-	int selected = mod(index, tweaker->lines_count);
-	if(index == -1 && selected == tweaker->lines_count - 1)
-	{
-		float max_scroll = tweaker_get_max_scroll(tweaker);
-		tweaker_set_scroll(tweaker, max_scroll);
-		tweaker->prior_selected = selected;
-	}
-	else if(selected == 0 && index == tweaker->lines_count)
-	{
-		tweaker_set_scroll(tweaker, 0.0f);
-		tweaker->prior_selected = selected;
-	}
-	else
-	{
-		tweaker->prior_selected = tweaker->selected;
-	}
-	tweaker->selected = selected;
-}
-
-static Vector4 tweaker_get_line_colour(Tweaker* tweaker, int index)
-{
-	if(index == tweaker->selected)
-	{
-		return colour_black;
-	}
-	return colour_white;
-}
-
-static void tweaker_scroll(Tweaker* tweaker, float delta, float target)
-{
-	float distance = abs(delta);
-	const float scroll_speed = 4.0f;
-	if(distance < scroll_speed)
-	{
-		tweaker_set_scroll(tweaker, target);
-	}
-	else
-	{
-		float move = scroll_speed * delta / distance;
-		tweaker_set_scroll(tweaker, tweaker->scroll + move);
-	}
 }
 
 static void adjust_value(TweakerMap* map, int selected, bool upward)
@@ -4028,7 +4430,8 @@ static void adjust_step(TweakerMap* map, int selected, bool upward)
 
 static void try_to_enter_adjust_step_mode(Tweaker* tweaker, TweakerMap* map)
 {
-	TweakerMap::EntryType type = map->entries[tweaker->selected].type;
+	int selected = tweaker->scroll_panel.selected;
+	TweakerMap::EntryType type = map->entries[selected].type;
 	bool is_step_adjustable =
 		type == TweakerMap::EntryType::Int ||
 		type == TweakerMap::EntryType::Float;
@@ -4038,142 +4441,60 @@ static void try_to_enter_adjust_step_mode(Tweaker* tweaker, TweakerMap* map)
 	}
 }
 
-static void tweaker_handle_key(Tweaker* tweaker, TweakerMap* map, Tweaker::Key key)
+static void tweaker_handle_input(Tweaker* tweaker, TweakerMap* map)
 {
 	switch(tweaker->mode)
 	{
 		case Tweaker::Mode::Select:
 		{
-			switch(key)
+			if(key_tapped(UserKey::V))
 			{
-				case Tweaker::Key::Value:
-				{
-					tweaker->mode = Tweaker::Mode::Adjust_Value;
-					break;
-				}
-				case Tweaker::Key::Step:
-				{
-					try_to_enter_adjust_step_mode(tweaker, map);
-					break;
-				}
-				case Tweaker::Key::Up:
-				{
-					tweaker_set_selection(tweaker, tweaker->selected - 1);
-					break;
-				}
-				case Tweaker::Key::Down:
-				{
-					tweaker_set_selection(tweaker, tweaker->selected + 1);
-					break;
-				}
-				case Tweaker::Key::Home:
-				{
-					tweaker_set_selection(tweaker, tweaker_lines_count);
-					break;
-				}
-				case Tweaker::Key::End:
-				{
-					tweaker_set_selection(tweaker, -1);
-					break;
-				}
-				case Tweaker::Key::Page_Up:
-				{
-					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
-					int selection = MAX(tweaker->selected - lines_per_page, 0);
-					tweaker_set_scroll(tweaker, tweaker->scroll - tweaker->dimensions.y);
-					tweaker_set_selection(tweaker, selection);
-					tweaker->prior_selected = tweaker->selected;
-					break;
-				}
-				case Tweaker::Key::Page_Down:
-				{
-					int lines_per_page = tweaker->dimensions.y / tweaker->font.leading;
-					int selection = MIN(tweaker->selected + lines_per_page, tweaker_lines_count - 1);
-					tweaker_set_scroll(tweaker, tweaker->scroll + tweaker->dimensions.y);
-					tweaker_set_selection(tweaker, selection);
-					tweaker->prior_selected = tweaker->selected;
-					break;
-				}
-				case Tweaker::Key::Enter:
-				case Tweaker::Key::Left:
-				case Tweaker::Key::Right:
-				{
-					break;
-				}
+				tweaker->mode = Tweaker::Mode::Adjust_Value;
 			}
+			if(key_tapped(UserKey::S))
+			{
+				try_to_enter_adjust_step_mode(tweaker, map);
+			}
+			scroll_panel_handle_input(&tweaker->scroll_panel);
 			break;
 		}
 		case Tweaker::Mode::Adjust_Value:
 		{
-			switch(key)
+			if(key_tapped(UserKey::Enter) || key_tapped(UserKey::V))
 			{
-				case Tweaker::Key::Value:
-				case Tweaker::Key::Enter:
-				{
-					tweaker->mode = Tweaker::Mode::Select;
-					break;
-				}
-				case Tweaker::Key::Step:
-				{
-					try_to_enter_adjust_step_mode(tweaker, map);
-					break;
-				}
-				case Tweaker::Key::Up:
-				case Tweaker::Key::Right:
-				{
-					adjust_value(map, tweaker->selected, true);
-					break;
-				}
-				case Tweaker::Key::Down:
-				case Tweaker::Key::Left:
-				{
-					adjust_value(map, tweaker->selected, false);
-					break;
-				}
-				case Tweaker::Key::Home:
-				case Tweaker::Key::End:
-				case Tweaker::Key::Page_Up:
-				case Tweaker::Key::Page_Down:
-				{
-					break;
-				}
+				tweaker->mode = Tweaker::Mode::Select;
+			}
+			if(key_tapped(UserKey::S))
+			{
+				try_to_enter_adjust_step_mode(tweaker, map);
+			}
+			if(key_tapped(UserKey::Up) || key_tapped(UserKey::Right))
+			{
+				adjust_value(map, tweaker->scroll_panel.selected, true);
+			}
+			if(key_tapped(UserKey::Down) || key_tapped(UserKey::Left))
+			{
+				adjust_value(map, tweaker->scroll_panel.selected, false);
 			}
 			break;
 		}
 		case Tweaker::Mode::Adjust_Step:
 		{
-			switch(key)
+			if(key_tapped(UserKey::S) || key_tapped(UserKey::Enter))
 			{
-				case Tweaker::Key::Step:
-				case Tweaker::Key::Enter:
-				{
-					tweaker->mode = Tweaker::Mode::Select;
-					break;
-				}
-				case Tweaker::Key::Value:
-				{
-					tweaker->mode = Tweaker::Mode::Adjust_Value;
-					break;
-				}
-				case Tweaker::Key::Up:
-				case Tweaker::Key::Right:
-				{
-					adjust_step(map, tweaker->selected, true);
-					break;
-				}
-				case Tweaker::Key::Down:
-				case Tweaker::Key::Left:
-				{
-					adjust_step(map, tweaker->selected, false);
-					break;
-				}
-				case Tweaker::Key::Home:
-				case Tweaker::Key::End:
-				case Tweaker::Key::Page_Up:
-				case Tweaker::Key::Page_Down:
-				{
-					break;
-				}
+				tweaker->mode = Tweaker::Mode::Select;
+			}
+			if(key_tapped(UserKey::V))
+			{
+				tweaker->mode = Tweaker::Mode::Adjust_Value;
+			}
+			if(key_tapped(UserKey::Up) || key_tapped(UserKey::Right))
+			{
+				adjust_step(map, tweaker->scroll_panel.selected, true);
+			}
+			if(key_tapped(UserKey::Down) || key_tapped(UserKey::Left))
+			{
+				adjust_step(map, tweaker->scroll_panel.selected, false);
 			}
 			break;
 		}
@@ -4224,16 +4545,17 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 		return;
 	}
 
+	tweaker_handle_input(tweaker, map);
+
 	// Fill out the left panel with entry names.
 	for(int i = 0; i < map->count; ++i)
 	{
-		copy_string(tweaker->lines[i], tweaker_line_char_limit, map->entries[i].name);
+		copy_string(tweaker->scroll_panel.lines[i], scroll_panel_line_char_limit, map->entries[i].name);
 	}
 
 	// Fill the right panel with the readout value and the step amount.
 
-	int selected = tweaker->selected;
-	int prior_selected = tweaker->prior_selected;
+	int selected = tweaker->scroll_panel.selected;
 
 	if(!map->entries[selected].name)
 	{
@@ -4294,92 +4616,7 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 	}
 
 	// Update the scroll position in the left panel.
-	if(selected != prior_selected)
-	{
-		float threshold = 2.0f * tweaker->font.leading;
-		float scroll = tweaker->scroll;
-
-		if(selected < prior_selected)
-		{
-			float target = (tweaker->font.leading * selected) - threshold;
-			float scroll_top = scroll;
-			if(target < scroll_top)
-			{
-				float delta = target - scroll_top;
-				tweaker_scroll(tweaker, delta, target);
-			}
-		}
-		else
-		{
-			float target = (tweaker->font.leading * (selected + 1)) + threshold;
-			float scroll_bottom = scroll + tweaker->dimensions.y;
-			if(target > scroll_bottom)
-			{
-				float delta = target - scroll_bottom;
-				float actual_target = target - tweaker->dimensions.y;
-				tweaker_scroll(tweaker, delta, actual_target);
-			}
-		}
-	}
-}
-
-static Quad rect_to_quad(Rect r)
-{
-	float left = r.bottom_left.x;
-	float right = r.bottom_left.x + r.dimensions.x;
-	float bottom = r.bottom_left.y;
-	float top = r.bottom_left.y + r.dimensions.y;
-
-	Quad result;
-	result.vertices[0] = {left, bottom, 0.0f};
-	result.vertices[1] = {right, bottom, 0.0f};
-	result.vertices[2] = {right, top, 0.0f};
-	result.vertices[3] = {left, top, 0.0f};
-	return result;
-}
-
-static bool clip_rects(Rect inner, Rect outer, Rect* result)
-{
-	float i_right = inner.bottom_left.x + inner.dimensions.x;
-	float o_right = outer.bottom_left.x + outer.dimensions.x;
-	i_right = fmin(i_right, o_right);
-
-	float i_top = inner.bottom_left.y + inner.dimensions.y;
-	float o_top = outer.bottom_left.y + outer.dimensions.y;
-	i_top = fmin(i_top, o_top);
-
-	float x = fmax(inner.bottom_left.x, outer.bottom_left.x);
-	float y = fmax(inner.bottom_left.y, outer.bottom_left.y);
-	float width = i_right - x;
-	float height = i_top - y;
-
-	if(width <= 0.0f && height <= 0.0f)
-	{
-		return false;
-	}
-	else
-	{
-		result->bottom_left.x = x;
-		result->bottom_left.y = y;
-		result->dimensions.x = width;
-		result->dimensions.y = height;
-		return true;
-	}
-}
-
-static void draw_rect(Rect rect, Vector4 colour)
-{
-	Quad quad = rect_to_quad(rect);
-	immediate::add_quad(&quad, colour);
-	immediate::draw();
-}
-
-static void draw_rect_transparent(Rect rect, Vector4 colour)
-{
-	Quad quad = rect_to_quad(rect);
-	immediate::add_quad(&quad, colour);
-	immediate::set_blend_mode(immediate::BlendMode::Transparent);
-	immediate::draw();
+	scroll_panel_update(&tweaker->scroll_panel);
 }
 
 static void draw_tweaker(Tweaker* tweaker)
@@ -4390,81 +4627,29 @@ static void draw_tweaker(Tweaker* tweaker)
 		return;
 	}
 
-	// Draw the background.
+	scroll_panel_draw(&tweaker->scroll_panel, &tweaker->font);
 
-	Rect background_rect;
-	{
-		Vector2 dimensions = tweaker->dimensions;
-		Vector2 position = -dimensions / 2.0f;
-		background_rect = {position, dimensions};
-		Vector4 colour = {0.0f, 0.0f, 0.0f, 0.5f};
-		draw_rect_transparent(background_rect, colour);
-	}
-
-	Rect left_panel = background_rect;
-	left_panel.dimensions.x /= 2.0f;
-
-	float scroll = tweaker->scroll;
 	float leading = tweaker->font.leading;
-	int selected = tweaker->selected;
 
-	// Draw the scrollbar.
-
-	const float scrollbar_width = 16.0f;
+	Rect left_panel;
 	{
-		float right = left_panel.bottom_left.x + left_panel.dimensions.x;
-		float x = right - scrollbar_width;
-		float width = scrollbar_width;
-
-		float max_height = left_panel.dimensions.y;
-		float top = left_panel.bottom_left.y + max_height;
-		float height = max_height / ((leading * tweaker->lines_count) / max_height);
-		height = clamp(height, scrollbar_width, max_height);
-		float max_scroll = (leading * tweaker->lines_count) - max_height;
-		float y = top - height - scroll * (max_height - height) / max_scroll;
-
-		Rect rect = {{x, y}, {width, height}};
-		draw_rect(rect, colour_white);
+		Vector2 dimensions = tweaker->scroll_panel.dimensions;
+		Vector2 position = tweaker->scroll_panel.bottom_left;
+		left_panel = {position, dimensions};
 	}
 
-	Rect scroll_area = left_panel;
-	scroll_area.dimensions.x -= scrollbar_width;
-	float top = scroll_area.bottom_left.y + scroll_area.dimensions.y;
-
-	// Draw the background of the selected line.
-	{
-		float x = scroll_area.bottom_left.x;
-		float y = -(leading * (selected + 1)) + top + scroll;
-		Rect rect = {{x, y}, {scroll_area.dimensions.x, leading}};
-		if(clip_rects(rect, scroll_area, &rect))
-		{
-			draw_rect(rect, colour_white);
-		}
-	}
-
-	// Draw the lines of text themselves.
-
-	int start_index = scroll / leading;
-	start_index = MAX(start_index, 0);
-	int end_index = ceil((scroll + scroll_area.dimensions.y) / leading);
-	end_index = MIN(end_index, tweaker->lines_count);
-
-	for(int i = start_index; i < end_index; ++i)
-	{
-		float x = scroll_area.bottom_left.x;
-		float y = -(leading * (i + 1)) + top + scroll;
-		Vector2 text_position = {x, y};
-		Vector4 colour = tweaker_get_line_colour(tweaker, i);
-		draw_text(tweaker->lines[i], text_position, scroll_area, &tweaker->font, colour);
-	}
-
-	// Draw the readout in the right panel.
+	// Draw the background of the right panel.
 
 	Rect right_panel = left_panel;
 	right_panel.bottom_left.x += right_panel.dimensions.x;
 
+	Vector4 colour = {0.0f, 0.0f, 0.0f, 0.5f};
+	draw_rect_transparent(right_panel, colour);
+
+	// Draw the readout in the right panel.
+
 	float left = right_panel.bottom_left.x;
-	top = right_panel.bottom_left.y + right_panel.dimensions.y;
+	float top = right_panel.bottom_left.y + right_panel.dimensions.y;
 
 	Vector2 text_position = {left, top - leading};
 	draw_text(tweaker->readout.value, text_position, right_panel, &tweaker->font, colour_white);
@@ -4603,11 +4788,6 @@ static void oscilloscope_default(Oscilloscope* scope)
 	scope->trigger_level = 0.0f;
 	scope->disable_trigger = false;
 	scope->trigger_rising_edge = true;
-}
-
-static bool can_use_bitwise_and_to_cycle(int count)
-{
-	return is_power_of_two(count);
 }
 
 static int get_cyclic_distance(int a, int b, int range)
@@ -4786,6 +4966,151 @@ static void draw_trace(Trace* trace, float x, float y, float width, float height
 	immediate::draw();
 }
 
+// Profile Inspector............................................................
+
+namespace profile {
+
+struct Record
+{
+	const char* name;
+	u64 ticks;
+	int calls;
+	int indent;
+};
+
+typedef volatile u32 SpinLock;
+
+void spin_lock_acquire(SpinLock* lock);
+void spin_lock_release(SpinLock* lock);
+
+const int thread_history_records_count = 2;
+
+struct ThreadHistory
+{
+	Record* records[thread_history_records_count];
+	int records_count[thread_history_records_count];
+	int records_capacity[thread_history_records_count];
+	SpinLock lock;
+};
+
+struct Inspector
+{
+	ScrollPanel scroll_panel;
+	Font font;
+	ThreadHistory history;
+	bool on;
+};
+
+static int find_char(const char* s, char c)
+{
+	int i;
+	for(i = 0; *s != c; ++s, ++i)
+	{
+		if(!*s)
+		{
+			return -1;
+		}
+	}
+	return i;
+}
+
+static int find_last_char(const char* s, char c, int upto)
+{
+	int result = -1;
+	int i = 0;
+	do
+	{
+		if(*s == c)
+		{
+			result = i;
+		}
+	} while(*s++ && i++ < upto);
+	return result;
+}
+
+static void function_name_from_signature(char* name, int name_cap, const char* signature)
+{
+	int parens = find_char(signature, '(');
+	if(parens != -1)
+	{
+		int space = find_last_char(signature, ' ', parens);
+		int colon = find_last_char(signature, ':', parens);
+		int start = MAX(space, colon);
+		if(start != -1)
+		{
+			int name_limit = MIN(parens - start, name_cap);
+			copy_string(name, name_limit, signature + start + 1);
+		}
+		else
+		{
+			copy_string(name, name_cap, signature);
+		}
+	}
+	else
+	{
+		copy_string(name, name_cap, signature);
+	}
+}
+
+static void inspector_fill_lines(Inspector* inspector)
+{
+	ScrollPanel* panel = &inspector->scroll_panel;
+	panel->lines_count = 0;
+
+	ThreadHistory* history = &inspector->history;
+	spin_lock_acquire(&history->lock);
+
+	for(int i = 0; i < thread_history_records_count; ++i)
+	{
+		Record* records = history->records[i];
+		int records_count = history->records_count[i];
+		for(int j = 0; j < records_count; ++j)
+		{
+			char* line = panel->lines[panel->lines_count];
+			panel->lines_count = MIN(panel->lines_count + 1, scroll_panel_lines_cap - 1);
+			ASSERT(panel->lines_count + 1 < scroll_panel_lines_cap);
+
+			Record* record = &records[j];
+			int indent = record->indent;
+
+			for(int k = 0; k < indent; ++k)
+			{
+				line[k] = ' ';
+			}
+
+			const int name_cap = 32;
+			char name[name_cap];
+			function_name_from_signature(name, name_cap, record->name);
+
+			int char_limit = scroll_panel_line_char_limit - indent;
+			int name_limit = 12 - indent;
+			int milliticks = record->ticks / 1e3;
+			snprintf(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
+		}
+	}
+
+	spin_lock_release(&history->lock);
+}
+
+static void inspector_update(Inspector* inspector)
+{
+	scroll_panel_handle_input(&inspector->scroll_panel);
+	scroll_panel_update(&inspector->scroll_panel);
+	inspector_fill_lines(inspector);
+}
+
+static void draw_inspector(Inspector* inspector)
+{
+	if(!inspector->on)
+	{
+		return;
+	}
+
+	scroll_panel_draw(&inspector->scroll_panel, &inspector->font);
+}
+
+} // namespace profile
+
 // Jittered Grid................................................................
 
 static void draw_particles(Vector2* points, int points_count, Vector3 bottom_left)
@@ -4882,25 +5207,28 @@ static float toroidal_distance_squared(Vector2 v0, Vector2 v1, float circumferen
 	return (dx * dx) + (dy * dy);
 }
 
-static const int spash_cell_indices_capacity = 6;
+static const int spash_cell_indices_cap = 6;
 
 // Spatial Hash Cell
 struct SpashCell
 {
-	int indices[spash_cell_indices_capacity];
+	int indices[spash_cell_indices_cap];
 	int count;
 };
 
-static Vector2* create_blue_noise(int* result_count, int samples, float side)
+static Vector2* create_blue_noise(int samples, float side)
 {
 	const float factor = 1.0f;
-	int points_capacity = samples;
+
+	int points_cap = samples;
 	int points_count = 0;
-	Vector2* points = ALLOCATE(Vector2, points_capacity);
+	Vector2* points = ALLOCATE(Vector2, points_cap);
+
 	int grid_side = sqrt(samples) / 3;
 	grid_side *= grid_side;
 	SpashCell* grid = ALLOCATE(SpashCell, grid_side * grid_side);
-	for(int i = 0; i < points_capacity; ++i, ++points_count)
+
+	for(int i = 0; i < points_cap; ++i, ++points_count)
 	{
 		// Generate some number of candidate points and choose the sample
 		// furthest from all the existing points.
@@ -4946,14 +5274,15 @@ static Vector2* create_blue_noise(int* result_count, int samples, float side)
 				int y = mod(best_cell_y + j, grid_side);
 				SpashCell* cell = &grid[grid_side * y + x];
 				cell->indices[cell->count] = i;
-				cell->count = MIN(cell->count + 1, spash_cell_indices_capacity - 1);
-				ASSERT(cell->count < spash_cell_indices_capacity - 1);
+				cell->count = MIN(cell->count + 1, spash_cell_indices_cap - 1);
+				ASSERT(cell->count < spash_cell_indices_cap - 1);
 			}
 		}
 		points[i] = best_candidate;
 	}
+
 	SAFE_DEALLOCATE(grid);
-	*result_count = points_count;
+
 	return points;
 }
 
@@ -5463,10 +5792,40 @@ struct CallList
 	int count;
 };
 
-GLuint shader;
-GLuint shader_vertex_colour;
-GLuint shader_texture_only;
-GLuint shader_camera_fade;
+struct
+{
+	GLuint program;
+	GLint light_direction;
+	GLint model_view_projection;
+	GLint normal_matrix;
+} shader_default;
+
+struct
+{
+	GLuint program;
+	GLint model_view_projection;
+	GLint normal_matrix;
+	GLint light_direction;
+	GLint dither_pattern;
+	GLint dither_pattern_side;
+	GLint near;
+	GLint far;
+	GLint fade_distance;
+} shader_camera_fade;
+
+struct
+{
+	GLuint program;
+	GLint model_view_projection;
+} shader_vertex_colour;
+
+struct
+{
+	GLuint program;
+	GLint model_view_projection;
+	GLint texture;
+} shader_texture_only;
+
 GLuint camera_fade_dither_pattern;
 GLuint nearest_repeat;
 Matrix4 projection;
@@ -5553,49 +5912,72 @@ static bool system_initialise()
 		glSamplerParameteri(nearest_repeat, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	}
 
-	shader = load_shader_program(default_vertex_source, default_fragment_source);
-	if(shader == 0)
+	shader_default.program = load_shader_program(default_vertex_source, default_fragment_source);
+	if(shader_default.program == 0)
 	{
 		LOG_ERROR("The default shader failed to load.");
 		return false;
 	}
+	{
+		GLuint program = shader_default.program;
+		shader_default.model_view_projection = glGetUniformLocation(program, "model_view_projection");
+		shader_default.normal_matrix = glGetUniformLocation(program, "normal_matrix");
+		shader_default.light_direction = glGetUniformLocation(program, "light_direction");
+	}
 
-	shader_vertex_colour = load_shader_program(vertex_source_vertex_colour, fragment_source_vertex_colour);
-	if(shader_vertex_colour == 0)
+	shader_vertex_colour.program = load_shader_program(vertex_source_vertex_colour, fragment_source_vertex_colour);
+	if(shader_vertex_colour.program == 0)
 	{
 		LOG_ERROR("The vertex colour shader failed to load.");
 		return false;
 	}
+	{
+		shader_vertex_colour.model_view_projection = glGetUniformLocation(shader_vertex_colour.program, "model_view_projection");
+	}
 
-	shader_texture_only = load_shader_program(vertex_source_texture_only, fragment_source_texture_only);
-	if(shader_texture_only == 0)
+	shader_texture_only.program = load_shader_program(vertex_source_texture_only, fragment_source_texture_only);
+	if(shader_texture_only.program == 0)
 	{
 		LOG_ERROR("The texture-only shader failed to load.");
 		return false;
 	}
 	{
-		glUseProgram(shader_texture_only);
-		glUniform1i(glGetUniformLocation(shader_camera_fade, "texture"), 0);
+		GLuint program = shader_texture_only.program;
+		shader_texture_only.model_view_projection = glGetUniformLocation(program, "model_view_projection");
+		shader_texture_only.texture = glGetUniformLocation(program, "texture");
+
+		glUseProgram(shader_texture_only.program);
+		glUniform1i(shader_texture_only.texture, 0);
 	}
 
-	shader_camera_fade = load_shader_program(vertex_source_camera_fade, fragment_source_camera_fade);
-	if(shader_camera_fade == 0)
+	shader_camera_fade.program = load_shader_program(vertex_source_camera_fade, fragment_source_camera_fade);
+	if(shader_camera_fade.program == 0)
 	{
 		LOG_ERROR("The camera fade shader failed to load.");
 		return false;
 	}
 	{
-		glUseProgram(shader_camera_fade);
-		glUniform1i(glGetUniformLocation(shader_camera_fade, "dither_pattern"), 0);
-		glUniform1f(glGetUniformLocation(shader_camera_fade, "dither_pattern_side"), 4.0f);
-		glUniform1f(glGetUniformLocation(shader_camera_fade, "near"), near_plane);
-		glUniform1f(glGetUniformLocation(shader_camera_fade, "far"), far_plane);
-		glUniform1f(glGetUniformLocation(shader_camera_fade, "fade_distance"), 0.2f);
+		GLuint program = shader_camera_fade.program;
+		shader_camera_fade.model_view_projection = glGetUniformLocation(program, "model_view_projection");
+		shader_camera_fade.normal_matrix = glGetUniformLocation(program, "normal_matrix");
+		shader_camera_fade.light_direction = glGetUniformLocation(program, "light_direction");
+		shader_camera_fade.dither_pattern = glGetUniformLocation(program, "dither_pattern");
+		shader_camera_fade.dither_pattern_side = glGetUniformLocation(program, "dither_pattern_side");
+		shader_camera_fade.near = glGetUniformLocation(program, "near");
+		shader_camera_fade.far = glGetUniformLocation(program, "far");
+		shader_camera_fade.fade_distance = glGetUniformLocation(program, "fade_distance");
+
+		glUseProgram(shader_camera_fade.program);
+		glUniform1i(shader_camera_fade.dither_pattern, 0);
+		glUniform1f(shader_camera_fade.dither_pattern_side, 4.0f);
+		glUniform1f(shader_camera_fade.near, near_plane);
+		glUniform1f(shader_camera_fade.far, far_plane);
+		glUniform1f(shader_camera_fade.fade_distance, 0.2f);
 
 		float pattern[16] =
 		{
-			 0.0f, 0.5f, 0.125f, 0.625f,
-			 0.75f, 0.25f, 0.875f, 0.375f,
+			 0.0000f, 0.0005f, 0.0125f, 0.0625f,
+			 0.0075f, 0.0025f, 0.0875f, 0.0375f,
 			 0.1875f, 0.6875f, 0.0625f, 0.5625f,
 			 0.9375f, 0.4375f, 0.8125f, 0.3125f,
 		};
@@ -5609,12 +5991,78 @@ static bool system_initialise()
 	}
 
 	immediate::context_create();
-	immediate::context->shaders[0] = shader_vertex_colour;
-	immediate::context->shaders[1] = shader_texture_only;
+	immediate::context->shaders[0] = shader_vertex_colour.program;
+	immediate::context->shaders[1] = shader_texture_only.program;
 
 	oscilloscope_default(&oscilloscope);
 
-	particles = create_blue_noise(&particles_count, 512, 5.0f);
+	{
+		const float side = 5.0f;
+		int noise_square_count = 512;
+		Vector2* noise_square = create_blue_noise(noise_square_count, side);
+		particles = ALLOCATE(Vector2, noise_square_count);
+#if 0
+		const int map_side = 20;
+		SpashCell* map = ALLOCATE(SpashCell, map_side * map_side);
+		for(int i = 0; i < particles_count; ++i)
+		{
+			int x = (map_side - 1) * (particles[i].x / side);
+			int y = (map_side - 1) * (particles[i].y / side);
+			SpashCell* cell = &map[map_side * y + x];
+			cell->indices[cell->count] = i;
+			cell->count = MIN(cell->count + 1, spash_cell_indices_capacity - 1);
+			ASSERT(cell->count < spash_cell_indices_capacity - 1);
+		}
+		SAFE_DEALLOCATE(map);
+#endif
+		particles_count = 0;
+#if 1
+		int map_side = 64;
+		u8* map = ALLOCATE(u8, map_side * map_side);
+		for(int y = 0; y < map_side; ++y)
+		{
+			for(int x = 0; x < map_side; ++x)
+			{
+				float s0 = cos(3.0f * tau * x / static_cast<float>(map_side));
+				float s1 = sin(3.0f * tau * y / static_cast<float>(map_side));
+				map[map_side * y + x] = (s0 + s1 > 0.0f) ? 0 : 255;
+			}
+		}
+
+		for(int i = 0; i < noise_square_count; ++i)
+		{
+			Vector2 p = noise_square[i];
+			int x = map_side * p.x / side;
+			int y = map_side * p.y / side;
+			float m = map[map_side * y + x] / 255.0f;
+			if(arandom::float_range(0.0f, 1.0f) < m)
+			{
+				particles[particles_count] = p;
+				particles_count += 1;
+			}
+		}
+#else
+		Vector2 center = {side / 2.0f, side / 2.0f};
+		const float ri = 1.0f;
+		const float ro = 2.5f;
+		for(int i = 0; i < noise_square_count; ++i)
+		{
+			Vector2 p = noise_square[i];
+			Vector2 v = p - center;
+			float d = squared_length(v);
+			float ris = ri * ri;
+			float ros = ro * ro;
+			float m = (d - ris) / (ros - ris);
+			if(d < ris || (d < ros && arandom::float_range(0.0f, 1.0f) > m))
+			{
+				particles[particles_count] = p;
+				particles_count += 1;
+			}
+		}
+#endif
+
+		SAFE_DEALLOCATE(noise_square);
+	}
 
 	return true;
 }
@@ -5628,10 +6076,10 @@ static void system_terminate(bool functions_loaded)
 			object_destroy(&objects[i]);
 		}
 		glDeleteSamplers(1, &nearest_repeat);
-		glDeleteProgram(shader);
-		glDeleteProgram(shader_vertex_colour);
-		glDeleteProgram(shader_texture_only);
-		glDeleteProgram(shader_camera_fade);
+		glDeleteProgram(shader_default.program);
+		glDeleteProgram(shader_vertex_colour.program);
+		glDeleteProgram(shader_texture_only.program);
+		glDeleteProgram(shader_camera_fade.program);
 		glDeleteTextures(1, &camera_fade_dither_pattern);
 		immediate::context_destroy();
 		SAFE_DEALLOCATE(particles);
@@ -5647,8 +6095,10 @@ static void resize_viewport(int width, int height)
 	glViewport(0, 0, width, height);
 }
 
-static void system_update(Vector3 position, Vector3 dancer_position, World* world, Tweaker* tweaker)
+static void system_update(Vector3 position, Vector3 dancer_position, World* world, Tweaker* tweaker, profile::Inspector* inspector)
 {
+	PROFILE_SCOPED();
+
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
@@ -5705,24 +6155,17 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		Vector3 light_direction = {0.7f, 0.4f, -1.0f};
 		light_direction = normalise(-(view * light_direction));
 
-		glUseProgram(shader);
-		GLint location = glGetUniformLocation(shader, "light_direction");
-		glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
+		glUseProgram(shader_default.program);
+		glUniform3fv(shader_default.light_direction, 1, reinterpret_cast<float*>(&light_direction));
 
-		glUseProgram(shader_camera_fade);
-		location = glGetUniformLocation(shader_camera_fade, "light_direction");
-		glUniform3fv(location, 1, reinterpret_cast<float*>(&light_direction));
+		glUseProgram(shader_camera_fade.program);
+		glUniform3fv(shader_camera_fade.light_direction, 1, reinterpret_cast<float*>(&light_direction));
 
 		view_projection = projection * view;
 	}
 
-	GLint location0 = glGetUniformLocation(shader, "model_view_projection");
-	GLint location1 = glGetUniformLocation(shader, "normal_matrix");
-
-	GLint location00 = glGetUniformLocation(shader_camera_fade, "model_view_projection");
-	GLint location11 = glGetUniformLocation(shader_camera_fade, "normal_matrix");
-
 	// Form lists of objects not culled.
+	PROFILE_BEGIN_NAMED("cull_and_list");
 	fade_calls.count = 0;
 	solid_calls.count = 0;
 	for(int i = 0; i < objects_count; ++i)
@@ -5743,28 +6186,33 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 			}
 		}
 	}
+	PROFILE_END();
 
 	// Draw all the faded objects first because they are close to the camera.
-	glUseProgram(shader_camera_fade);
+	PROFILE_BEGIN_NAMED("faded_phase");
+	glUseProgram(shader_camera_fade.program);
 	for(int i = 0; i < fade_calls.count; ++i)
 	{
 		Object* o = &objects[fade_calls.indices[i]];
-		glUniformMatrix4fv(location00, 1, GL_TRUE, o->model_view_projection.elements);
-		glUniformMatrix4fv(location11, 1, GL_TRUE, o->normal_matrix.elements);
+		glUniformMatrix4fv(shader_camera_fade.model_view_projection, 1, GL_TRUE, o->model_view_projection.elements);
+		glUniformMatrix4fv(shader_camera_fade.normal_matrix, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
+	PROFILE_END();
 
 	// Draw all the solid objects in the list.
-	glUseProgram(shader);
+	PROFILE_BEGIN_NAMED("solid_phase");
+	glUseProgram(shader_default.program);
 	for(int i = 0; i < solid_calls.count; ++i)
 	{
 		Object* o = &objects[solid_calls.indices[i]];
-		glUniformMatrix4fv(location0, 1, GL_TRUE, o->model_view_projection.elements);
-		glUniformMatrix4fv(location1, 1, GL_TRUE, o->normal_matrix.elements);
+		glUniformMatrix4fv(shader_default.model_view_projection, 1, GL_TRUE, o->model_view_projection.elements);
+		glUniformMatrix4fv(shader_default.normal_matrix, 1, GL_TRUE, o->normal_matrix.elements);
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
+	PROFILE_END();
 
 	// Draw debug visualisers.
 	immediate::draw();
@@ -5780,6 +6228,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		}
 	}
 
+	// Blue noise test
 	{
 		Vector3 bottom_left = {-3.0f, -1.0f, 0.0f};
 		draw_particles(particles, particles_count, bottom_left);
@@ -5788,9 +6237,9 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	// Draw the sky behind everything else.
 	{
 		glDepthMask(GL_FALSE);
-		glUseProgram(shader_vertex_colour);
+		glUseProgram(shader_vertex_colour.program);
 		Object* o = &sky;
-		GLint location = glGetUniformLocation(shader_vertex_colour, "model_view_projection");
+		GLint location = shader_vertex_colour.model_view_projection;
 		glUniformMatrix4fv(location, 1, GL_TRUE, o->model_view_projection.elements);
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
@@ -5834,6 +6283,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	}
 
 	draw_tweaker(tweaker);
+	profile::draw_inspector(inspector);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -7035,7 +7485,7 @@ static void free_associated_voices(VoiceEntry* voice_map, int voices, int track)
 
 // History......................................................................
 
-static const int history_events_max = 32;
+static const int history_events_cap = 32;
 
 struct History
 {
@@ -7046,7 +7496,7 @@ struct History
 		bool started;
 	};
 
-	Event events[history_events_max];
+	Event events[history_events_cap];
 	int count;
 };
 
@@ -7061,8 +7511,8 @@ static void history_record(History* history, int track_index, double time, bool 
 	record->time = time;
 	record->track = track_index;
 	record->started = started;
-	ASSERT(history->count + 1 < history_events_max);
-	history->count = (history->count + 1) % history_events_max;
+	ASSERT(history->count + 1 < history_events_cap);
+	history->count = (history->count + 1) % history_events_cap;
 }
 
 // Envelope Settings............................................................
@@ -7332,11 +7782,11 @@ void track_generate(Track* track, double finish_time, Composer* composer)
 
 static void transfer_unfinished_notes(Track* track, double time)
 {
-	const int transfer_max = 8;
-	Track::Note notes_to_transfer[transfer_max];
-	Track::Event stops_to_transfer[transfer_max];
+	const int transfer_cap = 8;
+	Track::Note notes_to_transfer[transfer_cap];
+	Track::Event stops_to_transfer[transfer_cap];
 	int transferred = 0;
-	for(int i = track->stop_index; i < track->notes_count && transferred < transfer_max; ++i)
+	for(int i = track->stop_index; i < track->notes_count && transferred < transfer_cap; ++i)
 	{
 		Track::Event stop = track->stop_events[i];
 		stop.time -= time;
@@ -7593,11 +8043,11 @@ struct Message
 	};
 };
 
-static const int max_messages = 32;
+static const int messages_cap = 32;
 
 struct MessageQueue
 {
-	Message messages[max_messages];
+	Message messages[messages_cap];
 	AtomicInt head;
 	AtomicInt tail;
 };
@@ -7610,14 +8060,14 @@ static bool was_empty(MessageQueue* queue)
 static bool was_full(MessageQueue* queue)
 {
 	int next_tail = atomic_int_load(&queue->tail);
-	next_tail = (next_tail + 1) % max_messages;
+	next_tail = (next_tail + 1) % messages_cap;
 	return next_tail == atomic_int_load(&queue->head);
 }
 
 static bool enqueue_message(MessageQueue* queue, Message* message)
 {
 	int current_tail = atomic_int_load(&queue->tail);
-	int next_tail = (current_tail + 1) % max_messages;
+	int next_tail = (current_tail + 1) % messages_cap;
 	if(next_tail != atomic_int_load(&queue->head))
 	{
 		queue->messages[current_tail] = *message;
@@ -7635,7 +8085,7 @@ static bool dequeue_message(MessageQueue* queue, Message* message)
 		return false;
 	}
 	*message = queue->messages[current_head];
-	atomic_int_store(&queue->head, (current_head + 1) % max_messages);
+	atomic_int_store(&queue->head, (current_head + 1) % messages_cap);
 	return true;
 }
 
@@ -7907,11 +8357,11 @@ enum class Oscillator
 	FM_Sine,
 };
 
-static const int instrument_effects_max = 8;
+static const int instrument_effects_cap = 8;
 
 struct Instrument
 {
-	Effect effects[instrument_effects_max];
+	Effect effects[instrument_effects_cap];
 	EnvelopeSettings envelope_settings;
 
 	union
@@ -7986,8 +8436,8 @@ static void instrument_destroy(Instrument* instrument)
 static Effect* instrument_add_effect(Instrument* instrument, EffectType type)
 {
 	int index = instrument->effects_count;
-	ASSERT(instrument->effects_count + 1 < instrument_effects_max);
-	instrument->effects_count = (index + 1) % instrument_effects_max;
+	ASSERT(instrument->effects_count + 1 < instrument_effects_cap);
+	instrument->effects_count = (index + 1) % instrument_effects_cap;
 	Effect* effect = &instrument->effects[index];
 	effect->type = type;
 
@@ -8468,24 +8918,441 @@ static void shift_pitch(WSOLA* dilator, float* samples, int samples_count, int s
 	resample_linear(dilator->output, dilator->output_count, samples, samples_count);
 }
 
-// §5.1 Game Functions..........................................................
+// Profile......................................................................
 
-enum class UserKey
+void yield();
+u64 get_timestamp();
+
+namespace profile {
+
+// SpinLock....................................................................
+
+void spin_lock_acquire(SpinLock* lock)
 {
-	Space,
-	Left,
-	Up,
-	Right,
-	Down,
-	Home,
-	End,
-	Page_Up,
-	Page_Down,
-	Tilde,
-	Enter,
-	S,
-	V,
+	while(!atomic_compare_exchange(lock, 0, 1))
+	{
+		yield();
+	}
+}
+
+void spin_lock_release(SpinLock* lock)
+{
+	while(!atomic_compare_exchange(lock, 1, 0))
+	{
+		yield();
+	}
+}
+
+// Caller.......................................................................
+
+struct Caller
+{
+	const char* name;
+
+	Caller* parent;
+	Caller** buckets;
+	u32 bucket_count;
+	u32 child_count;
+
+	// used by the root caller of each thread to distinguish if that call tree
+	// is active
+	bool active;
+
+	u64 started;
+	u64 ticks;
+	int calls;
+	bool paused;
 };
+
+static void lock_this_thread();
+static void unlock_this_thread();
+
+static u32 hash_pointer(const char* name, u32 bucket_count)
+{
+	return (reinterpret_cast<size_t>(name) >> 5) & (bucket_count - 1);
+}
+
+static Caller** find_empty_child_slot(Caller** buckets, u32 bucket_count, const char* name)
+{
+	u32 index = hash_pointer(name, bucket_count);
+	ASSERT(can_use_bitwise_and_to_cycle(bucket_count));
+	u32 mask = bucket_count - 1;
+	Caller** slot;
+	for(slot = &buckets[index]; *slot; slot = &buckets[index & mask])
+	{
+		index += 1;
+	}
+	return slot;
+}
+
+static void resize(Caller* parent, u32 new_size)
+{
+	if(new_size < parent->bucket_count)
+	{
+		new_size = 2 * parent->bucket_count;
+	}
+	else
+	{
+		new_size = next_power_of_two(new_size - 1);
+	}
+	Caller** new_buckets = ALLOCATE(Caller*, new_size);
+	for(u32 i = 0; i < parent->bucket_count; ++i)
+	{
+		if(parent->buckets[i])
+		{
+			Caller** slot = find_empty_child_slot(new_buckets, new_size, parent->buckets[i]->name);
+			*slot = parent->buckets[i];
+		}
+	}
+	DEALLOCATE(parent->buckets);
+	parent->buckets = new_buckets;
+	parent->bucket_count = new_size;
+}
+
+static void caller_create(Caller* caller, Caller* parent, const char* name)
+{
+	caller->name = name;
+	caller->parent = parent;
+	resize(caller, 2);
+}
+
+static void caller_destroy(Caller* caller)
+{
+	for(u32 i = 0; i < caller->bucket_count; ++i)
+	{
+		if(caller->buckets[i])
+		{
+			caller_destroy(caller->buckets[i]);
+			DEALLOCATE(caller->buckets[i]);
+		}
+	}
+	DEALLOCATE(caller->buckets);
+}
+
+static Caller* find_or_create(Caller* parent, const char* name)
+{
+	u32 index = hash_pointer(name, parent->bucket_count);
+	ASSERT(can_use_bitwise_and_to_cycle(parent->bucket_count));
+	u32 mask = parent->bucket_count - 1;
+	for(Caller* caller = parent->buckets[index]; caller; caller = parent->buckets[index & mask])
+	{
+		if(caller->name == name)
+		{
+			return caller;
+		}
+		index += 1;
+	}
+
+	lock_this_thread();
+
+	parent->child_count += 1;
+	if(parent->child_count >= parent->bucket_count / 2)
+	{
+		resize(parent, parent->child_count);
+	}
+
+	Caller** slot = find_empty_child_slot(parent->buckets, parent->bucket_count, name);
+	Caller* temp = ALLOCATE(Caller, 1);
+	caller_create(temp, parent, name);
+	*slot = temp;
+
+	unlock_this_thread();
+
+	return temp;
+}
+
+static void start_timing(Caller* caller)
+{
+	caller->calls += 1;
+	caller->started = get_timestamp();
+}
+
+static void stop_timing(Caller* caller)
+{
+	caller->ticks += get_timestamp() - caller->started;
+}
+
+static void caller_reset(Caller* caller)
+{
+	caller->ticks = 0;
+	caller->calls = 0;
+	caller->started = get_timestamp();
+	for(u32 i = 0; i < caller->bucket_count; ++i)
+	{
+		if(caller->buckets[i])
+		{
+			caller_reset(caller->buckets[i]);
+		}
+	}
+}
+
+static void caller_stop(Caller* caller)
+{
+	if(!caller->paused)
+	{
+		u64 t = get_timestamp();
+		caller->ticks += t - caller->started;
+		caller->started = t;
+	}
+}
+
+static void caller_pause(Caller* caller, u64 pause_time)
+{
+	caller->ticks += pause_time - caller->started;
+	caller->paused = true;
+}
+
+static void caller_unpause(Caller* caller, u64 unpause_time)
+{
+	caller->started = unpause_time;
+	caller->paused = false;
+}
+
+#define DEFINE_INSERTION_SORT(type, after, suffix)\
+	static void insertion_sort_##suffix(type* a, int count)\
+	{\
+		for(int i = 1; i < count; ++i)\
+		{\
+			type x = a[i];\
+			int j = i - 1;\
+			for(; j >= 0 && after(a[j], x); --j)\
+			{\
+				a[j + 1] = a[j];\
+			}\
+			a[j + 1] = x;\
+		}\
+	}
+
+#define TICKS_COMPARE(a, b)\
+	a->ticks < b->ticks
+
+DEFINE_INSERTION_SORT(Caller*, TICKS_COMPARE, ticks);
+
+void caller_collect(Caller* caller, ThreadHistory* history, int thread, int indent)
+{
+	Record* records = history->records[thread];
+	int records_count = history->records_count[thread];
+	int records_capacity = history->records_capacity[thread];
+	ENSURE_ARRAY_SIZE(records, 1);
+	history->records[thread] = records;
+	history->records_capacity[thread] = records_capacity;
+
+	Record* record = &records[records_count];
+	history->records_count[thread] += 1;
+	record->name = caller->name;
+	record->ticks = caller->ticks;
+	record->calls = caller->calls;
+	record->indent = indent;
+
+	// Form an array from the children hash table.
+	const int children_cap = 8;
+	Caller* children[children_cap];
+	int children_count = 0;
+	int bucket_count = caller->bucket_count;
+	for(int i = 0; i < bucket_count; ++i)
+	{
+		Caller* child = caller->buckets[i];
+		if(child && child->ticks > 0)
+		{
+			children[children_count] = child;
+			children_count += 1;
+			ASSERT(children_count < children_cap);
+			if(children_count >= children_cap)
+			{
+				break;
+			}
+		}
+	}
+
+	if(children_count > 0)
+	{
+		insertion_sort_ticks(children, children_count);
+	}
+	for(int i = 0; i < children_count; ++i)
+	{
+		caller_collect(children[i], history, thread, indent + 1);
+	}
+}
+
+// Global Profile...............................................................
+
+struct ThreadState
+{
+	SpinLock thread_lock;
+	bool require_thread_lock;
+	Caller* active_caller;
+};
+
+struct Root
+{
+	Caller caller;
+	ThreadState* thread_state;
+};
+
+static const int thread_roots_cap = 8;
+
+struct GlobalThreadsList
+{
+	Root roots[thread_roots_cap];
+	int roots_count;
+	SpinLock lock;
+};
+
+// All the global state is kept here.
+namespace
+{
+	thread_local ThreadState thread_state;
+	thread_local Caller* root;
+	GlobalThreadsList threads_list;
+}
+
+static void lock_this_thread()
+{
+	if(thread_state.require_thread_lock)
+	{
+		spin_lock_acquire(&thread_state.thread_lock);
+	}
+}
+
+static void unlock_this_thread()
+{
+	if(thread_state.require_thread_lock)
+	{
+		spin_lock_release(&thread_state.thread_lock);
+	}
+}
+
+static void acquire_global_lock()
+{
+	spin_lock_acquire(&threads_list.lock);
+}
+
+static void release_global_lock()
+{
+	spin_lock_release(&threads_list.lock);
+}
+
+static Caller* add_root(ThreadState* state)
+{
+	Root* out = &threads_list.roots[threads_list.roots_count];
+	threads_list.roots_count += 1;
+	ASSERT(threads_list.roots_count < thread_roots_cap);
+	out->thread_state = state;
+	return &out->caller;
+}
+
+void begin_period(const char* name)
+{
+	Caller* parent = thread_state.active_caller;
+	if(!parent)
+	{
+		return;
+	}
+	Caller* active = find_or_create(parent, name);
+	start_timing(active);
+	thread_state.active_caller = active;
+}
+
+void end_period()
+{
+	Caller* active = thread_state.active_caller;
+	if(!active)
+	{
+		return;
+	}
+	stop_timing(active);
+	thread_state.active_caller = active->parent;
+}
+
+void pause_period()
+{
+	u64 pause_time = get_timestamp();
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		caller_pause(it, pause_time);
+	}
+}
+
+void unpause_period()
+{
+	u64 unpause_time = get_timestamp();
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		caller_unpause(it, unpause_time);
+	}
+}
+
+void enter_thread(const char* name)
+{
+	acquire_global_lock();
+	Caller* temp = add_root(&thread_state);
+	release_global_lock();
+
+	caller_create(temp, nullptr, name);
+
+	lock_this_thread();
+
+	thread_state.active_caller = temp;
+	start_timing(temp);
+	temp->active = true;
+	root = temp;
+
+	unlock_this_thread();
+}
+
+void exit_thread()
+{
+	lock_this_thread();
+
+	stop_timing(root);
+	root->active = false;
+	thread_state.active_caller = nullptr;
+
+	unlock_this_thread();
+}
+
+void reset_thread()
+{
+	lock_this_thread();
+
+	caller_reset(root);
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		it->calls = 1;
+	}
+
+	unlock_this_thread();
+}
+
+void cleanup()
+{
+	for(int i = 0; i < threads_list.roots_count; ++i)
+	{
+		Root* root = &threads_list.roots[i];
+		if(root->caller.active)
+		{
+			caller_destroy(&root->caller);
+		}
+	}
+}
+
+void inspector_collect(Inspector* inspector, int thread)
+{
+	ThreadHistory* history = &inspector->history;
+
+	lock_this_thread();
+	spin_lock_acquire(&history->lock);
+
+	history->records_count[thread] = 0;
+	caller_collect(root, history, thread, 0);
+
+	spin_lock_release(&history->lock);
+	unlock_this_thread();
+}
+
+} // namespace profile
+
+// §5.1 Game Functions..........................................................
 
 namespace
 {
@@ -8493,35 +9360,13 @@ namespace
 	const int window_width = 800;
 	const int window_height = 600;
 	const double frame_frequency = 1.0 / 60.0;
-	const int key_count = 13;
-
-	bool keys_pressed[key_count];
-	bool old_keys_pressed[key_count];
-	// This counts the frames since the last time the key state changed.
-	int edge_counts[key_count];
 
 	Vector3 position;
 	World world;
 	Vector3 dancer_position;
 	audio::MessageQueue message_queue;
-}
 
-static bool key_tapped(UserKey key)
-{
-	int which = static_cast<int>(key);
-	return keys_pressed[which] && edge_counts[which] == 0;
-}
-
-static bool key_released(UserKey key)
-{
-	int which = static_cast<int>(key);
-	return !keys_pressed[which] && edge_counts[which] == 0;
-}
-
-static bool key_pressed(UserKey key)
-{
-	int which = static_cast<int>(key);
-	return keys_pressed[which];
+	profile::Inspector profile_inspector;
 }
 
 static void game_create()
@@ -8535,13 +9380,29 @@ static void game_create()
 
 	// Setup the tweaker.
 	{
+		float leading = 34.0f;
 		tweaker.font.glyph_dimensions = {12.0f, 24.0f};
 		tweaker.font.bearing_left = 2.0f;
 		tweaker.font.bearing_right = 2.0f;
-		tweaker.font.leading = 34.0f;
+		tweaker.font.leading = leading;
 		tweaker.font.tracking = 0.0f;
-		tweaker.dimensions = {600.0f, 400.0f};
-		tweaker.lines_count = tweaker_lines_count;
+		tweaker.scroll_panel.bottom_left = {-300.0f, -200.0f};
+		tweaker.scroll_panel.dimensions = {300.0f, 400.0f};
+		tweaker.scroll_panel.lines_count = scroll_panel_lines_cap;
+		tweaker.scroll_panel.line_height = leading;
+	}
+
+	// Setup the profile inspector.
+	{
+		float leading = 24.0f;
+		profile_inspector.font.glyph_dimensions = {8.0f, 16.0f};
+		profile_inspector.font.bearing_left = 2.0f;
+		profile_inspector.font.bearing_right = 2.0f;
+		profile_inspector.font.leading = leading;
+		profile_inspector.font.tracking = 0.0f;
+		profile_inspector.scroll_panel.bottom_left = {-370.0f, -270.0f};
+		profile_inspector.scroll_panel.dimensions = {300.0f, 540.0f};
+		profile_inspector.scroll_panel.line_height = leading;
 	}
 }
 
@@ -8618,62 +9479,32 @@ static void process_messages_from_the_audio_thread()
 static void main_update()
 {
 	process_messages_from_the_audio_thread();
-
-	// Update input states.
-	for(int i = 0; i < key_count; ++i)
-	{
-		if(keys_pressed[i] != old_keys_pressed[i])
-		{
-			edge_counts[i] = 0;
-			old_keys_pressed[i] = keys_pressed[i];
-		}
-		else
-		{
-			edge_counts[i] += 1;
-		}
-	}
+	update_input_states();
 
 	if(key_tapped(UserKey::Tilde))
 	{
 		tweaker_turn_on(&tweaker, !tweaker.on);
+		profile_inspector.on = false;
+	}
+	if(key_tapped(UserKey::F2))
+	{
+		profile_inspector.on = !profile_inspector.on;
+		tweaker_turn_on(&tweaker, false);
 	}
 
 	Vector3 velocity = vector3_zero;
 	if(tweaker.on)
 	{
-		// Apply the input to the tweaker.
-		const int mappings_count = 11;
-		struct
-		{
-			UserKey user;
-			Tweaker::Key tweaker;
-		} mappings[mappings_count] =
-		{
-			{UserKey::Left, Tweaker::Key::Left},
-			{UserKey::Up, Tweaker::Key::Up},
-			{UserKey::Right, Tweaker::Key::Right},
-			{UserKey::Down, Tweaker::Key::Down},
-			{UserKey::Home, Tweaker::Key::Home},
-			{UserKey::End, Tweaker::Key::End},
-			{UserKey::Page_Up, Tweaker::Key::Page_Up},
-			{UserKey::Page_Down, Tweaker::Key::Page_Down},
-			{UserKey::Enter, Tweaker::Key::Enter},
-			{UserKey::S, Tweaker::Key::Step},
-			{UserKey::V, Tweaker::Key::Value},
-		};
-		for(int i = 0; i < mappings_count; ++i)
-		{
-			if(key_tapped(mappings[i].user))
-			{
-				tweaker_handle_key(&tweaker, &tweaker_map, mappings[i].tweaker);
-			}
-		}
 		tweaker_update(&tweaker, &tweaker_map);
+	}
+	else if(profile_inspector.on)
+	{
+		profile::inspector_update(&profile_inspector);
 	}
 	else
 	{
 		// Update the player's movement state with the input.
-		Vector2 d = {0.0f, 0.0f};
+		Vector2 d = vector2_zero;
 		if(key_pressed(UserKey::Left))
 		{
 			d.x -= 1.0f;
@@ -8724,7 +9555,7 @@ static void main_update()
 		position = vector3_zero;
 	}
 
-	render::system_update(position, dancer_position, &world, &tweaker);
+	render::system_update(position, dancer_position, &world, &tweaker, &profile_inspector);
 }
 
 // 6. OpenGL Function Loading...................................................
@@ -8935,6 +9766,11 @@ long atomic_int_subtract(AtomicInt* minuend, long subtrahend)
 	return _InterlockedAdd(const_cast<volatile long*>(minuend), -subtrahend);
 }
 
+bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
+{
+	return _InterlockedCompareExchange(p, desired, expected) == desired;
+}
+
 #elif defined(COMPILER_GCC)
 
 bool atomic_flag_test_and_set(AtomicFlag* flag)
@@ -8967,7 +9803,53 @@ long atomic_int_subtract(AtomicInt* minuend, long subtrahend)
 	return __atomic_sub_fetch(const_cast<volatile long*>(minuend), subtrahend, __ATOMIC_SEQ_CST);
 }
 
+bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
+{
+	u32 old = expected;
+	return __atomic_compare_exchange_n(p, &old, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
 #endif
+
+// Instruction Set Specific Implementations.....................................
+
+#if defined(__i386__)
+#define INSTRUCTION_SET_X86
+#elif defined(__amd64__)
+#define INSTRUCTION_SET_X64
+#elif defined(__arm__)
+#define INSTRUCTION_SET_ARM
+#else
+#error The instruction set for this CPU is unknown.
+#endif
+
+void yield()
+{
+#if defined(INSTRUCTION_SET_X86) || defined(INSTRUCTION_SET_X64)
+	asm volatile ("pause");
+#elif defined(INSTRUCTION_SET_ARM)
+	asm volatile ("yield");
+#endif
+}
+
+u64 get_timestamp()
+{
+#if defined(INSTRUCTION_SET_X86)
+	u64 x;
+	asm volatile ("rdtsc" : "=A" (x));
+	return x;
+#elif defined(INSTRUCTION_SET_X64)
+	u64 a, d;
+	asm volatile ("rdtsc" : "=a" (a), "=d" (d));
+	return (d << 32) | a;
+#elif defined(INSTRUCTION_SET_ARM)
+	// ARMv6 has no performance counter and ARMv7-A and ARMv8-A can only
+	// access their "Performance Monitor Unit" if the kernel enables
+	// user-space to access it. So, it's too inconvenient to get at;
+	// Instead, just fall back to the system call.
+	return get_timestamp_from_system();
+#endif
+}
 
 // 8. Platform-Specific Implementations=========================================
 
@@ -9024,6 +9906,13 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 	requested_time.tv_sec = 0;
 	requested_time.tv_nsec = static_cast<s64>(1.0e9 * amount_to_sleep);
 	clock_nanosleep(CLOCK_MONOTONIC, 0, &requested_time, nullptr);
+}
+
+u64 get_timestamp_from_system()
+{
+	timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec * 1e9 + now.tv_nsec;
 }
 
 // §8.3 Audio Functions.........................................................
@@ -9358,6 +10247,8 @@ static void* run_mixer_thread(void* argument)
 {
 	static_cast<void>(argument);
 
+	PROFILE_THREAD_ENTER();
+
 	device_description.channels = 2;
 	device_description.format = FORMAT_S16;
 	device_description.sample_rate = 44100;
@@ -9587,7 +10478,8 @@ static void* run_mixer_thread(void* argument)
 		send_history_to_main_thread(&history);
 		process_messages_from_main_thread();
 
-		// Generate samples.
+		PROFILE_BEGIN_NAMED("generate_samples");
+
 		int frames = device_description.frames;
 		int sample_rate = device_description.sample_rate;
 
@@ -9644,20 +10536,34 @@ static void* run_mixer_thread(void* argument)
 			}
 		}
 
+		PROFILE_END();
+
 		// Combine the generated audio to a single compact array of samples.
+		PROFILE_BEGIN_NAMED("mix_and_format");
 
 		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, master_volume);
 		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
 
+		PROFILE_END();
+
 		send_oscilloscope_samples_to_main_thread(mixed_samples, frames, device_description.channels);
 
 		// Pass the completed audio to the device.
+
+		PROFILE_BEGIN_NAMED("sleep");
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
 		if(!stream_ready)
 		{
 			LOG_ERROR("ALSA device waiting timed out!");
 		}
+
+		PROFILE_END();
+
+		profile::inspector_collect(&profile_inspector, 1);
+		profile::reset_thread();
+
+		PROFILE_BEGIN_NAMED("pass_audio_to_device");
 
 		u8* buffer = static_cast<u8*>(devicebound_samples);
 		snd_pcm_uframes_t frames_left = device_description.frames;
@@ -9682,6 +10588,8 @@ static void* run_mixer_thread(void* argument)
 			frames_left -= frames_written;
 		}
 
+		PROFILE_END();
+
 		if(cue_time_reset)
 		{
 			time = (time + delta_time) - section_finish_time;
@@ -9703,6 +10611,8 @@ static void* run_mixer_thread(void* argument)
 	{
 		instrument_destroy(&instruments[i]);
 	}
+
+	PROFILE_THREAD_EXIT();
 
 	LOG_DEBUG("Audio thread shut down.");
 
@@ -9750,6 +10660,8 @@ namespace
 
 static bool main_create()
 {
+	PROFILE_THREAD_ENTER();
+
 	// Connect to the X server, which is used for display and input services.
 	display = XOpenDisplay(nullptr);
 	if(!display)
@@ -9843,6 +10755,8 @@ static void main_destroy()
 	game_destroy();
 	audio::system_shutdown();
 	render::system_terminate(functions_loaded);
+	PROFILE_THREAD_EXIT();
+	profile::cleanup();
 
 	if(visual_info)
 	{
@@ -9872,7 +10786,15 @@ static void main_loop()
 		double frame_start_time = get_time(&frame_clock);
 
 		main_update();
+
+		PROFILE_BEGIN_NAMED("swap_buffers");
+
 		glXSwapBuffers(display, window);
+
+		PROFILE_END();
+
+		profile::inspector_collect(&profile_inspector, 0);
+		profile::reset_thread();
 
 		// Handle window events.
 		while(XPending(display) > 0)
@@ -9918,7 +10840,8 @@ static void main_loop()
 			XK_asciitilde,
 			XK_Return,
 			XK_S,
-			XK_V
+			XK_V,
+			XK_F2,
 		};
 		for(int i = 0; i < key_count; ++i)
 		{
@@ -9926,12 +10849,16 @@ static void main_loop()
 			keys_pressed[i] = keys[code / 8] & (1 << (code % 8));
 		}
 
+		PROFILE_BEGIN_NAMED("sleep");
+
 		// Sleep off any remaining time until the next frame.
 		double frame_thusfar = get_time(&frame_clock) - frame_start_time;
 		if(frame_thusfar < frame_frequency)
 		{
 			go_to_sleep(&frame_clock, frame_frequency - frame_thusfar);
 		}
+
+		PROFILE_END();
 	}
 }
 
@@ -9998,6 +10925,13 @@ void go_to_sleep(Clock* clock, double amount_to_sleep)
 {
     int milliseconds = 1000 * amount_to_sleep;
     Sleep(milliseconds);
+}
+
+u64 get_timestamp_from_system()
+{
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	return now.QuadPart;
 }
 
 // §8.4 Platform Main Functions.................................................
