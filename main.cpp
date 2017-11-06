@@ -2808,13 +2808,13 @@ union Pack4x8
 	u32 packed;
 };
 
-static u32 pack_unorm4x8(Vector4 v)
+static u32 pack_unorm1x8(float r)
 {
 	Pack4x8 u;
-	u.r = 0xff * v.x;
-	u.g = 0xff * v.y;
-	u.b = 0xff * v.z;
-	u.a = 0xff * v.w;
+	u.r = 0xff * r;
+	u.g = 0xff * r;
+	u.b = 0xff * r;
+	u.a = 0xff;
 	return u.packed;
 }
 
@@ -2826,6 +2826,28 @@ static u32 pack_unorm3x8(Vector3 v)
 	u.b = 0xff * v.z;
 	u.a = 0xff;
 	return u.packed;
+}
+
+static u32 pack_unorm4x8(Vector4 v)
+{
+	Pack4x8 u;
+	u.r = 0xff * v.x;
+	u.g = 0xff * v.y;
+	u.b = 0xff * v.z;
+	u.a = 0xff * v.w;
+	return u.packed;
+}
+
+static Vector4 unpack_unorm4x8(u32 x)
+{
+	Pack4x8 u;
+	u.packed = x;
+	Vector4 v;
+	v.x = u.r / 255.0f;
+	v.y = u.g / 255.0f;
+	v.z = u.b / 255.0f;
+	v.w = u.a / 255.0f;
+	return v;
 }
 
 static u32 pack_snorm3x10(Vector3 v)
@@ -2874,6 +2896,20 @@ static bool is_unorm(float x)
 	return x >= 0.0f && x <= 1.0f;
 }
 
+static u32 r_to_u32(float r)
+{
+	ASSERT(is_unorm(r));
+	return pack_unorm1x8(r);
+}
+
+static u32 rgb_to_u32(Vector3 c)
+{
+	ASSERT(is_unorm(c.x));
+	ASSERT(is_unorm(c.y));
+	ASSERT(is_unorm(c.z));
+	return pack_unorm3x8(c);
+}
+
 static u32 rgba_to_u32(Vector4 c)
 {
 	ASSERT(is_unorm(c.x));
@@ -2883,12 +2919,9 @@ static u32 rgba_to_u32(Vector4 c)
 	return pack_unorm4x8(c);
 }
 
-static u32 rgb_to_u32(Vector3 c)
+static Vector4 u32_to_rgba(u32 u)
 {
-	ASSERT(is_unorm(c.x));
-	ASSERT(is_unorm(c.y));
-	ASSERT(is_unorm(c.z));
-	return pack_unorm3x8(c);
+	return unpack_unorm4x8(u);
 }
 
 static u32 normal_to_u32(Vector3 v)
@@ -4983,13 +5016,15 @@ typedef volatile u32 SpinLock;
 void spin_lock_acquire(SpinLock* lock);
 void spin_lock_release(SpinLock* lock);
 
-const int thread_history_records_count = 2;
+static const int thread_history_thread_count = 2;
+static const int thread_history_book_count = 128;
 
 struct ThreadHistory
 {
-	Record* records[thread_history_records_count];
-	int records_count[thread_history_records_count];
-	int records_capacity[thread_history_records_count];
+	Record* records[thread_history_thread_count][thread_history_book_count];
+	int records_count[thread_history_thread_count][thread_history_book_count];
+	int records_capacity[thread_history_thread_count][thread_history_book_count];
+	int indices[thread_history_thread_count];
 	SpinLock lock;
 };
 
@@ -4999,7 +5034,26 @@ struct Inspector
 	Font font;
 	ThreadHistory history;
 	bool on;
+	bool halt_collection;
+	u8 animation_counter;
 };
+
+static void inspector_turn_on(Inspector* inspector, bool on)
+{
+	if(!inspector->on && on)
+	{
+		inspector->halt_collection = false;
+	}
+	inspector->on = on;
+}
+
+static void inspector_handle_input(Inspector* inspector)
+{
+	if(key_tapped(UserKey::Enter))
+	{
+		inspector->halt_collection = !inspector->halt_collection;
+	}
+}
 
 static int find_char(const char* s, char c)
 {
@@ -5014,7 +5068,7 @@ static int find_char(const char* s, char c)
 	return i;
 }
 
-static int find_last_char(const char* s, char c, int upto)
+static int find_last_char(const char* s, char c, int limit)
 {
 	int result = -1;
 	int i = 0;
@@ -5024,7 +5078,7 @@ static int find_last_char(const char* s, char c, int upto)
 		{
 			result = i;
 		}
-	} while(*s++ && i++ < upto);
+	} while(*s++ && i++ < limit);
 	return result;
 }
 
@@ -5060,10 +5114,11 @@ static void inspector_fill_lines(Inspector* inspector)
 	ThreadHistory* history = &inspector->history;
 	spin_lock_acquire(&history->lock);
 
-	for(int i = 0; i < thread_history_records_count; ++i)
+	for(int i = 0; i < thread_history_thread_count; ++i)
 	{
-		Record* records = history->records[i];
-		int records_count = history->records_count[i];
+		int book = mod(history->indices[i] - 1, thread_history_book_count);
+		Record* records = history->records[i][book];
+		int records_count = history->records_count[i][book];
 		for(int j = 0; j < records_count; ++j)
 		{
 			char* line = panel->lines[panel->lines_count];
@@ -5094,19 +5149,305 @@ static void inspector_fill_lines(Inspector* inspector)
 
 static void inspector_update(Inspector* inspector)
 {
+#if defined(PROFILE_ENABLED)
 	scroll_panel_handle_input(&inspector->scroll_panel);
+	inspector_handle_input(inspector);
 	scroll_panel_update(&inspector->scroll_panel);
 	inspector_fill_lines(inspector);
+#endif
 }
 
-static void draw_inspector(Inspector* inspector)
+const int qualitative_palette_cap = 30;
+static const u32 qualitative_palette[qualitative_palette_cap] =
 {
+	0x573bce,
+	0x8600f5,
+	0xcf00dd,
+	0xf30053,
+	0xff3a00,
+	0xfcaf29,
+	0x2000ec,
+	0x348ac7,
+	0x1b617a,
+	0x008486,
+	0x6caf7f,
+	0xfd5a35,
+	0x105283,
+	0x035774,
+	0x007f89,
+	0xaec9a7,
+	0xf3d489,
+	0xffb058,
+	0x00325b,
+	0x005171,
+	0x007c8a,
+	0xd4d6bd,
+	0xeee9bb,
+	0xffe06a,
+	0x728398,
+	0x5c8aae,
+	0x34bac5,
+	0xb5d568,
+	0xe0c769,
+	0xe16a69,
+};
+
+static u64 compute_global_max_ticks(ThreadHistory* history)
+{
+	u64 max = 0;
+	for(int i = 0; i < thread_history_thread_count; ++i)
+	{
+		for(int j = 0; j < thread_history_book_count; ++j)
+		{
+			Record* records = history->records[i][j];
+			if(!records)
+			{
+				continue;
+			}
+			int records_count = history->records_count[i][j];
+			for(int k = 0; k < records_count; ++k)
+			{
+				u64 ticks = records[k].ticks;
+				max = MAX(max, ticks);
+			}
+		}
+	}
+	return max;
+}
+
+struct Channel
+{
+	const char* name;
+	u32 colour;
+};
+
+static const int channels_cap = 32;
+
+static int find_channel(Channel* channels, int channels_count, const char* name)
+{
+	for(int i = 0; i < channels_count; ++i)
+	{
+		if(channels[i].name == name)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int find_selected(Channel* channels, int channels_count, ThreadHistory* history, int selected)
+{
+	for(int i = 0; i < thread_history_thread_count; ++i)
+	{
+		int book = mod(history->indices[i] - 1, thread_history_book_count);
+		Record* records = history->records[i][book];
+		if(!records)
+		{
+			continue;
+		}
+		int records_count = history->records_count[i][book];
+		if(selected < records_count)
+		{
+			const char* name = records[selected].name;
+			return find_channel(channels, channels_count, name);
+		}
+		else
+		{
+			selected -= records_count;
+		}
+	}
+	return -1;
+}
+
+static void assign_channels(ThreadHistory* history, Channel* channels, int* result_count)
+{
+	int channels_count = 0;
+	int colour_count = 0;
+	for(int i = 0; i < thread_history_thread_count; ++i)
+	{
+		for(int j = 0; j < thread_history_book_count; ++j)
+		{
+			Record* records = history->records[i][j];
+			if(!records)
+			{
+				continue;
+			}
+			int records_count = history->records_count[i][j];
+			for(int k = 0; k < records_count; ++k)
+			{
+				const char* name = records[k].name;
+				int found_index = find_channel(channels, channels_count, name);
+				if(found_index == -1)
+				{
+					channels[channels_count].name = name;
+					channels[channels_count].colour = qualitative_palette[colour_count];
+					channels_count += 1;
+					ASSERT(channels_count < channels_cap);
+					colour_count = (colour_count + 1) % qualitative_palette_cap;
+				}
+			}
+		}
+	}
+	*result_count = channels_count;
+}
+
+static void inspector_draw(Inspector* inspector)
+{
+#if defined(PROFILE_ENABLED)
 	if(!inspector->on)
 	{
 		return;
 	}
 
+	ScrollPanel* panel = &inspector->scroll_panel;
+
+	Vector4 bar_colour = {0.0f, 0.0f, 0.0f, 0.6f};
+	float bar_height = 30.0f;
+
+	Rect rect;
+	rect.bottom_left.x = panel->bottom_left.x;
+	rect.bottom_left.y = panel->bottom_left.y + panel->dimensions.y;
+	rect.dimensions.x = panel->dimensions.x;
+	rect.dimensions.y = bar_height;
+	draw_rect_transparent(rect, bar_colour);
+
+	const char* titles = "function     mticks calls";
+	Vector2 title_position = rect.bottom_left;
+	title_position.y += 4.0f;
+	draw_text(const_cast<char*>(titles), title_position, rect, &inspector->font, colour_white);
+
 	scroll_panel_draw(&inspector->scroll_panel, &inspector->font);
+
+	rect.bottom_left.y = panel->bottom_left.y - bar_height;
+	draw_rect_transparent(rect, bar_colour);
+
+	const char* hint = "[Enter] to pause";
+	title_position = rect.bottom_left;
+	title_position.y += 4.0f;
+	draw_text(const_cast<char*>(hint), title_position, rect, &inspector->font, colour_white);
+
+	Vector4 chart_bar_colour = {0.0f, 0.0f, 0.0f, 0.5f};
+	rect.bottom_left.y -= 120.0f;
+	rect.dimensions.y = 110.0f;
+	draw_rect_transparent(rect, chart_bar_colour);
+
+	ThreadHistory* history = &inspector->history;
+
+	// Find the maximum cycles of all records so that the drawing of each trace
+	// can be scaled to fit the chart height.
+	u64 max_ticks = compute_global_max_ticks(history);
+
+	Channel channels[channels_cap];
+	int channels_count;
+	assign_channels(history, channels, &channels_count);
+	struct
+	{
+		Vector2 p0;
+		int index;
+	} traces[channels_cap] = {};
+	for(int i = 0; i < channels_count; ++i)
+	{
+		// Assign any invalid index so that checks against valid indices will
+		// for sure be false.
+		traces[i].index = -1;
+	}
+
+	// Find selected channel.
+	int selected = inspector->scroll_panel.selected;
+	int selected_channel = find_selected(channels, channels_count, history, selected);
+	ASSERT(selected_channel != -1);
+
+	// Animate the colour of the trace for the selected channel.
+	float theta = 8.0f * tau * inspector->animation_counter / 255.0f;
+	inspector->animation_counter += 1;
+	float phase = 0.5f * sin(theta) + 0.5f;
+	u32 selected_colour = r_to_u32(phase);
+
+	// Draw the traces.
+	for(int i = 0; i < thread_history_thread_count; ++i)
+	{
+		int tail = history->indices[i];
+		int wrap = thread_history_book_count;
+		for(int head = mod(tail - 1, wrap), prior_head = tail; head != tail; prior_head = head, head = mod(head - 1, wrap))
+		{
+			Record* records = history->records[i][head];
+			if(!records)
+			{
+				// If there's fewer than books than thread_history_book_count, the
+				// end of the line may come sooner than encountering the tail.
+				break;
+			}
+
+			float sibling_adjust = 0.0f;
+			int prior_indent = -1;
+			int records_count = history->records_count[i][head];
+			for(int j = 0; j < records_count; ++j)
+			{
+				Record* record = &records[j];
+
+				Vector2 p;
+				p.x = head / static_cast<float>(thread_history_book_count);
+				p.y = record->ticks / static_cast<float>(max_ticks);
+
+				if(record->indent == prior_indent)
+				{
+					p.y += sibling_adjust;
+					sibling_adjust = p.y;
+				}
+				else
+				{
+					prior_indent = record->indent;
+					sibling_adjust = 0.0f;
+				}
+
+				Vector2 p1 = pointwise_multiply(p, rect.dimensions) + rect.bottom_left;
+				int found_index = find_channel(channels, channels_count, record->name);
+				ASSERT(found_index != -1);
+				if(traces[found_index].index == prior_head)
+				{
+					Vector2 p0 = traces[found_index].p0;
+					Vector3 end = make_vector3(p0);
+					Vector3 start = make_vector3(p1);
+					if(prior_head == 0)
+					{
+						end.x = rect.bottom_left.x + rect.dimensions.x;
+					}
+					u32 colour_u32;
+					if(found_index == selected_channel)
+					{
+						colour_u32 = selected_colour;
+					}
+					else
+					{
+						colour_u32 = channels[found_index].colour;
+					}
+					Vector4 colour = u32_to_rgba(colour_u32);
+					immediate::add_line(start, end, colour);
+				}
+				traces[found_index].index = head;
+				traces[found_index].p0 = p1;
+			}
+		}
+	}
+	immediate::draw();
+
+	// Draw markers where the traces begin and end.
+	Vector4 light_grey = {0.8f, 0.8f, 0.8f, 1.0f};
+	Vector4 marker_colours[thread_history_thread_count] = {colour_white, light_grey};
+	float bottom = rect.bottom_left.y;
+	float top = bottom + rect.dimensions.y;
+	for(int i = 0; i < thread_history_thread_count; ++i)
+	{
+		int tail = history->indices[i];
+		float x = tail / static_cast<float>(thread_history_book_count);
+		x = x * rect.dimensions.x + rect.bottom_left.x;
+		Vector3 start = {x, bottom, 0.0f};
+		Vector3 end = {x, top, 0.0f};
+		Vector4 colour = marker_colours[i];
+		immediate::add_line(start, end, colour);
+	}
+	immediate::draw();
+#endif
 }
 
 } // namespace profile
@@ -6283,7 +6624,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	}
 
 	draw_tweaker(tweaker);
-	profile::draw_inspector(inspector);
+	profile::inspector_draw(inspector);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -9123,22 +9464,23 @@ static void caller_unpause(Caller* caller, u64 unpause_time)
 		}\
 	}
 
-#define TICKS_COMPARE(a, b)\
+#define COMPARE_TICKS(a, b)\
 	a->ticks < b->ticks
 
-DEFINE_INSERTION_SORT(Caller*, TICKS_COMPARE, ticks);
+DEFINE_INSERTION_SORT(Caller*, COMPARE_TICKS, ticks);
 
 void caller_collect(Caller* caller, ThreadHistory* history, int thread, int indent)
 {
-	Record* records = history->records[thread];
-	int records_count = history->records_count[thread];
-	int records_capacity = history->records_capacity[thread];
+	int index = history->indices[thread];
+	Record* records = history->records[thread][index];
+	int records_count = history->records_count[thread][index];
+	int records_capacity = history->records_capacity[thread][index];
 	ENSURE_ARRAY_SIZE(records, 1);
-	history->records[thread] = records;
-	history->records_capacity[thread] = records_capacity;
+	history->records[thread][index] = records;
+	history->records_capacity[thread][index] = records_capacity;
 
 	Record* record = &records[records_count];
-	history->records_count[thread] += 1;
+	history->records_count[thread][index] += 1;
 	record->name = caller->name;
 	record->ticks = caller->ticks;
 	record->calls = caller->calls;
@@ -9338,16 +9680,25 @@ void cleanup()
 
 void inspector_collect(Inspector* inspector, int thread)
 {
+#if defined(PROFILE_ENABLED)
 	ThreadHistory* history = &inspector->history;
 
 	lock_this_thread();
 	spin_lock_acquire(&history->lock);
 
-	history->records_count[thread] = 0;
-	caller_collect(root, history, thread, 0);
+	if(!inspector->halt_collection)
+	{
+		int index = history->indices[thread];
+
+		history->records_count[thread][index] = 0;
+		caller_collect(root, history, thread, 0);
+
+		history->indices[thread] = (index + 1) % thread_history_book_count;
+	}
 
 	spin_lock_release(&history->lock);
 	unlock_this_thread();
+#endif
 }
 
 } // namespace profile
@@ -9400,8 +9751,8 @@ static void game_create()
 		profile_inspector.font.bearing_right = 2.0f;
 		profile_inspector.font.leading = leading;
 		profile_inspector.font.tracking = 0.0f;
-		profile_inspector.scroll_panel.bottom_left = {-370.0f, -270.0f};
-		profile_inspector.scroll_panel.dimensions = {300.0f, 540.0f};
+		profile_inspector.scroll_panel.bottom_left = {-370.0f, -120.0f};
+		profile_inspector.scroll_panel.dimensions = {300.0f, 360.0f};
 		profile_inspector.scroll_panel.line_height = leading;
 	}
 }
@@ -9484,11 +9835,11 @@ static void main_update()
 	if(key_tapped(UserKey::Tilde))
 	{
 		tweaker_turn_on(&tweaker, !tweaker.on);
-		profile_inspector.on = false;
+		profile::inspector_turn_on(&profile_inspector, false);
 	}
 	if(key_tapped(UserKey::F2))
 	{
-		profile_inspector.on = !profile_inspector.on;
+		profile::inspector_turn_on(&profile_inspector, !profile_inspector.on);
 		tweaker_turn_on(&tweaker, false);
 	}
 
@@ -10550,7 +10901,7 @@ static void* run_mixer_thread(void* argument)
 
 		// Pass the completed audio to the device.
 
-		PROFILE_BEGIN_NAMED("sleep");
+		PROFILE_BEGIN_NAMED("sleep_audio");
 
 		int stream_ready = snd_pcm_wait(pcm_handle, 150);
 		if(!stream_ready)
