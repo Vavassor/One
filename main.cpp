@@ -102,6 +102,16 @@ Table Of Contents...............................................................
 #error Failed to figure out the compiler used.
 #endif
 
+#if defined(__i386__)
+#define INSTRUCTION_SET_X86
+#elif defined(__amd64__)
+#define INSTRUCTION_SET_X64
+#elif defined(__arm__)
+#define INSTRUCTION_SET_ARM
+#else
+#error Failed to figure out what instruction set the CPU on this computer uses.
+#endif
+
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -228,6 +238,158 @@ const float tau = 6.28318530717958647692f;
 const float pi = 3.14159265358979323846f;
 const float pi_over_2 = 1.57079632679489661923f;
 
+// Strings......................................................................
+
+static const char* bool_to_string(bool b)
+{
+	if(b)
+	{
+		return "true";
+	}
+	else
+	{
+		return "false";
+	}
+}
+
+// Use this instead of the function strncpy from string.h, because strncpy
+// doesn't guarantee null-termination and should be considered hazardous.
+static int copy_string(char* to, int to_size, const char* from)
+{
+	ASSERT(from);
+	ASSERT(to);
+	int i;
+	for(i = 0; i < to_size - 1; ++i)
+	{
+		if(from[i] == '\0')
+		{
+			break;
+		}
+		to[i] = from[i];
+	}
+	to[i] = '\0';
+	ASSERT(i < to_size);
+	return i;
+}
+
+static void empty_string(char* s)
+{
+	s[0] = '\0';
+}
+
+static int find_char(const char* s, char c)
+{
+	int i;
+	for(i = 0; *s != c; ++s, ++i)
+	{
+		if(!*s)
+		{
+			return -1;
+		}
+	}
+	return i;
+}
+
+static int find_last_char(const char* s, char c, int limit)
+{
+	int result = -1;
+	int i = 0;
+	do
+	{
+		if(*s == c)
+		{
+			result = i;
+		}
+	} while(*s++ && i++ < limit);
+	return result;
+}
+
+// Sorting......................................................................
+
+#define DEFINE_INSERTION_SORT(type, after, suffix)\
+	static void insertion_sort_##suffix(type* a, int count)\
+	{\
+		for(int i = 1; i < count; ++i)\
+		{\
+			type x = a[i];\
+			int j = i - 1;\
+			for(; j >= 0 && after(a[j], x); --j)\
+			{\
+				a[j + 1] = a[j];\
+			}\
+			a[j + 1] = x;\
+		}\
+	}
+
+#define DEFINE_QUICK_SORT(type, after, suffix)\
+	static void quick_sort_innards(type* a, int left, int right)\
+	{\
+		while(left + 16 < right)\
+		{\
+			int middle = (left + right) / 2;\
+			type median;\
+			if(after(a[left], a[right]))\
+			{\
+				if(after(a[middle], a[left]))\
+				{\
+					median = a[left];\
+				}\
+				else if(after(a[middle], a[right]))\
+				{\
+					median = a[middle];\
+				}\
+				else\
+				{\
+					median = a[right];\
+				}\
+			}\
+			else\
+			{\
+				if(after(a[middle], a[right]))\
+				{\
+					median = a[right];\
+				}\
+				else if(after(a[middle], a[left]))\
+				{\
+					median = a[middle];\
+				}\
+				else\
+				{\
+					median = a[left];\
+				}\
+			}\
+			int i = left - 1;\
+			int j = right + 1;\
+			int pivot;\
+			for(;;)\
+			{\
+				do {j -= 1;} while(after(median, a[j]));\
+				do {i += 1;} while(after(a[i], median));\
+				if(i >= j)\
+				{\
+					pivot = j;\
+					break;\
+				}\
+				else\
+				{\
+					type temp = a[i];\
+					a[i] = a[j];\
+					a[j] = temp;\
+				}\
+			}\
+			quick_sort_innards(a, left, pivot);\
+			left = pivot + 1;\
+		}\
+	}\
+	\
+	DEFINE_INSERTION_SORT(type, after, suffix);\
+	\
+	static void quick_sort_##suffix(type* a, int count)\
+	{\
+		quick_sort_innards(a, 0, count - 1);\
+		insertion_sort(a, count);\
+	}
+
 // §1.2 Clock Declarations......................................................
 
 struct Clock
@@ -291,9 +453,9 @@ bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired);
 #define PROFILE_MACRO_PASTE(a, b)\
 	PROFILE_MACRO_PASTE2(a, b)
 
-#if defined(_MSC_VER)
+#if defined(COMPILER_MSVC)
 #define PROFILE_FUNCTION_NAME __FUNCSIG__
-#elif defined(__GNUC__)
+#elif defined(COMPILER_GCC)
 #define PROFILE_FUNCTION_NAME __PRETTY_FUNCTION__
 #endif
 
@@ -468,6 +630,8 @@ float float_range(float min, float max)
 #include <cfloat>
 #include <climits>
 
+const float infinity = FLT_MAX;
+
 using std::abs;
 using std::sqrt;
 using std::isfinite;
@@ -603,8 +767,8 @@ const Vector3 vector3_one    = {1.0f, 1.0f, 1.0f};
 const Vector3 vector3_unit_x = {1.0f, 0.0f, 0.0f};
 const Vector3 vector3_unit_y = {0.0f, 1.0f, 0.0f};
 const Vector3 vector3_unit_z = {0.0f, 0.0f, 1.0f};
-const Vector3 vector3_min    = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-const Vector3 vector3_max    = {+FLT_MAX, +FLT_MAX, +FLT_MAX};
+const Vector3 vector3_min    = {-infinity, -infinity, -infinity};
+const Vector3 vector3_max    = {+infinity, +infinity, +infinity};
 
 Vector3 operator + (Vector3 v0, Vector3 v1)
 {
@@ -1770,7 +1934,7 @@ static int allocate_nodes(Tree* tree, int count)
 
 static float compute_just_min(Triangle* triangles, int lower, int upper, Flag axis)
 {
-	float result = FLT_MAX;
+	float result = +infinity;
 	for(int i = lower; i <= upper; ++i)
 	{
 		Triangle* triangle = &triangles[i];
@@ -1785,7 +1949,7 @@ static float compute_just_min(Triangle* triangles, int lower, int upper, Flag ax
 
 static float compute_just_max(Triangle* triangles, int lower, int upper, Flag axis)
 {
-	float result = -FLT_MAX;
+	float result = -infinity;
 	for(int i = lower; i <= upper; ++i)
 	{
 		Triangle* triangle = &triangles[i];
@@ -3990,6 +4154,7 @@ struct ScrollPanel
 	char lines[scroll_panel_lines_cap][scroll_panel_line_char_limit];
 	Vector2 bottom_left;
 	Vector2 dimensions;
+	Vector2 padding;
 	float scroll;
 	float line_height;
 	int selected;
@@ -3997,10 +4162,24 @@ struct ScrollPanel
 	int lines_count;
 };
 
+static Rect dilate_rect(Rect rect, Vector2 dilation)
+{
+	Rect result;
+	result.bottom_left = rect.bottom_left - dilation;
+	result.dimensions = rect.dimensions + 2.0f * dilation;
+	return result;
+}
+
+static float get_inner_height(ScrollPanel* panel)
+{
+	return panel->dimensions.y - 2.0f * panel->padding.y;
+}
+
 static float get_max_scroll(ScrollPanel* panel)
 {
 	const float weird_offset = 0.5f;
-	float max = (panel->line_height * panel->lines_count) - panel->dimensions.y + weird_offset;
+	float inner_height = get_inner_height(panel);
+	float max = (panel->line_height * panel->lines_count) - inner_height + weird_offset;
 	max = fmax(max, 0.0f);
 	return max;
 }
@@ -4070,11 +4249,12 @@ static void scroll_panel_update(ScrollPanel* panel)
 		else
 		{
 			float target = (panel->line_height * (selected + 1)) + threshold;
-			float scroll_bottom = scroll + panel->dimensions.y;
+			float inner_height = get_inner_height(panel);
+			float scroll_bottom = scroll + inner_height;
 			if(target > scroll_bottom)
 			{
 				float delta = target - scroll_bottom;
-				float actual_target = target - panel->dimensions.y;
+				float actual_target = target - inner_height;
 				scroll_panel(panel, delta, actual_target);
 			}
 		}
@@ -4101,17 +4281,19 @@ static void scroll_panel_handle_input(ScrollPanel* panel)
 	}
 	if(key_tapped(UserKey::Page_Up))
 	{
-		int lines_per_page = panel->dimensions.y / panel->line_height;
+		float inner_height = get_inner_height(panel);
+		int lines_per_page = inner_height / panel->line_height;
 		int selection = MAX(panel->selected - lines_per_page, 0);
-		set_scroll(panel, panel->scroll - panel->dimensions.y);
+		set_scroll(panel, panel->scroll - inner_height);
 		set_selection(panel, selection);
 		panel->prior_selected = panel->selected;
 	}
 	if(key_tapped(UserKey::Page_Down))
 	{
-		int lines_per_page = panel->dimensions.y / panel->line_height;
+		float inner_height = get_inner_height(panel);
+		int lines_per_page = inner_height / panel->line_height;
 		int selection = MIN(panel->selected + lines_per_page, panel->lines_count - 1);
-		set_scroll(panel, panel->scroll + panel->dimensions.y);
+		set_scroll(panel, panel->scroll + inner_height);
 		set_selection(panel, selection);
 		panel->prior_selected = panel->selected;
 	}
@@ -4214,7 +4396,7 @@ static void scroll_panel_draw(ScrollPanel* panel, Font* font)
 		float top = background_rect.bottom_left.y + max_height;
 		float height = max_height / ((leading * panel->lines_count) / max_height);
 		height = clamp(height, scrollbar_width, max_height);
-		float max_scroll = (leading * panel->lines_count) - max_height;
+		float max_scroll = get_max_scroll(panel);
 		float y = top - height - scroll * (max_height - height) / max_scroll;
 
 		Rect rect = {{x, y}, {width, height}};
@@ -4223,6 +4405,7 @@ static void scroll_panel_draw(ScrollPanel* panel, Font* font)
 
 	Rect scroll_area = background_rect;
 	scroll_area.dimensions.x -= scrollbar_width;
+	scroll_area = dilate_rect(scroll_area, -panel->padding);
 	float top = scroll_area.bottom_left.y + scroll_area.dimensions.y;
 
 	// Draw the background of the selected line.
@@ -4254,9 +4437,14 @@ static void scroll_panel_draw(ScrollPanel* panel, Font* font)
 }
 
 // Tweaker......................................................................
-//    This is my version of Jessica Mak's tweaker. It's a tool that lets you set
-//    simple variables like numbers and booleans while the game is running. It's
-//    only for testing and doesn't save the variables when changed.
+//
+// This is my version of Jessica Mak's tweaker. It's a tool that lets you set
+// simple variables like numbers and booleans while the game is running. It's
+// only for testing and doesn't save the variables when changed.
+
+#if !defined(NDEBUG)
+#define TWEAKER_ENABLED
+#endif
 
 static const int tweaker_map_entries_count = 16;
 
@@ -4362,12 +4550,14 @@ struct Tweaker
 
 static void tweaker_turn_on(Tweaker* tweaker, bool on)
 {
+#if defined(TWEAKER_ENABLED)
 	if(!tweaker->on && on)
 	{
 		// When the tweaker is turned on, make sure the following is true.
 		tweaker->mode = Tweaker::Mode::Select;
 	}
 	tweaker->on = on;
+#endif
 }
 
 static void adjust_value(TweakerMap* map, int selected, bool upward)
@@ -4534,45 +4724,9 @@ static void tweaker_handle_input(Tweaker* tweaker, TweakerMap* map)
 	}
 }
 
-static const char* bool_to_string(bool b)
-{
-	if(b)
-	{
-		return "true";
-	}
-	else
-	{
-		return "false";
-	}
-}
-
-// Use this instead of the function strncpy from string.h, because strncpy
-// doesn't guarantee null-termination and should be considered hazardous.
-static int copy_string(char* to, int to_size, const char* from)
-{
-	ASSERT(from);
-	ASSERT(to);
-	int i;
-	for(i = 0; i < to_size - 1; ++i)
-	{
-		if(from[i] == '\0')
-		{
-			break;
-		}
-		to[i] = from[i];
-	}
-	to[i] = '\0';
-	ASSERT(i < to_size);
-	return i;
-}
-
-static void empty_string(char* s)
-{
-	s[0] = '\0';
-}
-
 static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 {
+#if defined(TWEAKER_ENABLED)
 	if(!tweaker->on)
 	{
 		return;
@@ -4635,7 +4789,7 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				float range_max = map->entries[selected].a_float.range_max;
 				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
 				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
-				if(range_min == -FLT_MAX && range_max == FLT_MAX)
+				if(range_min == -infinity && range_max == +infinity)
 				{
 					empty_string(tweaker->readout.range);
 				}
@@ -4650,10 +4804,12 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 
 	// Update the scroll position in the left panel.
 	scroll_panel_update(&tweaker->scroll_panel);
+#endif
 }
 
 static void draw_tweaker(Tweaker* tweaker)
 {
+#if defined(TWEAKER_ENABLED)
 	if(!tweaker->on)
 	{
 		// peace right out
@@ -4730,6 +4886,7 @@ static void draw_tweaker(Tweaker* tweaker)
 		text_position = {left, bottom + leading + weird_offset};
 		draw_text(hint, text_position, right_panel, &tweaker->font, colour_white);
 	}
+#endif
 }
 
 // The tweaker shouldn't be present in release mode. It isn't needed, but more
@@ -4740,9 +4897,24 @@ static void draw_tweaker(Tweaker* tweaker)
 // shipping.
 //
 // Also, the tweaker acts on and monitors variables in a totally non-thread-safe
-// way. This is fine on the X86-based development computer, which treats reads
-// and writes as atomic (effectively), but, again, unacceptable for release.
-#if defined(NDEBUG)
+// way, which is again, unacceptable for release.
+#if defined(TWEAKER_ENABLED)
+
+#define TWEAKER_BOOL(name, initial)\
+	bool name = register_tweaker_bool(&tweaker_map, #name, &name, initial);
+
+#define TWEAKER_INT(name, initial)\
+	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, INT_MIN, INT_MAX);
+
+#define TWEAKER_INT_RANGE(name, initial, min, max)\
+	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, min, max);
+
+#define TWEAKER_FLOAT(name, initial)\
+	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, -infinity, +infinity);
+
+#define TWEAKER_FLOAT_RANGE(name, initial, min, max)\
+	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, min, max);
+#else
 
 #define TWEAKER_BOOL(name, initial)\
 	bool name;
@@ -4758,30 +4930,14 @@ static void draw_tweaker(Tweaker* tweaker)
 
 #define TWEAKER_FLOAT_RANGE(name, initial, min, max)\
 	float name;
-#else
+
+#endif // defined(TWEAKER_ENABLED)
 
 namespace
 {
 	Tweaker tweaker;
 	TweakerMap tweaker_map;
 }
-
-#define TWEAKER_BOOL(name, initial)\
-	bool name = register_tweaker_bool(&tweaker_map, #name, &name, initial);
-
-#define TWEAKER_INT(name, initial)\
-	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, INT_MIN, INT_MAX);
-
-#define TWEAKER_INT_RANGE(name, initial, min, max)\
-	int name = register_tweaker_int(&tweaker_map, #name, &name, initial, min, max);
-
-#define TWEAKER_FLOAT(name, initial)\
-	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, -FLT_MAX, FLT_MAX);
-
-#define TWEAKER_FLOAT_RANGE(name, initial, min, max)\
-	float name = register_tweaker_float(&tweaker_map, #name, &name, initial, min, max);
-
-#endif // defined(NDEBUG)
 
 // Oscilloscope.................................................................
 
@@ -4948,8 +5104,8 @@ struct Trace
 
 static void normalise_trace(Trace* trace)
 {
-	float min = FLT_MAX;
-	float max = -FLT_MAX;
+	float min = +infinity;
+	float max = -infinity;
 	for(int i = 0; i < trace_points_count; ++i)
 	{
 		float point = trace->points[i];
@@ -5040,11 +5196,13 @@ struct Inspector
 
 static void inspector_turn_on(Inspector* inspector, bool on)
 {
+#if defined(PROFILE_ENABLED)
 	if(!inspector->on && on)
 	{
 		inspector->halt_collection = false;
 	}
 	inspector->on = on;
+#endif
 }
 
 static void inspector_handle_input(Inspector* inspector)
@@ -5053,33 +5211,6 @@ static void inspector_handle_input(Inspector* inspector)
 	{
 		inspector->halt_collection = !inspector->halt_collection;
 	}
-}
-
-static int find_char(const char* s, char c)
-{
-	int i;
-	for(i = 0; *s != c; ++s, ++i)
-	{
-		if(!*s)
-		{
-			return -1;
-		}
-	}
-	return i;
-}
-
-static int find_last_char(const char* s, char c, int limit)
-{
-	int result = -1;
-	int i = 0;
-	do
-	{
-		if(*s == c)
-		{
-			result = i;
-		}
-	} while(*s++ && i++ < limit);
-	return result;
 }
 
 static void function_name_from_signature(char* name, int name_cap, const char* signature)
@@ -5158,6 +5289,7 @@ static void inspector_update(Inspector* inspector)
 }
 
 const int qualitative_palette_cap = 30;
+
 static const u32 qualitative_palette[qualitative_palette_cap] =
 {
 	0x573bce,
@@ -5587,7 +5719,7 @@ static Vector2* create_blue_noise(int samples, float side)
 			// close points.
 			int gx = (grid_side - 1) * (x / side);
 			int gy = (grid_side - 1) * (y / side);
-			float min = FLT_MAX;
+			float min = +infinity;
 			SpashCell* cell = &grid[grid_side * gy + gx];
 			for(int k = 0; k < cell->count; ++k)
 			{
@@ -5891,7 +6023,7 @@ static void object_generate_player(Object* object, AABB* bounds)
 {
 	Floor floor = {};
 	Vector3 dimensions = {0.5f, 0.5f, 0.7f};
-	Vector3 position = {-dimensions.x / 2.0f, -dimensions.y / 2.0f, -dimensions.z / 2.0f};
+	Vector3 position = -dimensions / 2.0f;
 	bounds->min = position;
 	bounds->max = position + dimensions;
 	bool added = floor_add_box(&floor, position, dimensions);
@@ -6497,16 +6629,17 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		light_direction = normalise(-(view * light_direction));
 
 		glUseProgram(shader_default.program);
-		glUniform3fv(shader_default.light_direction, 1, reinterpret_cast<float*>(&light_direction));
+		glUniform3fv(shader_default.light_direction, 1, &light_direction[0]);
 
 		glUseProgram(shader_camera_fade.program);
-		glUniform3fv(shader_camera_fade.light_direction, 1, reinterpret_cast<float*>(&light_direction));
+		glUniform3fv(shader_camera_fade.light_direction, 1, &light_direction[0]);
 
 		view_projection = projection * view;
 	}
 
 	// Form lists of objects not culled.
 	PROFILE_BEGIN_NAMED("cull_and_list");
+
 	fade_calls.count = 0;
 	solid_calls.count = 0;
 	for(int i = 0; i < objects_count; ++i)
@@ -6527,10 +6660,12 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 			}
 		}
 	}
+
 	PROFILE_END();
 
 	// Draw all the faded objects first because they are close to the camera.
 	PROFILE_BEGIN_NAMED("faded_phase");
+
 	glUseProgram(shader_camera_fade.program);
 	for(int i = 0; i < fade_calls.count; ++i)
 	{
@@ -6540,10 +6675,12 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
+
 	PROFILE_END();
 
 	// Draw all the solid objects in the list.
 	PROFILE_BEGIN_NAMED("solid_phase");
+
 	glUseProgram(shader_default.program);
 	for(int i = 0; i < solid_calls.count; ++i)
 	{
@@ -6553,6 +6690,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		glBindVertexArray(o->vertex_array);
 		glDrawElements(GL_TRIANGLES, o->indices_count, GL_UNSIGNED_SHORT, nullptr);
 	}
+
 	PROFILE_END();
 
 	// Draw debug visualisers.
@@ -9130,7 +9268,7 @@ static float hann_window(int i, int count)
 static int find_greatest_cross_correlation(float* s0, int s0_count, float* s1, int s1_count, int max_lag)
 {
 	int max_index = 0;
-	float max = -FLT_MAX;
+	float max = -infinity;
 	for(int i = -max_lag; i <= max_lag; ++i)
 	{
 		float sum = 0.0f;
@@ -9449,21 +9587,6 @@ static void caller_unpause(Caller* caller, u64 unpause_time)
 	caller->paused = false;
 }
 
-#define DEFINE_INSERTION_SORT(type, after, suffix)\
-	static void insertion_sort_##suffix(type* a, int count)\
-	{\
-		for(int i = 1; i < count; ++i)\
-		{\
-			type x = a[i];\
-			int j = i - 1;\
-			for(; j >= 0 && after(a[j], x); --j)\
-			{\
-				a[j + 1] = a[j];\
-			}\
-			a[j + 1] = x;\
-		}\
-	}
-
 #define COMPARE_TICKS(a, b)\
 	a->ticks < b->ticks
 
@@ -9655,6 +9778,7 @@ void exit_thread()
 
 void reset_thread()
 {
+#if defined(PROFILE_ENABLED)
 	lock_this_thread();
 
 	caller_reset(root);
@@ -9664,6 +9788,7 @@ void reset_thread()
 	}
 
 	unlock_this_thread();
+#endif
 }
 
 void cleanup()
@@ -9739,7 +9864,8 @@ static void game_create()
 		tweaker.font.tracking = 0.0f;
 		tweaker.scroll_panel.bottom_left = {-300.0f, -200.0f};
 		tweaker.scroll_panel.dimensions = {300.0f, 400.0f};
-		tweaker.scroll_panel.lines_count = scroll_panel_lines_cap;
+		tweaker.scroll_panel.padding = {8.0f, 8.0f};
+		tweaker.scroll_panel.lines_count = tweaker_map_entries_count;
 		tweaker.scroll_panel.line_height = leading;
 	}
 
@@ -9753,6 +9879,7 @@ static void game_create()
 		profile_inspector.font.tracking = 0.0f;
 		profile_inspector.scroll_panel.bottom_left = {-370.0f, -120.0f};
 		profile_inspector.scroll_panel.dimensions = {300.0f, 360.0f};
+		profile_inspector.scroll_panel.padding = {8.0f, 8.0f};
 		profile_inspector.scroll_panel.line_height = leading;
 	}
 }
@@ -10163,16 +10290,6 @@ bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
 #endif
 
 // Instruction Set Specific Implementations.....................................
-
-#if defined(__i386__)
-#define INSTRUCTION_SET_X86
-#elif defined(__amd64__)
-#define INSTRUCTION_SET_X64
-#elif defined(__arm__)
-#define INSTRUCTION_SET_ARM
-#else
-#error The instruction set for this CPU is unknown.
-#endif
 
 void yield()
 {
