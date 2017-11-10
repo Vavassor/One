@@ -102,11 +102,11 @@ Table Of Contents...............................................................
 #error Failed to figure out the compiler used.
 #endif
 
-#if defined(__i386__)
+#if defined(__i386__) || defined(_M_IX86)
 #define INSTRUCTION_SET_X86
-#elif defined(__amd64__)
+#elif defined(__amd64__) || defined(_M_X64)
 #define INSTRUCTION_SET_X64
-#elif defined(__arm__)
+#elif defined(__arm__) || defined(_M_ARM)
 #define INSTRUCTION_SET_ARM
 #else
 #error Failed to figure out what instruction set the CPU on this computer uses.
@@ -231,7 +231,7 @@ static bool almost_zero(float x)
 
 static bool almost_one(float x)
 {
-	return abs(x - 1.0f) <= 0.5e-7f;
+	return abs(x - 1.0f) <= 0.5e-5f;
 }
 
 const float tau = 6.28318530717958647692f;
@@ -954,7 +954,8 @@ const Quaternion quaternion_identity = {1.0f, 0.0f, 0.0f, 0.0f};
 
 float norm(Quaternion q)
 {
-	return sqrt((q.w * q.w) + (q.x * q.x) + (q.y * q.y) + (q.z * q.z));
+	float result = sqrt((q.w * q.w) + (q.x * q.x) + (q.y * q.y) + (q.z * q.z));
+	return result;
 }
 
 Vector3 operator * (Quaternion q, Vector3 v)
@@ -1898,7 +1899,7 @@ struct Node
 		u32 items; // used only by leaf nodes
 	};
 	u32 index : 30;
-	Flag flag : 2;
+	u32 flag : 2;
 };
 
 struct Tree
@@ -2061,7 +2062,7 @@ static bool build_node(Tree* tree, Node* node, AABB bounds, Triangle* triangles,
 		Node* children = &tree->nodes[index];
 
 		Node* child_left = &children[0];
-		int left_upper = fmax(lower, pivot - 1);
+		int left_upper = MAX(lower, pivot - 1);
 		AABB left_bounds = aabb;
 		left_bounds.max[axis] = split;
 		node->clip[0] = compute_just_max(triangles, lower, left_upper, axis);
@@ -2134,7 +2135,7 @@ static bool intersect_node(Node* nodes, Node* node, AABB node_bounds, AABB aabb,
 		return true;
 	}
 
-	Flag axis = node->flag;
+	Flag axis = static_cast<Flag>(node->flag);
 	Node* children = &nodes[node->index];
 
 	Node* left = &children[0];
@@ -2175,7 +2176,7 @@ static bool intersect_node(Node* nodes, Node* node, AABB bounds, Ray ray, Inters
 		return true;
 	}
 
-	Flag axis = node->flag;
+	Flag axis = static_cast<Flag>(node->flag);
 	Node* children = &nodes[node->index];
 
 	Node* left = &children[0];
@@ -3655,7 +3656,7 @@ static void add_bih_node(bih::Node* nodes, bih::Node* node, AABB bounds, int dep
 {
 	if(node->flag != bih::FLAG_LEAF)
 	{
-		bih::Flag axis = node->flag;
+		bih::Flag axis = static_cast<bih::Flag>(node->flag);
 
 		AABB left = bounds;
 		left.max[axis] = node->clip[0];
@@ -3889,6 +3890,105 @@ static bool clip_line(Rect rect, Vector2* p0, Vector2* p1)
 // being on/off is the least significant bit, and 15, the most significant.
 
 // CHEAT ZONE!!! Hardcoded data ahead
+#if defined(COMPILER_MSVC)
+static u16 ascii_to_16_segment_table[94] =
+{
+	0x000c, // !
+	0x0204, // "
+	0xaa3c, // #
+	0xaabb, // $
+	0xee99, // %
+	0x9371, // &
+	0x0200, // '
+	0x1400, // (
+	0x4100, // )
+	0xff00, // *
+	0xaa00, // +
+	0x4000, // ,
+	0x8800, // -
+	0x1000, // .
+	0x4400, // /
+	0x44ff, // 0
+	0x040c, // 1
+	0x8877, // 2
+	0x083f, // 3
+	0x888c, // 4
+	0x90b3, // 5
+	0x88fb, // 6
+	0x000f, // 7
+	0x88ff, // 8
+	0x88bf, // 9
+	0x0033, // :
+	0x4003, // ;
+	0x9400, // <
+	0x8830, // =
+	0x4900, // >
+	0x2807, // ?
+	0x0af7, // @
+	0x88cf, // A
+	0x2a3f, // B
+	0x00f3, // C
+	0x223f, // D
+	0x80f3, // E
+	0x80c3, // F
+	0x08fb, // G
+	0x88cc, // H
+	0x2233, // I
+	0x007c, // J
+	0x94c0, // K
+	0x00f0, // L
+	0x05cc, // M
+	0x11cc, // N
+	0x00ff, // O
+	0x88c7, // P
+	0x10ff, // Q
+	0x98c7, // R
+	0x88bb, // S
+	0x2203, // T
+	0x00fc, // U
+	0x44c0, // V
+	0x50cc, // W
+	0x5500, // X
+	0x2500, // Y
+	0x4433, // Z
+	0x2212, // [
+	0x1100, /* \ */
+	0x2221, // ]
+	0x5000, // ^
+	0x0030, // _
+	0x0100, // `
+	0xa070, // a
+	0x88f8, // b
+	0x8870, // c
+	0x887c, // d
+	0xc070, // e
+	0xaa02, // f
+	0x88bf, // g
+	0x88c8, // h
+	0x2000, // i
+	0x0038, // j
+	0x98c0, // k
+	0x0070, // l
+	0xa848, // m
+	0x8848, // n
+	0x8878, // o
+	0x88c7, // p
+	0x888f, // q
+	0x8840, // r
+	0x1830, // s
+	0xaa10, // t
+	0x0078, // u
+	0x4040, // v
+	0x5048, // w
+	0xd800, // x
+	0x88bc, // y
+	0xc030, // z
+	0xa212, // {
+	0x2200, // |
+	0x2a21, // }
+	0x0003, // ~
+};
+#else
 static u16 ascii_to_16_segment_table[94] =
 {
 	0b0000000000001100, // !
@@ -3986,6 +4086,7 @@ static u16 ascii_to_16_segment_table[94] =
 	0b0010101000100001, // }
 	0b0000000000000011, // ~
 };
+#endif // defined(COMPILER_MSVC)
 
 static Vector2 segment_lines[16][2] =
 {
@@ -4724,6 +4825,14 @@ static void tweaker_handle_input(Tweaker* tweaker, TweakerMap* map)
 	}
 }
 
+#if defined(COMPILER_MSVC)
+#define SNPRINTF(buffer, count, format, ...)\
+	_snprintf(buffer, count, format, __VA_ARGS__)
+#else
+#define SNPRINTF(buffer, count, format, ...)\
+	snprintf(buffer, count, format, __VA_ARGS__)
+#endif
+
 static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 {
 #if defined(TWEAKER_ENABLED)
@@ -4758,7 +4867,7 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 			{
 				bool b = *map->entries[selected].a_bool.value;
 				const char* value = bool_to_string(b);
-				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
+				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
 				empty_string(tweaker->readout.step);
 				empty_string(tweaker->readout.range);
 				break;
@@ -4769,15 +4878,15 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				int step = map->entries[selected].an_int.step;
 				int range_min = map->entries[selected].an_int.range_min;
 				int range_max = map->entries[selected].an_int.range_max;
-				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
-				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
+				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
+				SNPRINTF(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
 				if(range_min == INT_MIN && range_max == INT_MAX)
 				{
 					empty_string(tweaker->readout.range);
 				}
 				else
 				{
-					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%d,%d]", range_min, range_max);
+					SNPRINTF(tweaker->readout.range, tweaker_line_char_limit, "Range=[%d,%d]", range_min, range_max);
 				}
 				break;
 			}
@@ -4787,15 +4896,15 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				float step = map->entries[selected].a_float.step;
 				float range_min = map->entries[selected].a_float.range_min;
 				float range_max = map->entries[selected].a_float.range_max;
-				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
-				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
+				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
+				SNPRINTF(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
 				if(range_min == -infinity && range_max == +infinity)
 				{
 					empty_string(tweaker->readout.range);
 				}
 				else
 				{
-					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%g,%g]", range_min, range_max);
+					SNPRINTF(tweaker->readout.range, tweaker_line_char_limit, "Range=[%g,%g]", range_min, range_max);
 				}
 				break;
 			}
@@ -5271,7 +5380,7 @@ static void inspector_fill_lines(Inspector* inspector)
 			int char_limit = scroll_panel_line_char_limit - indent;
 			int name_limit = 12 - indent;
 			int milliticks = record->ticks / 1e3;
-			snprintf(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
+			SNPRINTF(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
 		}
 	}
 
@@ -6155,7 +6264,9 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 		Vector3 a = vertices[indices[3 * i + 0]].position;
 		Vector3 b = vertices[indices[3 * i + 1]].position;
 		Vector3 c = vertices[indices[3 * i + 2]].position;
-		t[i] = {a, b, c};
+		t[i].vertices[0] = a;
+		t[i].vertices[1] = b;
+		t[i].vertices[2] = c;
 	}
 
 	object_set_surface(object, vertices, vertices_count, indices, indices_count);
@@ -9663,11 +9774,17 @@ struct GlobalThreadsList
 	SpinLock lock;
 };
 
+#if defined(COMPILER_MSVC)
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL thread_local
+#endif
+
 // All the global state is kept here.
 namespace
 {
-	thread_local ThreadState thread_state;
-	thread_local Caller* root;
+	THREAD_LOCAL ThreadState thread_state;
+	THREAD_LOCAL Caller* root;
 	GlobalThreadsList threads_list;
 }
 
@@ -10249,6 +10366,28 @@ bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
 	return _InterlockedCompareExchange(p, desired, expected) == desired;
 }
 
+void yield()
+{
+#if defined(INSTRUCTION_SET_X86) || defined(INSTRUCTION_SET_X64)
+	_mm_pause();
+#elif defined(INSTRUCTION_SET_ARM)
+	__yield();
+#endif
+}
+
+u64 get_timestamp()
+{
+#if defined(INSTRUCTION_SET_X86) || defined(INSTRUCTION_SET_X64)
+	return __rdtsc();
+#elif defined(INSTRUCTION_SET_ARM)
+	// ARMv6 has no performance counter and ARMv7-A and ARMv8-A can only
+	// access their "Performance Monitor Unit" if the kernel enables
+	// user-space to access it. So, it's too inconvenient to get at;
+	// Instead, just fall back to the system call.
+	return get_timestamp_from_system();
+#endif
+}
+
 #elif defined(COMPILER_GCC)
 
 bool atomic_flag_test_and_set(AtomicFlag* flag)
@@ -10287,10 +10426,6 @@ bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
 	return __atomic_compare_exchange_n(p, &old, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
-#endif
-
-// Instruction Set Specific Implementations.....................................
-
 void yield()
 {
 #if defined(INSTRUCTION_SET_X86) || defined(INSTRUCTION_SET_X64)
@@ -10318,6 +10453,8 @@ u64 get_timestamp()
 	return get_timestamp_from_system();
 #endif
 }
+
+#endif
 
 // 8. Platform-Specific Implementations=========================================
 
@@ -11402,6 +11539,17 @@ u64 get_timestamp_from_system()
 	return now.QuadPart;
 }
 
+// §8.3 Audio...................................................................
+
+namespace audio {
+
+void system_send_message(Message* message)
+{
+	//TODO: fill this in!!!
+}
+
+} // namespace audio
+
 // §8.4 Platform Main Functions.................................................
 
 #include <ctime>
@@ -11449,6 +11597,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_pa
 
 static bool main_create(HINSTANCE instance, int show_command)
 {
+	PROFILE_THREAD_ENTER();
+
     WNDCLASSEXA window_class = {};
     window_class.cbSize = sizeof window_class;
     window_class.style = CS_HREDRAW | CS_VREDRAW;
@@ -11466,7 +11616,7 @@ static bool main_create(HINSTANCE instance, int show_command)
     }
 
     DWORD window_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    window = CreateWindowExA(WS_EX_APPWINDOW, MAKEINTATOM(registered_class), window_title, window_style, CW_USEDEFAULT, CW_USEDEFAULT, window_width, window_height, nullptr, nullptr, instance, nullptr);
+    window = CreateWindowExA(WS_EX_APPWINDOW, MAKEINTATOM(registered_class), app_name, window_style, CW_USEDEFAULT, CW_USEDEFAULT, window_width, window_height, nullptr, nullptr, instance, nullptr);
     if(!window)
     {
         LOG_ERROR("Failed to create the window.");
@@ -11511,8 +11661,7 @@ static bool main_create(HINSTANCE instance, int show_command)
     // Set it to be this thread's rendering context.
     if(wglMakeCurrent(device_context, rendering_context) == FALSE)
     {
-        LOG_ERROR("Couldn't set this thread's rendering context "
-            "(wglMakeCurrent failed).");
+        LOG_ERROR("Couldn't set this thread's rendering context (wglMakeCurrent failed).");
         return false;
     }
 
@@ -11524,20 +11673,25 @@ static bool main_create(HINSTANCE instance, int show_command)
         LOG_ERROR("OpenGL functions could not be loaded!");
         return false;
     }
-    bool initialised = render_system::initialise();
+    bool initialised = render::system_initialise();
     if(!initialised)
     {
         LOG_ERROR("Render system failed initialisation.");
         return false;
     }
-    render_system::resize_viewport(window_width, window_height);
+    render::resize_viewport(window_width, window_height);
+
+	game_create();
 
     return true;
 }
 
 static void main_destroy()
 {
-    render_system::terminate(ogl_functions_loaded);
+	game_destroy();
+    render::system_terminate(ogl_functions_loaded);
+	PROFILE_THREAD_EXIT();
+	profile::cleanup();
 
     if(rendering_context)
     {
@@ -11565,9 +11719,11 @@ static int main_loop()
 		// Record when the frame begins.
 		double frame_start_time = get_time(&frame_clock);
 
-		//
 		main_update();
 		SwapBuffers(device_context);
+
+		profile::inspector_collect(&profile_inspector, 0);
+		profile::reset_thread();
 
 		// Handle all window messages queued up during the past frame.
 		while(PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -11581,7 +11737,23 @@ static int main_loop()
 		}
 
 		// Get key states for input.
-		const int virtual_keys[key_count] = {VK_SPACE, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN};
+		const int virtual_keys[key_count] =
+		{
+			VK_SPACE,
+			VK_LEFT,
+			VK_UP,
+			VK_RIGHT,
+			VK_DOWN,
+			VK_HOME,
+			VK_END,
+			VK_PRIOR,
+			VK_NEXT,
+			VK_OEM_3,
+			VK_RETURN,
+			'S',
+			'V',
+			VK_F2,
+		};
 		for(int i = 0; i < key_count; ++i)
 		{
 			keys_pressed[i] = 0x8000 & GetKeyState(virtual_keys[i]);
