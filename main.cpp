@@ -10153,6 +10153,393 @@ static void main_update()
 	render::system_update(position, dancer_position, &world, &tweaker, &profile_inspector);
 }
 
+// Audio System Non-Platform Layer..............................................
+
+namespace audio {
+
+namespace
+{
+	const int voice_count = 16;
+	const int tracks_count = 5;
+	const int streams_count = tracks_count + 1;
+	const double first_section_length = 2.4;
+
+	ConversionInfo conversion_info;
+	DeviceDescription device_description;
+	MessageQueue message_queue;
+	float* mixed_samples;
+	void* devicebound_samples;
+	Voice voices[voice_count];
+	VoiceEntry voice_map[voice_count];
+	Stream streams[streams_count];
+	Track tracks[tracks_count];
+	Instrument instruments[tracks_count];
+	Composer composer;
+	History history;
+	double time;
+	bool boop_on;
+}
+
+TWEAKER_FLOAT_RANGE(master_volume, 0.0f, 0.0f, 1.0f);
+TWEAKER_INT(boop_pitch, 69);
+
+static void send_history_to_main_thread(History* history)
+{
+	for(int i = 0; i < history->count; ++i)
+	{
+		History::Event* event = &history->events[i];
+		Message message;
+		message.code = Message::Code::Note;
+		message.note.start = event->started;
+		message.note.track = event->track;
+		game_send_message(&message);
+	}
+	history_erase(history);
+}
+
+static void send_oscilloscope_samples_to_main_thread(float* samples, int frames, int channels)
+{
+	// TODO: This allocates a buffer for every message and deallocates it on the
+	// receiving side. It's … not the best.
+	int samples_count = frames * channels;
+	float* copy = ALLOCATE(float, samples_count);
+	memcpy(copy, samples, sizeof(float) * samples_count);
+
+	Message message;
+	message.code = Message::Code::Oscilloscope_Samples;
+	message.oscilloscope_samples.array = copy;
+	message.oscilloscope_samples.frames = frames;
+	message.oscilloscope_samples.channels = channels;
+	game_send_message(&message);
+}
+
+static void process_messages_from_main_thread()
+{
+	Message message;
+	while(dequeue_message(&message_queue, &message))
+	{
+		switch(message.code)
+		{
+			case Message::Code::Boop:
+			{
+				boop_on = message.boop.on;
+				break;
+			}
+			default:
+			{
+				// Any other message types should be ones sent to the main
+				// thread.
+				ASSERT(false);
+				break;
+			}
+		}
+	}
+}
+
+void system_prepare_for_loop()
+{
+	u64 samples = device_description.channels * device_description.frames;
+
+	// Setup mixing.
+	mixed_samples = ALLOCATE(float, samples);
+	devicebound_samples = ALLOCATE(u8, device_description.size);
+
+	conversion_info.channels = device_description.channels;
+	conversion_info.in.format = FORMAT_F32;
+	conversion_info.in.stride = conversion_info.channels;
+	conversion_info.out.format = device_description.format;
+	conversion_info.out.stride = conversion_info.channels;
+
+	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
+	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
+	float delta_time_per_frame = 1.0f / device_description.sample_rate;
+
+	// Setup voices.
+
+	for(int i = 0; i < voice_count; ++i)
+	{
+		Voice* voice = &voices[i];
+		envelope_setup(&voice->amp_envelope);
+		envelope_setup(&voice->pitch_envelope);
+	}
+
+	voice_map_setup(voice_map, voice_count);
+
+	// Setup the composer and tracks.
+
+	compose_form(&composer);
+
+	track_setup(&tracks[0]);
+	track_generate(&tracks[0], first_section_length, &composer);
+
+	track_setup(&tracks[1]);
+	tracks[1].octave = 4;
+	tracks[1].octave_range = 0;
+	tracks[1].style = 1;
+	track_generate(&tracks[1], first_section_length, &composer);
+
+	track_setup(&tracks[2]);
+	tracks[2].octave = 4;
+	tracks[2].octave_range = 0;
+	tracks[2].style = 1;
+	track_generate(&tracks[2], first_section_length, &composer);
+
+	track_setup(&tracks[3]);
+	tracks[3].octave = 4;
+	tracks[3].octave_range = 1;
+	tracks[3].style = 2;
+	track_generate(&tracks[3], first_section_length, &composer);
+
+	track_setup(&tracks[4]);
+	tracks[4].octave = 5;
+	tracks[4].octave_range = 0;
+	tracks[4].style = 3;
+	track_generate(&tracks[4], first_section_length, &composer);
+
+	// Setup test instruments and streams.
+
+	for(int i = 0; i < streams_count; ++i)
+	{
+		stream_create(&streams[i], device_description.frames, 1);
+	}
+
+	history_erase(&history);
+
+	Instrument* kick = &instruments[0];
+	kick->oscillator = Oscillator::Sine;
+	kick->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
+	kick->envelope_settings.amp.decay = 0.56f * device_description.sample_rate;
+	kick->envelope_settings.amp.sustain = 0.0f;
+	kick->envelope_settings.amp.release = 2.0f * device_description.sample_rate;
+	kick->envelope_settings.pitch.use = true;
+	kick->envelope_settings.pitch.semitones = 36;
+	kick->envelope_settings.pitch.attack = 0.01f * device_description.sample_rate;
+	kick->envelope_settings.pitch.decay = 0.06f * device_description.sample_rate;
+	kick->envelope_settings.pitch.sustain = 0.0f;
+	kick->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
+
+	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
+	LPF* lowpass = &effect->lowpass;
+	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
+
+	effect = instrument_add_effect(kick, EffectType::Distortion);
+	Distortion* distortion = &effect->distortion;
+	distortion->gain = 5.0f;
+	distortion->mix = 0.8f;
+
+#if 0
+	Instrument* open_hat = &instruments[1];
+	open_hat->oscillator = Oscillator::Noise;
+	open_hat->envelope_settings.attack = 0.002f * device_description.sample_rate;
+	open_hat->envelope_settings.decay = 0.56f * device_description.sample_rate;
+	open_hat->envelope_settings.sustain = 0.0f;
+	open_hat->envelope_settings.release = 2.0f * device_description.sample_rate;
+	open_hat->envelope_settings.pitch_envelope.use = false;
+	open_hat->noise.passband = 48;
+#endif
+
+	Instrument* snare0 = &instruments[1];
+	snare0->oscillator = Oscillator::Pulse;
+	snare0->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
+	snare0->envelope_settings.amp.decay = 0.2f * device_description.sample_rate;
+	snare0->envelope_settings.amp.sustain = 0.1f;
+	snare0->envelope_settings.amp.release = 0.6f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.use = true;
+	snare0->envelope_settings.pitch.semitones = 36;
+	snare0->envelope_settings.pitch.attack = 0.001f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.decay = 0.05f * device_description.sample_rate;
+	snare0->envelope_settings.pitch.sustain = 0.0f;
+	snare0->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
+	snare0->pulse.width = 0.3f;
+
+	Instrument* snare1 = &instruments[2];
+	snare1->oscillator = Oscillator::Noise;
+	snare1->envelope_settings.amp.attack = 0.05f * device_description.sample_rate;
+	snare1->envelope_settings.amp.decay = 0.001f * device_description.sample_rate;
+	snare1->envelope_settings.amp.sustain = 0.8f;
+	snare1->envelope_settings.amp.release = 0.001f * device_description.sample_rate;
+	snare1->envelope_settings.pitch.use = false;
+	snare1->noise.passband = 24;
+
+	effect = instrument_add_effect(snare1, EffectType::Overdrive);
+
+	Instrument* lead = &instruments[3];
+	lead->oscillator = Oscillator::FM_Sine;
+	lead->fm.ratio = 0.333f;
+	lead->fm.gain = 2400.0f;
+	lead->envelope_settings.amp.attack = 0.2f * device_description.sample_rate;
+	lead->envelope_settings.amp.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.amp.sustain = 0.75f;
+	lead->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
+	lead->envelope_settings.pitch.use = false;
+	lead->envelope_settings.pitch.semitones = -12;
+	lead->envelope_settings.pitch.attack = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch.decay = 0.1f * device_description.sample_rate;
+	lead->envelope_settings.pitch.sustain = 0.0f;
+	lead->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
+
+	effect = instrument_add_effect(lead, EffectType::Resonator);
+	Resonator* resonator = &effect->resonator;
+	resonator->mix = 0.4f;
+	resonator->gain = 12.0f;
+	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
+	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
+	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
+
+	Instrument* rim = &instruments[4];
+	rim->oscillator = Oscillator::Noise;
+	rim->envelope_settings.amp.attack = 0.008f * device_description.sample_rate;
+	rim->envelope_settings.amp.decay = 0.14f * device_description.sample_rate;
+	rim->envelope_settings.amp.sustain = 0.0f;
+	rim->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
+	rim->envelope_settings.pitch.use = false;
+	rim->noise.passband = 36;
+
+	effect = instrument_add_effect(rim, EffectType::Resonator);
+	resonator = &effect->resonator;
+	resonator->mix = 0.9f;
+	resonator->gain = 23.0f;
+	sar_set_passband(&resonator->bank[0], pitch_to_frequency(89), device_description.sample_rate, 29.0f);
+	sar_set_passband(&resonator->bank[1], pitch_to_frequency(85), device_description.sample_rate, 33.0f);
+	sar_set_passband(&resonator->bank[2], pitch_to_frequency(88), device_description.sample_rate, 20.0f);
+
+	effect = instrument_add_effect(rim, EffectType::Delay);
+	Delay* delay = &effect->delay;
+	delay->delay = 1.0f * device_description.sample_rate;
+	delay->feedback = 0.2f;
+	delay->mix = 0.5f;
+
+	streams[1].pan = 0.4f;
+
+	streams[2].pan = 0.4f;
+
+	streams[3].pan = -0.1f;
+
+	streams[4].volume = 0.6f;
+	streams[4].pan = -0.7f;
+
+	// Send some preparatory messages to the main thread.
+	{
+		Message message;
+
+		message.code = Message::Code::Oscilloscope_Channel;
+		message.oscilloscope_channel.index = 0;
+		message.oscilloscope_channel.active = true;
+		game_send_message(&message);
+
+		message.code = Message::Code::Oscilloscope_Channel;
+		message.oscilloscope_channel.index = 1;
+		message.oscilloscope_channel.active = true;
+		game_send_message(&message);
+
+		message.code = Message::Code::Oscilloscope_Settings;
+		message.oscilloscope_settings.sample_rate = device_description.sample_rate;
+		game_send_message(&message);
+	}
+}
+
+static void system_cleanup_after_loop()
+{
+	SAFE_DEALLOCATE(mixed_samples);
+	SAFE_DEALLOCATE(devicebound_samples);
+	for(int i = 0; i < streams_count; ++i)
+	{
+		stream_destroy(&streams[i]);
+	}
+	for(int i = 0; i < tracks_count; ++i)
+	{
+		instrument_destroy(&instruments[i]);
+	}
+}
+
+static void system_update_loop()
+{
+	send_history_to_main_thread(&history);
+	process_messages_from_main_thread();
+
+	PROFILE_BEGIN_NAMED("generate_samples");
+
+	int frames = device_description.frames;
+	int sample_rate = device_description.sample_rate;
+	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
+
+	double section_finish_time = first_section_length;
+	bool cue_time_reset = false;
+
+	for(int i = 0; i < tracks_count; ++i)
+	{
+		Stream* stream = &streams[i];
+		Track* track = &tracks[i];
+		Instrument* instrument = &instruments[i];
+		fill_with_silence(stream->samples, 0, stream->samples_count);
+		if(time + delta_time < section_finish_time)
+		{
+			generate_oscillation(stream, 0, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
+		}
+		else
+		{
+			int regen_frame = (section_finish_time - time) * device_description.sample_rate;
+			generate_oscillation(stream, 0, regen_frame, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
+
+			ASSERT(should_regenerate(track));
+			transfer_unfinished_notes(track, section_finish_time);
+			free_associated_voices(voice_map, voice_count, i);
+			if(!cue_time_reset)
+			{
+				composer_update_state(&composer);
+			}
+			track_generate(track, section_finish_time, &composer);
+
+			cue_time_reset = true;
+
+			generate_oscillation(stream, regen_frame, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, 0.0, &history);
+		}
+		apply_effects(instrument->effects, instrument->effects_count, stream);
+	}
+
+	Stream* stream = &streams[5];
+	{
+		stream->volume = 0.0f;
+		if(boop_on)
+		{
+			stream->volume = 1.0f;
+		}
+		const float theta = pitch_to_frequency(boop_pitch);
+		for(int i = 0; i < frames; ++i)
+		{
+			float t = static_cast<float>(i) / sample_rate + time;
+			float value = sin(tau * theta * t);
+			for(int j = 0; j < stream->channels; ++j)
+			{
+				stream->samples[stream->channels * i + j] = value;
+			}
+		}
+	}
+
+	PROFILE_END();
+
+	// Combine the generated audio to a single compact array of samples.
+	PROFILE_BEGIN_NAMED("mix_and_format");
+
+	mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, master_volume);
+	format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
+
+	PROFILE_END();
+
+	send_oscilloscope_samples_to_main_thread(mixed_samples, frames, device_description.channels);
+
+	if(cue_time_reset)
+	{
+		time = (time + delta_time) - section_finish_time;
+	}
+	else
+	{
+		time += delta_time;
+	}
+}
+
+} // namespace audio
+
 // 6. OpenGL Function Loading...................................................
 
 #if defined(OS_LINUX)
@@ -10171,12 +10558,6 @@ static void main_update()
 #define WIN32_LEAN_AND_MEAN 1
 #define NOMINMAX
 #include <Windows.h>
-#if defined(near)
-#undef near
-#endif
-#if defined(far)
-#undef far
-#endif
 
 namespace
 {
@@ -10780,72 +11161,9 @@ static void close_device(snd_pcm_t* pcm_handle)
 
 namespace
 {
-	ConversionInfo conversion_info;
-	DeviceDescription device_description;
 	snd_pcm_t* pcm_handle;
 	pthread_t thread;
 	AtomicFlag quit;
-	MessageQueue message_queue;
-	float* mixed_samples;
-	void* devicebound_samples;
-	double time;
-	bool boop_on;
-}
-
-TWEAKER_FLOAT_RANGE(master_volume, 0.0f, 0.0f, 1.0f);
-TWEAKER_INT(boop_pitch, 69);
-
-static void send_history_to_main_thread(History* history)
-{
-	for(int i = 0; i < history->count; ++i)
-	{
-		History::Event* event = &history->events[i];
-		Message message;
-		message.code = Message::Code::Note;
-		message.note.start = event->started;
-		message.note.track = event->track;
-		game_send_message(&message);
-	}
-	history_erase(history);
-}
-
-static void send_oscilloscope_samples_to_main_thread(float* samples, int frames, int channels)
-{
-	// TODO: This allocates a buffer for every message and deallocates it on the
-	// receiving side. It's … not the best.
-	int samples_count = frames * channels;
-	float* copy = ALLOCATE(float, samples_count);
-	memcpy(copy, samples, sizeof(float) * samples_count);
-
-	Message message;
-	message.code = Message::Code::Oscilloscope_Samples;
-	message.oscilloscope_samples.array = copy;
-	message.oscilloscope_samples.frames = frames;
-	message.oscilloscope_samples.channels = channels;
-	game_send_message(&message);
-}
-
-static void process_messages_from_main_thread()
-{
-	Message message;
-	while(dequeue_message(&message_queue, &message))
-	{
-		switch(message.code)
-		{
-			case Message::Code::Boop:
-			{
-				boop_on = message.boop.on;
-				break;
-			}
-			default:
-			{
-				// Any other message types should be ones sent to the main
-				// thread.
-				ASSERT(false);
-				break;
-			}
-		}
-	}
 }
 
 static void* run_mixer_thread(void* argument)
@@ -10865,293 +11183,11 @@ static void* run_mixer_thread(void* argument)
 		// @Incomplete: probably should exit?
 	}
 
-	u64 samples = device_description.channels * device_description.frames;
-
-	// Setup mixing.
-	mixed_samples = ALLOCATE(float, samples);
-	devicebound_samples = ALLOCATE(u8, device_description.size);
-
-	conversion_info.channels = device_description.channels;
-	conversion_info.in.format = FORMAT_F32;
-	conversion_info.in.stride = conversion_info.channels;
-	conversion_info.out.format = device_description.format;
-	conversion_info.out.stride = conversion_info.channels;
-
-	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
-	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
-	float delta_time_per_frame = 1.0f / device_description.sample_rate;
-
-	// Setup voices.
-
-	int voice_count = 16;
-	Voice voices[voice_count];
-	for(int i = 0; i < voice_count; ++i)
-	{
-		Voice* voice = &voices[i];
-		envelope_setup(&voice->amp_envelope);
-		envelope_setup(&voice->pitch_envelope);
-	}
-
-	VoiceEntry voice_map[voice_count];
-	voice_map_setup(voice_map, voice_count);
-
-	// Setup the composer and tracks.
-
-	Composer composer;
-	compose_form(&composer);
-
-	const int tracks_count = 5;
-	Track tracks[tracks_count];
-
-	const double first_section_length = 2.4;
-
-	track_setup(&tracks[0]);
-	track_generate(&tracks[0], first_section_length, &composer);
-
-	track_setup(&tracks[1]);
-	tracks[1].octave = 4;
-	tracks[1].octave_range = 0;
-	tracks[1].style = 1;
-	track_generate(&tracks[1], first_section_length, &composer);
-
-	track_setup(&tracks[2]);
-	tracks[2].octave = 4;
-	tracks[2].octave_range = 0;
-	tracks[2].style = 1;
-	track_generate(&tracks[2], first_section_length, &composer);
-
-	track_setup(&tracks[3]);
-	tracks[3].octave = 4;
-	tracks[3].octave_range = 1;
-	tracks[3].style = 2;
-	track_generate(&tracks[3], first_section_length, &composer);
-
-	track_setup(&tracks[4]);
-	tracks[4].octave = 5;
-	tracks[4].octave_range = 0;
-	tracks[4].style = 3;
-	track_generate(&tracks[4], first_section_length, &composer);
-
-	// Setup test instruments and streams.
-
-	int streams_count = tracks_count + 1;
-	Stream streams[streams_count];
-	for(int i = 0; i < streams_count; ++i)
-	{
-		stream_create(&streams[i], device_description.frames, 1);
-	}
-
-	History history;
-	history_erase(&history);
-
-	Instrument instruments[tracks_count];
-
-	Instrument* kick = &instruments[0];
-	kick->oscillator = Oscillator::Sine;
-	kick->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
-	kick->envelope_settings.amp.decay = 0.56f * device_description.sample_rate;
-	kick->envelope_settings.amp.sustain = 0.0f;
-	kick->envelope_settings.amp.release = 2.0f * device_description.sample_rate;
-	kick->envelope_settings.pitch.use = true;
-	kick->envelope_settings.pitch.semitones = 36;
-	kick->envelope_settings.pitch.attack = 0.01f * device_description.sample_rate;
-	kick->envelope_settings.pitch.decay = 0.06f * device_description.sample_rate;
-	kick->envelope_settings.pitch.sustain = 0.0f;
-	kick->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
-
-	Effect* effect = instrument_add_effect(kick, EffectType::Low_Pass_Filter);
-	LPF* lowpass = &effect->lowpass;
-	lpf_set_corner_frequency(lowpass, 440.0f, delta_time_per_frame);
-
-	effect = instrument_add_effect(kick, EffectType::Distortion);
-	Distortion* distortion = &effect->distortion;
-	distortion->gain = 5.0f;
-	distortion->mix = 0.8f;
-
-#if 0
-	Instrument* open_hat = &instruments[1];
-	open_hat->oscillator = Oscillator::Noise;
-	open_hat->envelope_settings.attack = 0.002f * device_description.sample_rate;
-	open_hat->envelope_settings.decay = 0.56f * device_description.sample_rate;
-	open_hat->envelope_settings.sustain = 0.0f;
-	open_hat->envelope_settings.release = 2.0f * device_description.sample_rate;
-	open_hat->envelope_settings.pitch_envelope.use = false;
-	open_hat->noise.passband = 48;
-#endif
-
-	Instrument* snare0 = &instruments[1];
-	snare0->oscillator = Oscillator::Pulse;
-	snare0->envelope_settings.amp.attack = 0.002f * device_description.sample_rate;
-	snare0->envelope_settings.amp.decay = 0.2f * device_description.sample_rate;
-	snare0->envelope_settings.amp.sustain = 0.1f;
-	snare0->envelope_settings.amp.release = 0.6f * device_description.sample_rate;
-	snare0->envelope_settings.pitch.use = true;
-	snare0->envelope_settings.pitch.semitones = 36;
-	snare0->envelope_settings.pitch.attack = 0.001f * device_description.sample_rate;
-	snare0->envelope_settings.pitch.decay = 0.05f * device_description.sample_rate;
-	snare0->envelope_settings.pitch.sustain = 0.0f;
-	snare0->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
-	snare0->pulse.width = 0.3f;
-
-	Instrument* snare1 = &instruments[2];
-	snare1->oscillator = Oscillator::Noise;
-	snare1->envelope_settings.amp.attack = 0.05f * device_description.sample_rate;
-	snare1->envelope_settings.amp.decay = 0.001f * device_description.sample_rate;
-	snare1->envelope_settings.amp.sustain = 0.8f;
-	snare1->envelope_settings.amp.release = 0.001f * device_description.sample_rate;
-	snare1->envelope_settings.pitch.use = false;
-	snare1->noise.passband = 24;
-
-	effect = instrument_add_effect(snare1, EffectType::Overdrive);
-
-	Instrument* lead = &instruments[3];
-	lead->oscillator = Oscillator::FM_Sine;
-	lead->fm.ratio = 0.333f;
-	lead->fm.gain = 2400.0f;
-	lead->envelope_settings.amp.attack = 0.2f * device_description.sample_rate;
-	lead->envelope_settings.amp.decay = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.amp.sustain = 0.75f;
-	lead->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
-	lead->envelope_settings.pitch.use = false;
-	lead->envelope_settings.pitch.semitones = -12;
-	lead->envelope_settings.pitch.attack = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.pitch.decay = 0.1f * device_description.sample_rate;
-	lead->envelope_settings.pitch.sustain = 0.0f;
-	lead->envelope_settings.pitch.release = 0.0f * device_description.sample_rate;
-
-	effect = instrument_add_effect(lead, EffectType::Resonator);
-	Resonator* resonator = &effect->resonator;
-	resonator->mix = 0.4f;
-	resonator->gain = 12.0f;
-	sar_set_passband(&resonator->bank[0], pitch_to_frequency(66), device_description.sample_rate, 24.0f);
-	sar_set_passband(&resonator->bank[1], pitch_to_frequency(73), device_description.sample_rate, 63.0f);
-	sar_set_passband(&resonator->bank[2], pitch_to_frequency(55), device_description.sample_rate, 80.0f);
-
-	Instrument* rim = &instruments[4];
-	rim->oscillator = Oscillator::Noise;
-	rim->envelope_settings.amp.attack = 0.008f * device_description.sample_rate;
-	rim->envelope_settings.amp.decay = 0.14f * device_description.sample_rate;
-	rim->envelope_settings.amp.sustain = 0.0f;
-	rim->envelope_settings.amp.release = 0.0f * device_description.sample_rate;
-	rim->envelope_settings.pitch.use = false;
-	rim->noise.passband = 36;
-
-	effect = instrument_add_effect(rim, EffectType::Resonator);
-	resonator = &effect->resonator;
-	resonator->mix = 0.9f;
-	resonator->gain = 23.0f;
-	sar_set_passband(&resonator->bank[0], pitch_to_frequency(89), device_description.sample_rate, 29.0f);
-	sar_set_passband(&resonator->bank[1], pitch_to_frequency(85), device_description.sample_rate, 33.0f);
-	sar_set_passband(&resonator->bank[2], pitch_to_frequency(88), device_description.sample_rate, 20.0f);
-
-	effect = instrument_add_effect(rim, EffectType::Delay);
-	Delay* delay = &effect->delay;
-	delay->delay = 1.0f * device_description.sample_rate;
-	delay->feedback = 0.2f;
-	delay->mix = 0.5f;
-
-	streams[1].pan = 0.4f;
-
-	streams[2].pan = 0.4f;
-
-	streams[3].pan = -0.1f;
-
-	streams[4].volume = 0.6f;
-	streams[4].pan = -0.7f;
-
-	// Send some preparatory messages to the main thread.
-	{
-		Message message;
-
-		message.code = Message::Code::Oscilloscope_Channel;
-		message.oscilloscope_channel.index = 0;
-		message.oscilloscope_channel.active = true;
-		game_send_message(&message);
-
-		message.code = Message::Code::Oscilloscope_Channel;
-		message.oscilloscope_channel.index = 1;
-		message.oscilloscope_channel.active = true;
-		game_send_message(&message);
-
-		message.code = Message::Code::Oscilloscope_Settings;
-		message.oscilloscope_settings.sample_rate = device_description.sample_rate;
-		game_send_message(&message);
-	}
-
+	system_prepare_for_loop();
+	
 	while(atomic_flag_test_and_set(&quit))
 	{
-		send_history_to_main_thread(&history);
-		process_messages_from_main_thread();
-
-		PROFILE_BEGIN_NAMED("generate_samples");
-
-		int frames = device_description.frames;
-		int sample_rate = device_description.sample_rate;
-
-		double section_finish_time = first_section_length;
-		bool cue_time_reset = false;
-
-		for(int i = 0; i < tracks_count; ++i)
-		{
-			Stream* stream = &streams[i];
-			Track* track = &tracks[i];
-			Instrument* instrument = &instruments[i];
-			fill_with_silence(stream->samples, 0, stream->samples_count);
-			if(time + delta_time < section_finish_time)
-			{
-				generate_oscillation(stream, 0, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
-			}
-			else
-			{
-				int regen_frame = (section_finish_time - time) * device_description.sample_rate;
-				generate_oscillation(stream, 0, regen_frame, track, i, instrument, voices, voice_map, voice_count, sample_rate, time, &history);
-
-				ASSERT(should_regenerate(track));
-				transfer_unfinished_notes(track, section_finish_time);
-				free_associated_voices(voice_map, voice_count, i);
-				if(!cue_time_reset)
-				{
-					composer_update_state(&composer);
-				}
-				track_generate(track, section_finish_time, &composer);
-
-				cue_time_reset = true;
-
-				generate_oscillation(stream, regen_frame, frames, track, i, instrument, voices, voice_map, voice_count, sample_rate, 0.0, &history);
-			}
-			apply_effects(instrument->effects, instrument->effects_count, stream);
-		}
-
-		Stream* stream = &streams[5];
-		{
-			stream->volume = 0.0f;
-			if(boop_on)
-			{
-				stream->volume = 1.0f;
-			}
-			const float theta = pitch_to_frequency(boop_pitch);
-			for(int i = 0; i < frames; ++i)
-			{
-				float t = static_cast<float>(i) / sample_rate + time;
-				float value = sin(tau * theta * t);
-				for(int j = 0; j < stream->channels; ++j)
-				{
-					stream->samples[stream->channels * i + j] = value;
-				}
-			}
-		}
-
-		PROFILE_END();
-
-		// Combine the generated audio to a single compact array of samples.
-		PROFILE_BEGIN_NAMED("mix_and_format");
-
-		mix_streams(streams, streams_count, mixed_samples, frames, device_description.channels, master_volume);
-		format_buffer_from_float(mixed_samples, devicebound_samples, device_description.frames, &conversion_info);
-
-		PROFILE_END();
-
-		send_oscilloscope_samples_to_main_thread(mixed_samples, frames, device_description.channels);
+		system_update_loop();
 
 		// Pass the completed audio to the device.
 
@@ -11194,28 +11230,10 @@ static void* run_mixer_thread(void* argument)
 		}
 
 		PROFILE_END();
-
-		if(cue_time_reset)
-		{
-			time = (time + delta_time) - section_finish_time;
-		}
-		else
-		{
-			time += delta_time;
-		}
 	}
 
 	close_device(pcm_handle);
-	SAFE_DEALLOCATE(mixed_samples);
-	SAFE_DEALLOCATE(devicebound_samples);
-	for(int i = 0; i < streams_count; ++i)
-	{
-		stream_destroy(&streams[i]);
-	}
-	for(int i = 0; i < tracks_count; ++i)
-	{
-		instrument_destroy(&instruments[i]);
-	}
+	system_cleanup_after_loop();
 
 	PROFILE_THREAD_EXIT();
 
@@ -11541,11 +11559,453 @@ u64 get_timestamp_from_system()
 
 // §8.3 Audio...................................................................
 
+#include <mmdeviceapi.h>
+#include <Ks.h>
+#include <KsMedia.h>
+#include <Audioclient.h>
+#include <Avrt.h>
+
+#define SAFE_RELEASE(thing)\
+	if((thing)) {(thing)->Release(); (thing) = nullptr;}
+
 namespace audio {
+
+namespace
+{
+	AtomicFlag quit;
+	HANDLE thread;
+	DWORD thread_id;
+	IAudioClient* audio_client;
+	IAudioRenderClient* render_client;
+	HANDLE buffer_event;
+	u32 buffer_frame_capacity;
+	u32 min_render_frames;
+	u32 min_latency;
+}
+
+static bool is_integer_format(WAVEFORMATEX* format)
+{
+	return
+		format->wFormatTag == WAVE_FORMAT_PCM ||
+		format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+		reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format)->SubFormat == KSDATAFORMAT_SUBTYPE_PCM;
+}
+
+static bool is_float_format(WAVEFORMATEX* format)
+{
+	return
+		format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
+		format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+		reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+}
+
+static bool translate_format(WAVEFORMATEX* format, Format* result)
+{
+	if(is_integer_format(format))
+	{
+		switch(format->wBitsPerSample)
+		{
+			case 8:  *result = FORMAT_U8;  return true;
+			case 16: *result = FORMAT_S16; return true;
+			case 24: *result = FORMAT_S24; return true;
+			case 32: *result = FORMAT_S32; return true;
+		}
+	}
+	else if(is_float_format(format))
+	{
+		*result = FORMAT_F32;
+		return true;
+	}
+	return false;
+}
+
+static bool request_mix_format(DeviceDescription* description, WAVEFORMATEX** mix_format)
+{
+	WORD requested_channels = description->channels;
+	WORD bit_rate = sizeof(float) * 8;
+	DWORD sample_rate = description->sample_rate;
+	WORD bytes_per_frame = requested_channels * (bit_rate / 8);
+
+	WAVEFORMATEXTENSIBLE desired_format = {};
+	desired_format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+	desired_format.Format.nChannels = requested_channels;
+	desired_format.Format.nSamplesPerSec = sample_rate;
+	desired_format.Format.nAvgBytesPerSec = sample_rate * bytes_per_frame;
+	desired_format.Format.nBlockAlign = bytes_per_frame;
+	desired_format.Format.wBitsPerSample = bit_rate;
+	desired_format.Format.cbSize = sizeof(desired_format) - sizeof(WAVEFORMATEX);
+
+	desired_format.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+	desired_format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+	desired_format.Samples.wValidBitsPerSample = bit_rate;
+
+	HRESULT result = S_OK;
+	
+	WAVEFORMATEX* closest_format = nullptr;
+	result = audio_client->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, reinterpret_cast<WAVEFORMATEX*>(&desired_format), &closest_format);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Couldn't get a compatible mix format.");
+		return false;
+	}
+
+	// If the desired format is not supported, it will allocate and return the closest match
+	// but if it IS supported, we have to allocate it ourselves and copy over the data
+	// (it has to be allocated on the heap some way or another because we are keeping a
+	// global copy called mix_format)
+	if(result == S_OK && closest_format == nullptr)
+	{
+		closest_format = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEXTENSIBLE)));
+		CopyMemory(closest_format, &desired_format, sizeof(WAVEFORMATEXTENSIBLE));
+	}
+
+	// check to see if the closest match has a sample type we can handle, otherwise there's an error
+	Format device_format;
+	bool translated = translate_format(closest_format, &device_format);
+	if(FAILED(result) || !translated)
+	{
+		LOG_ERROR("device mix format did not support any compatible sample types");
+		return false;
+	}
+	*mix_format = closest_format;
+
+	description->format = device_format;
+	description->sample_rate = closest_format->nSamplesPerSec;
+	description->channels = closest_format->nChannels;
+
+	return true;
+}
+
+static bool create_clients(IMMDeviceEnumerator* device_enumerator, IMMDevice* device, WAVEFORMATEX** mix_format, DeviceDescription* description)
+{
+	const int reftimes_per_second = 1e7;
+
+	HRESULT result = S_OK;
+
+	result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audio_client));
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to create an audio client.");
+		return false;
+	}
+
+	bool request_success = request_mix_format(description, mix_format);
+	if(!request_success)
+	{
+		return false;
+	}
+
+	DWORD stream_flags = AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+	REFERENCE_TIME duration = reftimes_per_second * 2 * device_description.frames / static_cast<double>(device_description.sample_rate);
+	REFERENCE_TIME periodicity = 0; // Must be 0 when using AUDCLNT_SHAREMODE_SHARED
+	result = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, stream_flags, duration, periodicity, *mix_format, nullptr);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to initialize the audio client.");
+		return false;
+	}
+
+	result = audio_client->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&render_client));
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to get the render client from the audio client.");
+		return false;
+	}
+
+	// Create an event handle and register it for buffer-event notifications.
+	buffer_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	result = audio_client->SetEventHandle(buffer_event);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to set the buffer event handle.");
+		return false;
+	}
+
+	result = audio_client->GetBufferSize(&buffer_frame_capacity);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Couldn't get the buffer frames count.");
+		return false;
+	}
+	ASSERT(description->frames <= buffer_frame_capacity);
+	description->frames = MIN(description->frames, buffer_frame_capacity);
+
+	REFERENCE_TIME device_period = 0;
+	result = audio_client->GetDevicePeriod(&device_period, nullptr);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Couldn't retrieve the update scheduling period.");
+		return false;
+	}
+	min_render_frames = (device_period * (*mix_format)->nSamplesPerSec + reftimes_per_second - 1) / reftimes_per_second;
+	description->frames = MAX(description->frames, min_render_frames);
+
+	REFERENCE_TIME latency = 0;
+	result = audio_client->GetStreamLatency(&latency);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Couldn't determine the client stream latency.");
+		return false;
+	}
+	min_latency = latency + device_period;
+
+	fill_remaining_device_description(description);
+
+	return true;
+}
+
+static bool start_device()
+{
+	HRESULT result = audio_client->Start();
+	if(FAILED(result))
+	{
+		LOG_ERROR("The audio client failed to start playback.");
+		return false;
+	}
+	return true;
+}
+
+static void stop_device()
+{
+	HRESULT result = audio_client->Stop();
+	if(FAILED(result))
+	{
+		LOG_ERROR("The audio client failed to stop playback.");
+	}
+}
+
+static void cleanup_after_opening(IMMDeviceEnumerator* device_enumerator, IMMDevice* device, WAVEFORMATEX* mix_format)
+{
+	CoTaskMemFree(mix_format);
+	SAFE_RELEASE(device);
+	SAFE_RELEASE(device_enumerator);
+
+	CoUninitialize();
+}
+
+static bool open_device()
+{
+	IMMDeviceEnumerator* device_enumerator = nullptr;
+	IMMDevice* device = nullptr;
+	WAVEFORMATEX* mix_format = nullptr;
+
+	HRESULT result = S_OK;
+
+	result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to initialise the COM library for mmdevapi.");
+		cleanup_after_opening(device_enumerator, device, mix_format);
+		return false;
+	}
+
+	result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<LPVOID*>(&device_enumerator));
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to create a device enumerator.");
+		cleanup_after_opening(device_enumerator, device, mix_format);
+		return false;
+	}
+
+	result = device_enumerator->GetDefaultAudioEndpoint(EDataFlow::eRender, ERole::eConsole, &device);
+	if(FAILED(result))
+	{
+		LOG_ERROR("Failed to retrieve the default render endppoint.");
+		cleanup_after_opening(device_enumerator, device, mix_format);
+		return false;
+	}
+
+	bool clients_created = create_clients(device_enumerator, device, &mix_format, &device_description);
+	bool started = start_device();
+
+	cleanup_after_opening(device_enumerator, device, mix_format);
+
+	return clients_created && started;
+}
+
+static void close_device()
+{
+	if(buffer_event)
+	{
+		CloseHandle(buffer_event);
+	}
+	if(audio_client)
+	{
+		stop_device();
+	}
+	SAFE_RELEASE(audio_client);
+	SAFE_RELEASE(render_client);
+}
+
+static const char* lookup_audclnt_error_message(HRESULT result)
+{
+#define M(code)\
+	case code: return #code
+
+	switch(result)
+	{
+		M(AUDCLNT_E_NOT_INITIALIZED);
+		M(AUDCLNT_E_ALREADY_INITIALIZED);
+		M(AUDCLNT_E_WRONG_ENDPOINT_TYPE);
+		M(AUDCLNT_E_DEVICE_INVALIDATED);
+		M(AUDCLNT_E_NOT_STOPPED);
+		M(AUDCLNT_E_BUFFER_TOO_LARGE);
+		M(AUDCLNT_E_OUT_OF_ORDER);
+		M(AUDCLNT_E_UNSUPPORTED_FORMAT);
+		M(AUDCLNT_E_INVALID_SIZE);
+		M(AUDCLNT_E_DEVICE_IN_USE);
+		M(AUDCLNT_E_BUFFER_OPERATION_PENDING);
+		M(AUDCLNT_E_THREAD_NOT_REGISTERED);
+		M(AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED);
+		M(AUDCLNT_E_ENDPOINT_CREATE_FAILED);
+		M(AUDCLNT_E_SERVICE_NOT_RUNNING);
+		M(AUDCLNT_E_EVENTHANDLE_NOT_EXPECTED);
+		M(AUDCLNT_E_EXCLUSIVE_MODE_ONLY);
+		M(AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL);
+		M(AUDCLNT_E_EVENTHANDLE_NOT_SET);
+		M(AUDCLNT_E_INCORRECT_BUFFER_SIZE);
+		M(AUDCLNT_E_BUFFER_SIZE_ERROR);
+		M(AUDCLNT_E_CPUUSAGE_EXCEEDED);
+		M(AUDCLNT_E_BUFFER_ERROR);
+		M(AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED);
+		M(AUDCLNT_E_INVALID_DEVICE_PERIOD);
+		M(AUDCLNT_S_BUFFER_EMPTY);
+		M(AUDCLNT_S_THREAD_ALREADY_REGISTERED);
+		M(AUDCLNT_S_POSITION_STALLED);
+#define AUDCLNT_S_NO_SINGLE_PROCESS AUDCLNT_SUCCESS(0x00d)
+		M(AUDCLNT_S_NO_SINGLE_PROCESS);
+	}
+
+#undef M
+}
+
+static void pass_audio_to_device()
+{
+	HRESULT result = S_OK;
+
+	UINT32 render_frame_count = device_description.frames;
+	UINT32 frames_available = 0;
+
+	// Loop and wait until enough of the buffer is freed to write the samples.
+	// Note that this shouldn't loop at all unless the render client buffer is
+	// full and thus has no room to write to.
+	while(render_frame_count > frames_available)
+	{
+		DWORD wait_result = WaitForSingleObject(buffer_event, 1000);
+		if(wait_result == WAIT_OBJECT_0)
+		{
+			UINT32 padding_frames;
+			result = audio_client->GetCurrentPadding(&padding_frames);
+			if(FAILED(result))
+			{
+				LOG_ERROR("Couldn't determine the padding for the audio render client buffer.");
+			}
+			frames_available = buffer_frame_capacity - padding_frames;
+		}
+		else if(FAILED(wait_result))
+		{
+			LOG_ERROR("The audio client callback didn't ever get signaled.");
+		}
+	}
+
+	int frames_mixed = device_description.frames;
+
+	BYTE* data = nullptr;
+	result = render_client->GetBuffer(frames_mixed, &data);
+	if(FAILED(result))
+	{
+		const char* message = lookup_audclnt_error_message(result);
+		LOG_ERROR("Failed to get a packet to buffer the audio data to. Error Code: %s", message);
+	}
+	else
+	{
+		memcpy(data, devicebound_samples, device_description.size);
+
+		DWORD flags;
+		if(frames_mixed > 0)
+		{
+			flags = 0;
+		}
+		else
+		{
+			flags = AUDCLNT_BUFFERFLAGS_SILENT;
+		}
+		result = render_client->ReleaseBuffer(frames_mixed, flags);
+		if(FAILED(result))
+		{
+			LOG_ERROR("Failed to release the audio buffer packet.");
+		}
+	}
+}
+
+DWORD WINAPI run_thread(_In_ LPVOID parameter)
+{
+	static_cast<void>(parameter);
+
+	PROFILE_THREAD_ENTER();
+
+	device_description.frames = 1024;
+	device_description.format = FORMAT_F32;
+	device_description.sample_rate = 44100;
+	device_description.channels = 2;
+	bool opened = open_device();
+	if(!opened)
+	{
+		LOG_ERROR("Failed to start the audio device.");
+	}
+
+	system_prepare_for_loop();
+
+	DWORD task_index = 0;
+	HANDLE task = AvSetMmThreadCharacteristics(TEXT("Pro Audio"), &task_index);
+	if(!task)
+	{
+		LOG_ERROR("Thread priority was not escalated as requested.");
+	}
+
+	while(atomic_flag_test_and_set(&quit))
+	{
+		system_update_loop();
+
+		profile::inspector_collect(&profile_inspector, 1);
+		profile::reset_thread();
+
+		pass_audio_to_device();
+	}
+
+	if(task)
+	{
+		AvRevertMmThreadCharacteristics(task);
+	}
+
+	system_cleanup_after_loop();
+	close_device();
+
+	PROFILE_THREAD_EXIT();
+
+	LOG_DEBUG("Audio thread shut down.");
+
+	return 0;
+}
+
+bool system_startup()
+{
+	atomic_flag_test_and_set(&quit);
+	thread = CreateThread(nullptr, 0, run_thread, nullptr, 0, &thread_id);
+	return thread;
+}
+
+void system_shutdown()
+{
+	// Signal the thread to quit and wait here for it to finish.
+	atomic_flag_clear(&quit);
+	WaitForSingleObject(thread, INFINITE);
+	CloseHandle(thread);
+}
 
 void system_send_message(Message* message)
 {
-	//TODO: fill this in!!!
+	enqueue_message(&message_queue, message);
 }
 
 } // namespace audio
@@ -11681,6 +12141,13 @@ static bool main_create(HINSTANCE instance, int show_command)
     }
     render::resize_viewport(window_width, window_height);
 
+	bool started = audio::system_startup();
+	if(!started)
+	{
+		LOG_ERROR("Audio system failed startup.");
+		return false;
+	}
+
 	game_create();
 
     return true;
@@ -11689,6 +12156,7 @@ static bool main_create(HINSTANCE instance, int show_command)
 static void main_destroy()
 {
 	game_destroy();
+	audio::system_shutdown();
     render::system_terminate(ogl_functions_loaded);
 	PROFILE_THREAD_EXIT();
 	profile::cleanup();
