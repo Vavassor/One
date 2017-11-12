@@ -13,7 +13,7 @@ Build Instructions..............................................................
 For playing, use these commands:
 
 -for Windows, using the visual studio compiler
-cl /O2 main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib /link /out:One.exe
+cl /O2 main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib avrt.lib /link /out:One.exe
 
 -for Linux
 g++ -o One -std=c++0x -O3 main.cpp -lGL -lX11 -lpthread -lasound
@@ -21,7 +21,7 @@ g++ -o One -std=c++0x -O3 main.cpp -lGL -lX11 -lpthread -lasound
 For debugging, use these commands:
 
 -for Windows, using the visual studio compiler
-cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib /link /debug /out:One.exe
+cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib avrt.lib /link /debug /out:One.exe
 
 -for Linux
 g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpthread -lasound
@@ -11572,6 +11572,11 @@ namespace audio {
 
 namespace
 {
+	const IID IID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
+	const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
+	const IID IID_IAudioClient = __uuidof(IAudioClient);
+	const IID IID_IAudioRenderClient = __uuidof(IAudioRenderClient);
+
 	AtomicFlag quit;
 	HANDLE thread;
 	DWORD thread_id;
@@ -11682,7 +11687,7 @@ static bool create_clients(IMMDeviceEnumerator* device_enumerator, IMMDevice* de
 
 	HRESULT result = S_OK;
 
-	result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audio_client));
+	result = device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audio_client));
 	if(FAILED(result))
 	{
 		LOG_ERROR("Failed to create an audio client.");
@@ -11705,7 +11710,7 @@ static bool create_clients(IMMDeviceEnumerator* device_enumerator, IMMDevice* de
 		return false;
 	}
 
-	result = audio_client->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&render_client));
+	result = audio_client->GetService(IID_IAudioRenderClient, reinterpret_cast<void**>(&render_client));
 	if(FAILED(result))
 	{
 		LOG_ERROR("Failed to get the render client from the audio client.");
@@ -11799,7 +11804,7 @@ static bool open_device()
 		return false;
 	}
 
-	result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<LPVOID*>(&device_enumerator));
+	result = CoCreateInstance(IID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, reinterpret_cast<LPVOID*>(&device_enumerator));
 	if(FAILED(result))
 	{
 		LOG_ERROR("Failed to create a device enumerator.");
