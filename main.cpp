@@ -31,14 +31,17 @@ Table Of Contents...............................................................
 
 1. Utility and Math
 	§1.1 Globally-Useful Things
-	§1.2 Clock Declarations
-	§1.3 Logging Declarations
-	§1.4 Atomic Declarations
-	§1.5 Immediate Mode Drawing Declarations
-	§1.6 Random Number Generation
-	§1.7 Vectors
-	§1.8 Quaternions
-	§1.9 Matrices
+	§1.2 Strings
+	§1.3 Sorting
+	§1.4 Clock Declarations
+	§1.5 Logging Declarations
+	§1.6 Atomic Declarations
+	§1.7 Profile Declarations
+	§1.8 Immediate Mode Drawing Declarations
+	§1.9 Random Number Generation
+	§1.10 Vectors
+	§1.11 Quaternions
+	§1.12 Matrices
 
 2. Physics
 	§2.1 Geometry Functions
@@ -49,11 +52,20 @@ Table Of Contents...............................................................
 
 3. Video
 	§3.1 OpenGL Function and Type Declarations
-	§3.2 Shader Functions
-	§3.3 Floor Functions
-	§3.4 Immediate Mode Functions
-	§3.5 Render System
-		§3.5.1 Shader Sources
+	§3.2 Shader
+	§3.3 Vertex Types and Packing
+	§3.4 Floor
+	§3.5 Immediate Mode Drawing
+	§3.6 Debug Visualisers
+	§3.7 Colour
+	§3.8 Text
+	§3.9 Input
+	§3.10 Scroll Panel
+	§3.11 Tweaker
+	§3.12 Oscilloscope
+	§3.13 Profile Inspector
+	§3.14 Render System
+		§3.14.1 Shader Sources
 
 4. Audio
 	§4.1 Format Conversion
@@ -70,20 +82,27 @@ Table Of Contents...............................................................
 	§4.12 Audio System Declarations
 
 5. Game
-	§5.1 Game Functions
+	§5.1 Game
+	§5.2 Audio
 
-6. OpenGL Function Loading
+6. Profile
+	§6.1 Spin Lock
+	§6.2 Caller
+	§6.3 Global Profile
 
-7. Compiler-Specific Implementations
-	§7.1 Atomic Functions
+7. OpenGL Function Loading
 
-8. Platform-Specific Implementations
-	§8.1 Logging Functions
-	§8.2 Clock Functions
-	§8.3 Audio Functions
-		§8.3.1 Device
-		§8.3.2 Audio System Functions
-	§8.4 Platform Main Functions
+8. Compiler-Specific Implementations
+	§8.1 Atomic Functions
+	§8.2 Timing
+
+9. Platform-Specific Implementations
+	§9.1 Logging Functions
+	§9.2 Clock Functions
+	§9.3 Audio Functions
+		§9.3.1 Device
+		§9.3.2 System Functions
+	§9.4 Platform Main Functions
 */
 
 #if defined(__linux__)
@@ -191,14 +210,6 @@ static float clamp(float a, float min, float max)
 	return fmin(fmax(a, min), max);
 }
 
-static int string_size(const char* string)
-{
-	ASSERT(string);
-	const char* s;
-	for(s = string; *s; ++s);
-	return s - string;
-}
-
 static bool is_power_of_two(unsigned int x)
 {
 	return (x != 0) && !(x & (x - 1));
@@ -238,7 +249,15 @@ const float tau = 6.28318530717958647692f;
 const float pi = 3.14159265358979323846f;
 const float pi_over_2 = 1.57079632679489661923f;
 
-// Strings......................................................................
+// §1.2 Strings.................................................................
+
+static int string_size(const char* string)
+{
+	ASSERT(string);
+	const char* s;
+	for(s = string; *s; ++s);
+	return s - string;
+}
 
 static const char* bool_to_string(bool b)
 {
@@ -304,7 +323,7 @@ static int find_last_char(const char* s, char c, int limit)
 	return result;
 }
 
-// Sorting......................................................................
+// §1.3 Sorting.................................................................
 
 #define DEFINE_INSERTION_SORT(type, after, suffix)\
 	static void insertion_sort_##suffix(type* a, int count)\
@@ -390,7 +409,7 @@ static int find_last_char(const char* s, char c, int limit)
 		insertion_sort(a, count);\
 	}
 
-// §1.2 Clock Declarations......................................................
+// §1.4 Clock Declarations......................................................
 
 struct Clock
 {
@@ -403,7 +422,7 @@ void go_to_sleep(Clock* clock, double amount_to_sleep);
 
 u64 get_timestamp_from_system();
 
-// §1.3 Logging Declarations....................................................
+// §1.5 Logging Declarations....................................................
 
 enum class LogLevel
 {
@@ -423,7 +442,7 @@ void log_add_message(LogLevel level, const char* format, ...);
 	log_add_message(LogLevel::Debug, format, ##__VA_ARGS__)
 #endif
 
-// §1.4 Atomic Declarations.....................................................
+// §1.6 Atomic Declarations.....................................................
 
 #if defined(COMPILER_MSVC)
 typedef long AtomicFlag;
@@ -443,7 +462,7 @@ long atomic_int_subtract(AtomicInt* minuend, long subtrahend);
 
 bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired);
 
-// Profile Declarations.........................................................
+// §1.7 Profile Declarations....................................................
 
 #if !defined(NDEBUG)
 #define PROFILE_ENABLED
@@ -520,7 +539,7 @@ struct ScopedBlock
 
 } // namespace profile
 
-// §1.5 Immediate Mode Drawing Declarations.....................................
+// §1.8 Immediate Mode Drawing Declarations.....................................
 
 struct Vector3;
 struct Vector4;
@@ -536,7 +555,7 @@ void add_triangle(Triangle* triangle, Vector4 colour);
 
 } // namespace immediate
 
-// §1.6 Random Number Generation................................................
+// §1.9 Random Number Generation................................................
 
 // This has been named arandom rather than random because random() is the name
 // of a function in stdlib.h under POSIX. Thanks POSIX.
@@ -625,7 +644,7 @@ float float_range(float min, float max)
 
 } // namespace arandom
 
-// §1.7 Vectors.................................................................
+// §1.10 Vectors................................................................
 
 #include <cfloat>
 #include <climits>
@@ -943,7 +962,7 @@ static Vector4 make_vector4(Vector3 v)
 	return {v.x, v.y, v.z, 0.0f};
 }
 
-// §1.8 Quaternions.............................................................
+// §1.11 Quaternions............................................................
 
 struct Quaternion
 {
@@ -992,7 +1011,7 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 	return result;
 }
 
-// §1.9 Matrices................................................................
+// §1.12 Matrices...............................................................
 
 struct Matrix4
 {
@@ -2585,7 +2604,7 @@ static void collide_ray_triangle(Triangle* triangle, Ray* ray, CollisionPacket* 
 	}
 }
 
-// §2.4 Frustum Functions.......................................................
+// §2.5 Frustum Functions.......................................................
 
 struct Frustum
 {
@@ -2962,7 +2981,7 @@ static GLuint load_shader_program(const char* vertex_source, const char* fragmen
 	return program;
 }
 
-// Vertex types and packing.....................................................
+// §3.3 Vertex Types and Packing................................................
 
 union Pack4x8
 {
@@ -3123,7 +3142,7 @@ struct VertexPT
 	u32 texcoord;
 };
 
-// §3.3 Floor Functions.........................................................
+// §3.4 Floor...................................................................
 
 struct Floor
 {
@@ -3221,7 +3240,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 	return true;
 }
 
-// §3.4 Immediate Mode Functions................................................
+// §3.5 Immediate Mode Drawing..................................................
 
 namespace immediate {
 
@@ -3603,7 +3622,7 @@ void add_wire_frustum(Matrix4 view, Matrix4 projection, Vector4 colour)
 
 } // namespace immediate
 
-// Debug Drawing Functions......................................................
+// §3.6 Debug Visualisers.......................................................
 
 static void add_aabb_plane(AABB aabb, bih::Flag axis, float clip, Vector4 colour)
 {
@@ -3685,7 +3704,7 @@ static void draw_bih_tree(bih::Tree* tree, int target_depth)
 	immediate::draw();
 }
 
-// Colour.......................................................................
+// §3.7 Colour..................................................................
 
 static const Vector4 colour_white = {1.0f, 1.0f, 1.0f, 1.0f};
 static const Vector4 colour_black = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -3773,7 +3792,7 @@ static void cube_helix(Vector3* colours, int levels, float start_hue, float rota
 	}
 }
 
-// Text Drawing.................................................................
+// §3.8 Text....................................................................
 
 struct Rect
 {
@@ -4081,7 +4100,7 @@ static void draw_text(char* text, Vector2 bottom_left, Rect clip_rect, Font* fon
 	immediate::draw();
 }
 
-// Input........................................................................
+// §3.9 Input...................................................................
 
 enum class UserKey
 {
@@ -4145,7 +4164,7 @@ static bool key_pressed(UserKey key)
 	return keys_pressed[which];
 }
 
-// Scroll Panel.................................................................
+// §3.10 Scroll Panel...........................................................
 
 static const int scroll_panel_lines_cap = 32;
 static const int scroll_panel_line_char_limit = 24;
@@ -4437,7 +4456,7 @@ static void scroll_panel_draw(ScrollPanel* panel, Font* font)
 	}
 }
 
-// Tweaker......................................................................
+// §3.11 Tweaker................................................................
 //
 // This is my version of Jessica Mak's tweaker. It's a tool that lets you set
 // simple variables like numbers and booleans while the game is running. It's
@@ -4940,7 +4959,7 @@ namespace
 	TweakerMap tweaker_map;
 }
 
-// Oscilloscope.................................................................
+// §3.12 Oscilloscope...........................................................
 
 static const int oscilloscope_channel_samples_count = 32768;
 static const int oscilloscope_channels_count = 2;
@@ -5156,7 +5175,7 @@ static void draw_trace(Trace* trace, float x, float y, float width, float height
 	immediate::draw();
 }
 
-// Profile Inspector............................................................
+// §3.13 Profile Inspector......................................................
 
 namespace profile {
 
@@ -5760,11 +5779,11 @@ static Vector2* create_blue_noise(int samples, float side)
 	return points;
 }
 
-// §3.5 Render System...........................................................
+// §3.14 Render System..........................................................
 
 namespace render {
 
-// §3.5.1 Shader Sources........................................................
+// §3.15.1 Shader Sources.......................................................
 
 const char* default_vertex_source = R"(
 #version 330
@@ -6773,7 +6792,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 } // namespace render
 
-// Audio Functions..............................................................
+// 4. Audio.....................................................................
 
 namespace audio {
 
@@ -9251,16 +9270,6 @@ static void generate_oscillation(Stream* stream, int start_frame, int end_frame,
 
 } // namespace audio
 
-// §4.12 Audio System Declarations..............................................
-
-namespace audio {
-
-bool system_startup();
-void system_shutdown();
-void system_send_message(Message* message);
-
-} // namespace audio
-
 // Waveform Similarity based Overlap-Add..........................................
 
 static float hann_window(int i, int count)
@@ -9400,444 +9409,17 @@ static void shift_pitch(WSOLA* dilator, float* samples, int samples_count, int s
 	resample_linear(dilator->output, dilator->output_count, samples, samples_count);
 }
 
-// Profile......................................................................
+// §4.12 Audio System Declarations..............................................
 
-void yield();
-u64 get_timestamp();
+namespace audio {
 
-namespace profile {
+bool system_startup();
+void system_shutdown();
+void system_send_message(Message* message);
 
-// SpinLock....................................................................
+} // namespace audio
 
-void spin_lock_acquire(SpinLock* lock)
-{
-	while(!atomic_compare_exchange(lock, 0, 1))
-	{
-		yield();
-	}
-}
-
-void spin_lock_release(SpinLock* lock)
-{
-	while(!atomic_compare_exchange(lock, 1, 0))
-	{
-		yield();
-	}
-}
-
-// Caller.......................................................................
-
-struct Caller
-{
-	const char* name;
-
-	Caller* parent;
-	Caller** buckets;
-	u32 bucket_count;
-	u32 child_count;
-
-	// used by the root caller of each thread to distinguish if that call tree
-	// is active
-	bool active;
-
-	u64 started;
-	u64 ticks;
-	int calls;
-	bool paused;
-};
-
-static void lock_this_thread();
-static void unlock_this_thread();
-
-static u32 hash_pointer(const char* name, u32 bucket_count)
-{
-	return (reinterpret_cast<size_t>(name) >> 5) & (bucket_count - 1);
-}
-
-static Caller** find_empty_child_slot(Caller** buckets, u32 bucket_count, const char* name)
-{
-	u32 index = hash_pointer(name, bucket_count);
-	ASSERT(can_use_bitwise_and_to_cycle(bucket_count));
-	u32 mask = bucket_count - 1;
-	Caller** slot;
-	for(slot = &buckets[index]; *slot; slot = &buckets[index & mask])
-	{
-		index += 1;
-	}
-	return slot;
-}
-
-static void resize(Caller* parent, u32 new_size)
-{
-	if(new_size < parent->bucket_count)
-	{
-		new_size = 2 * parent->bucket_count;
-	}
-	else
-	{
-		new_size = next_power_of_two(new_size - 1);
-	}
-	Caller** new_buckets = ALLOCATE(Caller*, new_size);
-	for(u32 i = 0; i < parent->bucket_count; ++i)
-	{
-		if(parent->buckets[i])
-		{
-			Caller** slot = find_empty_child_slot(new_buckets, new_size, parent->buckets[i]->name);
-			*slot = parent->buckets[i];
-		}
-	}
-	DEALLOCATE(parent->buckets);
-	parent->buckets = new_buckets;
-	parent->bucket_count = new_size;
-}
-
-static void caller_create(Caller* caller, Caller* parent, const char* name)
-{
-	caller->name = name;
-	caller->parent = parent;
-	resize(caller, 2);
-}
-
-static void caller_destroy(Caller* caller)
-{
-	for(u32 i = 0; i < caller->bucket_count; ++i)
-	{
-		if(caller->buckets[i])
-		{
-			caller_destroy(caller->buckets[i]);
-			DEALLOCATE(caller->buckets[i]);
-		}
-	}
-	DEALLOCATE(caller->buckets);
-}
-
-static Caller* find_or_create(Caller* parent, const char* name)
-{
-	u32 index = hash_pointer(name, parent->bucket_count);
-	ASSERT(can_use_bitwise_and_to_cycle(parent->bucket_count));
-	u32 mask = parent->bucket_count - 1;
-	for(Caller* caller = parent->buckets[index]; caller; caller = parent->buckets[index & mask])
-	{
-		if(caller->name == name)
-		{
-			return caller;
-		}
-		index += 1;
-	}
-
-	lock_this_thread();
-
-	parent->child_count += 1;
-	if(parent->child_count >= parent->bucket_count / 2)
-	{
-		resize(parent, parent->child_count);
-	}
-
-	Caller** slot = find_empty_child_slot(parent->buckets, parent->bucket_count, name);
-	Caller* temp = ALLOCATE(Caller, 1);
-	caller_create(temp, parent, name);
-	*slot = temp;
-
-	unlock_this_thread();
-
-	return temp;
-}
-
-static void start_timing(Caller* caller)
-{
-	caller->calls += 1;
-	caller->started = get_timestamp();
-}
-
-static void stop_timing(Caller* caller)
-{
-	caller->ticks += get_timestamp() - caller->started;
-}
-
-static void caller_reset(Caller* caller)
-{
-	caller->ticks = 0;
-	caller->calls = 0;
-	caller->started = get_timestamp();
-	for(u32 i = 0; i < caller->bucket_count; ++i)
-	{
-		if(caller->buckets[i])
-		{
-			caller_reset(caller->buckets[i]);
-		}
-	}
-}
-
-static void caller_stop(Caller* caller)
-{
-	if(!caller->paused)
-	{
-		u64 t = get_timestamp();
-		caller->ticks += t - caller->started;
-		caller->started = t;
-	}
-}
-
-static void caller_pause(Caller* caller, u64 pause_time)
-{
-	caller->ticks += pause_time - caller->started;
-	caller->paused = true;
-}
-
-static void caller_unpause(Caller* caller, u64 unpause_time)
-{
-	caller->started = unpause_time;
-	caller->paused = false;
-}
-
-#define COMPARE_TICKS(a, b)\
-	a->ticks < b->ticks
-
-DEFINE_INSERTION_SORT(Caller*, COMPARE_TICKS, ticks);
-
-void caller_collect(Caller* caller, ThreadHistory* history, int thread, int indent)
-{
-	int index = history->indices[thread];
-	Record* records = history->records[thread][index];
-	int records_count = history->records_count[thread][index];
-	int records_capacity = history->records_capacity[thread][index];
-	ENSURE_ARRAY_SIZE(records, 1);
-	history->records[thread][index] = records;
-	history->records_capacity[thread][index] = records_capacity;
-
-	Record* record = &records[records_count];
-	history->records_count[thread][index] += 1;
-	record->name = caller->name;
-	record->ticks = caller->ticks;
-	record->calls = caller->calls;
-	record->indent = indent;
-
-	// Form an array from the children hash table.
-	const int children_cap = 8;
-	Caller* children[children_cap];
-	int children_count = 0;
-	int bucket_count = caller->bucket_count;
-	for(int i = 0; i < bucket_count; ++i)
-	{
-		Caller* child = caller->buckets[i];
-		if(child && child->ticks > 0)
-		{
-			children[children_count] = child;
-			children_count += 1;
-			ASSERT(children_count < children_cap);
-			if(children_count >= children_cap)
-			{
-				break;
-			}
-		}
-	}
-
-	if(children_count > 0)
-	{
-		insertion_sort_ticks(children, children_count);
-	}
-	for(int i = 0; i < children_count; ++i)
-	{
-		caller_collect(children[i], history, thread, indent + 1);
-	}
-}
-
-// Global Profile...............................................................
-
-struct ThreadState
-{
-	SpinLock thread_lock;
-	bool require_thread_lock;
-	Caller* active_caller;
-};
-
-struct Root
-{
-	Caller caller;
-	ThreadState* thread_state;
-};
-
-static const int thread_roots_cap = 8;
-
-struct GlobalThreadsList
-{
-	Root roots[thread_roots_cap];
-	int roots_count;
-	SpinLock lock;
-};
-
-#if defined(COMPILER_MSVC)
-#define THREAD_LOCAL __declspec(thread)
-#else
-#define THREAD_LOCAL thread_local
-#endif
-
-// All the global state is kept here.
-namespace
-{
-	THREAD_LOCAL ThreadState thread_state;
-	THREAD_LOCAL Caller* root;
-	GlobalThreadsList threads_list;
-}
-
-static void lock_this_thread()
-{
-	if(thread_state.require_thread_lock)
-	{
-		spin_lock_acquire(&thread_state.thread_lock);
-	}
-}
-
-static void unlock_this_thread()
-{
-	if(thread_state.require_thread_lock)
-	{
-		spin_lock_release(&thread_state.thread_lock);
-	}
-}
-
-static void acquire_global_lock()
-{
-	spin_lock_acquire(&threads_list.lock);
-}
-
-static void release_global_lock()
-{
-	spin_lock_release(&threads_list.lock);
-}
-
-static Caller* add_root(ThreadState* state)
-{
-	Root* out = &threads_list.roots[threads_list.roots_count];
-	threads_list.roots_count += 1;
-	ASSERT(threads_list.roots_count < thread_roots_cap);
-	out->thread_state = state;
-	return &out->caller;
-}
-
-void begin_period(const char* name)
-{
-	Caller* parent = thread_state.active_caller;
-	if(!parent)
-	{
-		return;
-	}
-	Caller* active = find_or_create(parent, name);
-	start_timing(active);
-	thread_state.active_caller = active;
-}
-
-void end_period()
-{
-	Caller* active = thread_state.active_caller;
-	if(!active)
-	{
-		return;
-	}
-	stop_timing(active);
-	thread_state.active_caller = active->parent;
-}
-
-void pause_period()
-{
-	u64 pause_time = get_timestamp();
-	for(Caller* it = thread_state.active_caller; it; it = it->parent)
-	{
-		caller_pause(it, pause_time);
-	}
-}
-
-void unpause_period()
-{
-	u64 unpause_time = get_timestamp();
-	for(Caller* it = thread_state.active_caller; it; it = it->parent)
-	{
-		caller_unpause(it, unpause_time);
-	}
-}
-
-void enter_thread(const char* name)
-{
-	acquire_global_lock();
-	Caller* temp = add_root(&thread_state);
-	release_global_lock();
-
-	caller_create(temp, nullptr, name);
-
-	lock_this_thread();
-
-	thread_state.active_caller = temp;
-	start_timing(temp);
-	temp->active = true;
-	root = temp;
-
-	unlock_this_thread();
-}
-
-void exit_thread()
-{
-	lock_this_thread();
-
-	stop_timing(root);
-	root->active = false;
-	thread_state.active_caller = nullptr;
-
-	unlock_this_thread();
-}
-
-void reset_thread()
-{
-#if defined(PROFILE_ENABLED)
-	lock_this_thread();
-
-	caller_reset(root);
-	for(Caller* it = thread_state.active_caller; it; it = it->parent)
-	{
-		it->calls = 1;
-	}
-
-	unlock_this_thread();
-#endif
-}
-
-void cleanup()
-{
-	for(int i = 0; i < threads_list.roots_count; ++i)
-	{
-		Root* root = &threads_list.roots[i];
-		if(root->caller.active)
-		{
-			caller_destroy(&root->caller);
-		}
-	}
-}
-
-void inspector_collect(Inspector* inspector, int thread)
-{
-#if defined(PROFILE_ENABLED)
-	ThreadHistory* history = &inspector->history;
-
-	lock_this_thread();
-	spin_lock_acquire(&history->lock);
-
-	if(!inspector->halt_collection)
-	{
-		int index = history->indices[thread];
-
-		history->records_count[thread][index] = 0;
-		caller_collect(root, history, thread, 0);
-
-		history->indices[thread] = (index + 1) % thread_history_book_count;
-	}
-
-	spin_lock_release(&history->lock);
-	unlock_this_thread();
-#endif
-}
-
-} // namespace profile
-
-// §5.1 Game Functions..........................................................
+// §5.1 Game....................................................................
 
 namespace
 {
@@ -10045,7 +9627,7 @@ static void main_update()
 	render::system_update(position, dancer_position, &world, &tweaker, &profile_inspector);
 }
 
-// Audio System Non-Platform Layer..............................................
+// §5.2 Audio...................................................................
 
 namespace audio {
 
@@ -10430,7 +10012,438 @@ static void system_update_loop()
 
 } // namespace audio
 
-// 6. OpenGL Function Loading...................................................
+// 6. Profile...................................................................
+
+void yield();
+u64 get_timestamp();
+
+namespace profile {
+
+// §6.1 Spin Lock...............................................................
+
+void spin_lock_acquire(SpinLock* lock)
+{
+	while(!atomic_compare_exchange(lock, 0, 1))
+	{
+		yield();
+	}
+}
+
+void spin_lock_release(SpinLock* lock)
+{
+	while(!atomic_compare_exchange(lock, 1, 0))
+	{
+		yield();
+	}
+}
+
+// §6.2 Caller..................................................................
+
+struct Caller
+{
+	const char* name;
+
+	Caller* parent;
+	Caller** buckets;
+	u32 bucket_count;
+	u32 child_count;
+
+	// used by the root caller of each thread to distinguish if that call tree
+	// is active
+	bool active;
+
+	u64 started;
+	u64 ticks;
+	int calls;
+	bool paused;
+};
+
+static void lock_this_thread();
+static void unlock_this_thread();
+
+static u32 hash_pointer(const char* name, u32 bucket_count)
+{
+	return (reinterpret_cast<size_t>(name) >> 5) & (bucket_count - 1);
+}
+
+static Caller** find_empty_child_slot(Caller** buckets, u32 bucket_count, const char* name)
+{
+	u32 index = hash_pointer(name, bucket_count);
+	ASSERT(can_use_bitwise_and_to_cycle(bucket_count));
+	u32 mask = bucket_count - 1;
+	Caller** slot;
+	for(slot = &buckets[index]; *slot; slot = &buckets[index & mask])
+	{
+		index += 1;
+	}
+	return slot;
+}
+
+static void resize(Caller* parent, u32 new_size)
+{
+	if(new_size < parent->bucket_count)
+	{
+		new_size = 2 * parent->bucket_count;
+	}
+	else
+	{
+		new_size = next_power_of_two(new_size - 1);
+	}
+	Caller** new_buckets = ALLOCATE(Caller*, new_size);
+	for(u32 i = 0; i < parent->bucket_count; ++i)
+	{
+		if(parent->buckets[i])
+		{
+			Caller** slot = find_empty_child_slot(new_buckets, new_size, parent->buckets[i]->name);
+			*slot = parent->buckets[i];
+		}
+	}
+	DEALLOCATE(parent->buckets);
+	parent->buckets = new_buckets;
+	parent->bucket_count = new_size;
+}
+
+static void caller_create(Caller* caller, Caller* parent, const char* name)
+{
+	caller->name = name;
+	caller->parent = parent;
+	resize(caller, 2);
+}
+
+static void caller_destroy(Caller* caller)
+{
+	for(u32 i = 0; i < caller->bucket_count; ++i)
+	{
+		if(caller->buckets[i])
+		{
+			caller_destroy(caller->buckets[i]);
+			DEALLOCATE(caller->buckets[i]);
+		}
+	}
+	DEALLOCATE(caller->buckets);
+}
+
+static Caller* find_or_create(Caller* parent, const char* name)
+{
+	u32 index = hash_pointer(name, parent->bucket_count);
+	ASSERT(can_use_bitwise_and_to_cycle(parent->bucket_count));
+	u32 mask = parent->bucket_count - 1;
+	for(Caller* caller = parent->buckets[index]; caller; caller = parent->buckets[index & mask])
+	{
+		if(caller->name == name)
+		{
+			return caller;
+		}
+		index += 1;
+	}
+
+	lock_this_thread();
+
+	parent->child_count += 1;
+	if(parent->child_count >= parent->bucket_count / 2)
+	{
+		resize(parent, parent->child_count);
+	}
+
+	Caller** slot = find_empty_child_slot(parent->buckets, parent->bucket_count, name);
+	Caller* temp = ALLOCATE(Caller, 1);
+	caller_create(temp, parent, name);
+	*slot = temp;
+
+	unlock_this_thread();
+
+	return temp;
+}
+
+static void start_timing(Caller* caller)
+{
+	caller->calls += 1;
+	caller->started = get_timestamp();
+}
+
+static void stop_timing(Caller* caller)
+{
+	caller->ticks += get_timestamp() - caller->started;
+}
+
+static void caller_reset(Caller* caller)
+{
+	caller->ticks = 0;
+	caller->calls = 0;
+	caller->started = get_timestamp();
+	for(u32 i = 0; i < caller->bucket_count; ++i)
+	{
+		if(caller->buckets[i])
+		{
+			caller_reset(caller->buckets[i]);
+		}
+	}
+}
+
+static void caller_stop(Caller* caller)
+{
+	if(!caller->paused)
+	{
+		u64 t = get_timestamp();
+		caller->ticks += t - caller->started;
+		caller->started = t;
+	}
+}
+
+static void caller_pause(Caller* caller, u64 pause_time)
+{
+	caller->ticks += pause_time - caller->started;
+	caller->paused = true;
+}
+
+static void caller_unpause(Caller* caller, u64 unpause_time)
+{
+	caller->started = unpause_time;
+	caller->paused = false;
+}
+
+#define COMPARE_TICKS(a, b)\
+	a->ticks < b->ticks
+
+DEFINE_INSERTION_SORT(Caller*, COMPARE_TICKS, ticks);
+
+void caller_collect(Caller* caller, ThreadHistory* history, int thread, int indent)
+{
+	int index = history->indices[thread];
+	Record* records = history->records[thread][index];
+	int records_count = history->records_count[thread][index];
+	int records_capacity = history->records_capacity[thread][index];
+	ENSURE_ARRAY_SIZE(records, 1);
+	history->records[thread][index] = records;
+	history->records_capacity[thread][index] = records_capacity;
+
+	Record* record = &records[records_count];
+	history->records_count[thread][index] += 1;
+	record->name = caller->name;
+	record->ticks = caller->ticks;
+	record->calls = caller->calls;
+	record->indent = indent;
+
+	// Form an array from the children hash table.
+	const int children_cap = 8;
+	Caller* children[children_cap];
+	int children_count = 0;
+	int bucket_count = caller->bucket_count;
+	for(int i = 0; i < bucket_count; ++i)
+	{
+		Caller* child = caller->buckets[i];
+		if(child && child->ticks > 0)
+		{
+			children[children_count] = child;
+			children_count += 1;
+			ASSERT(children_count < children_cap);
+			if(children_count >= children_cap)
+			{
+				break;
+			}
+		}
+	}
+
+	if(children_count > 0)
+	{
+		insertion_sort_ticks(children, children_count);
+	}
+	for(int i = 0; i < children_count; ++i)
+	{
+		caller_collect(children[i], history, thread, indent + 1);
+	}
+}
+
+// §6.3 Global Profile..........................................................
+
+struct ThreadState
+{
+	SpinLock thread_lock;
+	bool require_thread_lock;
+	Caller* active_caller;
+};
+
+struct Root
+{
+	Caller caller;
+	ThreadState* thread_state;
+};
+
+static const int thread_roots_cap = 8;
+
+struct GlobalThreadsList
+{
+	Root roots[thread_roots_cap];
+	int roots_count;
+	SpinLock lock;
+};
+
+// All the global state is kept here.
+namespace
+{
+	thread_local ThreadState thread_state;
+	thread_local Caller* root;
+	GlobalThreadsList threads_list;
+}
+
+static void lock_this_thread()
+{
+	if(thread_state.require_thread_lock)
+	{
+		spin_lock_acquire(&thread_state.thread_lock);
+	}
+}
+
+static void unlock_this_thread()
+{
+	if(thread_state.require_thread_lock)
+	{
+		spin_lock_release(&thread_state.thread_lock);
+	}
+}
+
+static void acquire_global_lock()
+{
+	spin_lock_acquire(&threads_list.lock);
+}
+
+static void release_global_lock()
+{
+	spin_lock_release(&threads_list.lock);
+}
+
+static Caller* add_root(ThreadState* state)
+{
+	Root* out = &threads_list.roots[threads_list.roots_count];
+	threads_list.roots_count += 1;
+	ASSERT(threads_list.roots_count < thread_roots_cap);
+	out->thread_state = state;
+	return &out->caller;
+}
+
+void begin_period(const char* name)
+{
+	Caller* parent = thread_state.active_caller;
+	if(!parent)
+	{
+		return;
+	}
+	Caller* active = find_or_create(parent, name);
+	start_timing(active);
+	thread_state.active_caller = active;
+}
+
+void end_period()
+{
+	Caller* active = thread_state.active_caller;
+	if(!active)
+	{
+		return;
+	}
+	stop_timing(active);
+	thread_state.active_caller = active->parent;
+}
+
+void pause_period()
+{
+	u64 pause_time = get_timestamp();
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		caller_pause(it, pause_time);
+	}
+}
+
+void unpause_period()
+{
+	u64 unpause_time = get_timestamp();
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		caller_unpause(it, unpause_time);
+	}
+}
+
+void enter_thread(const char* name)
+{
+	acquire_global_lock();
+	Caller* temp = add_root(&thread_state);
+	release_global_lock();
+
+	caller_create(temp, nullptr, name);
+
+	lock_this_thread();
+
+	thread_state.active_caller = temp;
+	start_timing(temp);
+	temp->active = true;
+	root = temp;
+
+	unlock_this_thread();
+}
+
+void exit_thread()
+{
+	lock_this_thread();
+
+	stop_timing(root);
+	root->active = false;
+	thread_state.active_caller = nullptr;
+
+	unlock_this_thread();
+}
+
+void reset_thread()
+{
+#if defined(PROFILE_ENABLED)
+	lock_this_thread();
+
+	caller_reset(root);
+	for(Caller* it = thread_state.active_caller; it; it = it->parent)
+	{
+		it->calls = 1;
+	}
+
+	unlock_this_thread();
+#endif
+}
+
+void cleanup()
+{
+	for(int i = 0; i < threads_list.roots_count; ++i)
+	{
+		Root* root = &threads_list.roots[i];
+		if(root->caller.active)
+		{
+			caller_destroy(&root->caller);
+		}
+	}
+}
+
+void inspector_collect(Inspector* inspector, int thread)
+{
+#if defined(PROFILE_ENABLED)
+	ThreadHistory* history = &inspector->history;
+
+	lock_this_thread();
+	spin_lock_acquire(&history->lock);
+
+	if(!inspector->halt_collection)
+	{
+		int index = history->indices[thread];
+
+		history->records_count[thread][index] = 0;
+		caller_collect(root, history, thread, 0);
+
+		history->indices[thread] = (index + 1) % thread_history_book_count;
+	}
+
+	spin_lock_release(&history->lock);
+	unlock_this_thread();
+#endif
+}
+
+} // namespace profile
+
+// 7. OpenGL Function Loading...................................................
 
 #if defined(OS_LINUX)
 // glx.h includes X.h which has a typedef called Font. Defining _XTYPEDEF_FONT
@@ -10588,9 +10601,9 @@ static bool ogl_load_functions()
 	return failure_count == 0;
 }
 
-// 7. Compiler-Specific Implementations=========================================
+// 8. Compiler-Specific Implementations=========================================
 
-// §7.1 Atomic Functions........................................................
+// §8.1 Atomic Functions........................................................
 
 #if defined(COMPILER_MSVC)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -10697,6 +10710,8 @@ bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
 	return __atomic_compare_exchange_n(p, &old, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
+// §8.2 Timing..................................................................
+
 void yield()
 {
 #if defined(INSTRUCTION_SET_X86) || defined(INSTRUCTION_SET_X64)
@@ -10725,13 +10740,13 @@ u64 get_timestamp()
 #endif
 }
 
-#endif
+#endif // defined(COMPILER_GCC)
 
-// 8. Platform-Specific Implementations=========================================
+// 9. Platform-Specific Implementations=========================================
 
 #if defined(OS_LINUX)
 
-// §8.1 Logging Functions.......................................................
+// §9.1 Logging Functions.......................................................
 
 void log_add_message(LogLevel level, const char* format, ...)
 {
@@ -10756,7 +10771,7 @@ void log_add_message(LogLevel level, const char* format, ...)
 	fputc('\n', stream);
 }
 
-// §8.2 Clock Functions.........................................................
+// §9.2 Clock Functions.........................................................
 
 #include <ctime>
 
@@ -10791,7 +10806,7 @@ u64 get_timestamp_from_system()
 	return now.tv_sec * 1e9 + now.tv_nsec;
 }
 
-// §8.3 Audio Functions.........................................................
+// §9.3 Audio Functions.........................................................
 
 #include <alsa/asoundlib.h>
 
@@ -10799,7 +10814,7 @@ u64 get_timestamp_from_system()
 
 namespace audio {
 
-// §8.3.1 Device................................................................
+// §9.3.1 Device................................................................
 
 static const int test_format_count = 5;
 
@@ -11047,7 +11062,7 @@ static void close_device(snd_pcm_t* pcm_handle)
 	}
 }
 
-// §8.3.2 Audio System Functions................................................
+// §9.3.2 System Functions......................................................
 
 namespace
 {
@@ -11155,7 +11170,7 @@ void system_send_message(Message* message)
 
 } // namespace audio
 
-// §8.4 Platform Main Functions.................................................
+// §9.4 Platform Main Functions.................................................
 
 #include <X11/X.h>
 #include <X11/Xlib.h>
@@ -11394,7 +11409,7 @@ int main(int argc, char** argv)
 
 #elif defined(OS_WINDOWS)
 
-// §8.1 Logging Functions.......................................................
+// §9.1 Logging Functions.......................................................
 
 void log_add_message(LogLevel level, const char* format, ...)
 {
@@ -11420,7 +11435,7 @@ void log_add_message(LogLevel level, const char* format, ...)
 	OutputDebugStringA(buffer);
 }
 
-// §8.2 Clock Functions.........................................................
+// §9.2 Clock Functions.........................................................
 
 void initialise_clock(Clock* clock)
 {
@@ -11449,7 +11464,7 @@ u64 get_timestamp_from_system()
 	return now.QuadPart;
 }
 
-// §8.3 Audio...................................................................
+// §9.3 Audio...................................................................
 
 #include <mmdeviceapi.h>
 #include <Ks.h>
@@ -11461,6 +11476,8 @@ u64 get_timestamp_from_system()
 	if((thing)) {(thing)->Release(); (thing) = nullptr;}
 
 namespace audio {
+
+// §9.3.1 Device................................................................
 
 namespace
 {
@@ -11547,7 +11564,7 @@ static bool request_mix_format(DeviceDescription* description, WAVEFORMATEX** mi
 	}
 
 	// If the desired format is not supported, it will allocate and return the closest match
-	// but if it IS supported, we have to allocate it ourselves and copy over the data
+	// but if it IS supported, we have to allocate it ourselves and copy over the data
 	// (it has to be allocated on the heap some way or another because we are keeping a
 	// global copy called mix_format)
 	if(result == S_OK && closest_format == nullptr)
@@ -11771,10 +11788,13 @@ static const char* lookup_audclnt_error_message(HRESULT result)
 		M(AUDCLNT_S_POSITION_STALLED);
 #define AUDCLNT_S_NO_SINGLE_PROCESS AUDCLNT_SUCCESS(0x00d)
 		M(AUDCLNT_S_NO_SINGLE_PROCESS);
+		default: return "unknown error";
 	}
 
 #undef M
 }
+
+// §9.3.2 System Functions......................................................
 
 static void pass_audio_to_device()
 {
@@ -11907,7 +11927,7 @@ void system_send_message(Message* message)
 
 } // namespace audio
 
-// §8.4 Platform Main Functions.................................................
+// §9.4 Platform Main Functions.................................................
 
 #include <ctime>
 
