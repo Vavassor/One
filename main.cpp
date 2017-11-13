@@ -3890,105 +3890,6 @@ static bool clip_line(Rect rect, Vector2* p0, Vector2* p1)
 // being on/off is the least significant bit, and 15, the most significant.
 
 // CHEAT ZONE!!! Hardcoded data ahead
-#if defined(COMPILER_MSVC)
-static u16 ascii_to_16_segment_table[94] =
-{
-	0x000c, // !
-	0x0204, // "
-	0xaa3c, // #
-	0xaabb, // $
-	0xee99, // %
-	0x9371, // &
-	0x0200, // '
-	0x1400, // (
-	0x4100, // )
-	0xff00, // *
-	0xaa00, // +
-	0x4000, // ,
-	0x8800, // -
-	0x1000, // .
-	0x4400, // /
-	0x44ff, // 0
-	0x040c, // 1
-	0x8877, // 2
-	0x083f, // 3
-	0x888c, // 4
-	0x90b3, // 5
-	0x88fb, // 6
-	0x000f, // 7
-	0x88ff, // 8
-	0x88bf, // 9
-	0x0033, // :
-	0x4003, // ;
-	0x9400, // <
-	0x8830, // =
-	0x4900, // >
-	0x2807, // ?
-	0x0af7, // @
-	0x88cf, // A
-	0x2a3f, // B
-	0x00f3, // C
-	0x223f, // D
-	0x80f3, // E
-	0x80c3, // F
-	0x08fb, // G
-	0x88cc, // H
-	0x2233, // I
-	0x007c, // J
-	0x94c0, // K
-	0x00f0, // L
-	0x05cc, // M
-	0x11cc, // N
-	0x00ff, // O
-	0x88c7, // P
-	0x10ff, // Q
-	0x98c7, // R
-	0x88bb, // S
-	0x2203, // T
-	0x00fc, // U
-	0x44c0, // V
-	0x50cc, // W
-	0x5500, // X
-	0x2500, // Y
-	0x4433, // Z
-	0x2212, // [
-	0x1100, /* \ */
-	0x2221, // ]
-	0x5000, // ^
-	0x0030, // _
-	0x0100, // `
-	0xa070, // a
-	0x88f8, // b
-	0x8870, // c
-	0x887c, // d
-	0xc070, // e
-	0xaa02, // f
-	0x88bf, // g
-	0x88c8, // h
-	0x2000, // i
-	0x0038, // j
-	0x98c0, // k
-	0x0070, // l
-	0xa848, // m
-	0x8848, // n
-	0x8878, // o
-	0x88c7, // p
-	0x888f, // q
-	0x8840, // r
-	0x1830, // s
-	0xaa10, // t
-	0x0078, // u
-	0x4040, // v
-	0x5048, // w
-	0xd800, // x
-	0x88bc, // y
-	0xc030, // z
-	0xa212, // {
-	0x2200, // |
-	0x2a21, // }
-	0x0003, // ~
-};
-#else
 static u16 ascii_to_16_segment_table[94] =
 {
 	0b0000000000001100, // !
@@ -4086,7 +3987,6 @@ static u16 ascii_to_16_segment_table[94] =
 	0b0010101000100001, // }
 	0b0000000000000011, // ~
 };
-#endif // defined(COMPILER_MSVC)
 
 static Vector2 segment_lines[16][2] =
 {
@@ -4825,14 +4725,6 @@ static void tweaker_handle_input(Tweaker* tweaker, TweakerMap* map)
 	}
 }
 
-#if defined(COMPILER_MSVC)
-#define SNPRINTF(buffer, count, format, ...)\
-	_snprintf(buffer, count, format, __VA_ARGS__)
-#else
-#define SNPRINTF(buffer, count, format, ...)\
-	snprintf(buffer, count, format, __VA_ARGS__)
-#endif
-
 static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 {
 #if defined(TWEAKER_ENABLED)
@@ -4867,7 +4759,7 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 			{
 				bool b = *map->entries[selected].a_bool.value;
 				const char* value = bool_to_string(b);
-				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%s", value);
 				empty_string(tweaker->readout.step);
 				empty_string(tweaker->readout.range);
 				break;
@@ -4878,15 +4770,15 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				int step = map->entries[selected].an_int.step;
 				int range_min = map->entries[selected].an_int.range_min;
 				int range_max = map->entries[selected].an_int.range_max;
-				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
-				SNPRINTF(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%d", value);
+				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%d", step);
 				if(range_min == INT_MIN && range_max == INT_MAX)
 				{
 					empty_string(tweaker->readout.range);
 				}
 				else
 				{
-					SNPRINTF(tweaker->readout.range, tweaker_line_char_limit, "Range=[%d,%d]", range_min, range_max);
+					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%d,%d]", range_min, range_max);
 				}
 				break;
 			}
@@ -4896,15 +4788,15 @@ static void tweaker_update(Tweaker* tweaker, TweakerMap* map)
 				float step = map->entries[selected].a_float.step;
 				float range_min = map->entries[selected].a_float.range_min;
 				float range_max = map->entries[selected].a_float.range_max;
-				SNPRINTF(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
-				SNPRINTF(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
+				snprintf(tweaker->readout.value, tweaker_line_char_limit, "[V]alue=%f", value);
+				snprintf(tweaker->readout.step, tweaker_line_char_limit, "[S]tep=%f", step);
 				if(range_min == -infinity && range_max == +infinity)
 				{
 					empty_string(tweaker->readout.range);
 				}
 				else
 				{
-					SNPRINTF(tweaker->readout.range, tweaker_line_char_limit, "Range=[%g,%g]", range_min, range_max);
+					snprintf(tweaker->readout.range, tweaker_line_char_limit, "Range=[%g,%g]", range_min, range_max);
 				}
 				break;
 			}
@@ -5380,7 +5272,7 @@ static void inspector_fill_lines(Inspector* inspector)
 			int char_limit = scroll_panel_line_char_limit - indent;
 			int name_limit = 12 - indent;
 			int milliticks = record->ticks / 1e3;
-			SNPRINTF(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
+			snprintf(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
 		}
 	}
 
@@ -10734,12 +10626,12 @@ long atomic_int_load(AtomicInt* i)
 
 long atomic_int_add(AtomicInt* augend, long addend)
 {
-	return _InterlockedAdd(const_cast<volatile long*>(augend), addend);
+	return InterlockedAdd(const_cast<volatile long*>(augend), addend);
 }
 
 long atomic_int_subtract(AtomicInt* minuend, long subtrahend)
 {
-	return _InterlockedAdd(const_cast<volatile long*>(minuend), -subtrahend);
+	return InterlockedAdd(const_cast<volatile long*>(minuend), -subtrahend);
 }
 
 bool atomic_compare_exchange(volatile u32* p, u32 expected, u32 desired)
