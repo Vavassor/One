@@ -13,15 +13,15 @@ Build Instructions..............................................................
 For playing, use these commands:
 
 -for Windows, using the visual studio compiler
-cl /O2 main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib avrt.lib /link /out:One.exe
+cl /O2 /DNDEBUG main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib ole32.lib avrt.lib /link /out:One.exe
 
 -for Linux
-g++ -o One -std=c++0x -O3 main.cpp -lGL -lX11 -lpthread -lasound
+g++ -o One -std=c++0x -O3 -DNDEBUG main.cpp -lGL -lX11 -lpthread -lasound
 
 For debugging, use these commands:
 
 -for Windows, using the visual studio compiler
-cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib avrt.lib /link /debug /out:One.exe
+cl /Od /Wall main.cpp kernel32.lib user32.lib gdi32.lib opengl32.lib ole32.lib avrt.lib /link /debug /out:One.exe
 
 -for Linux
 g++ -o One -std=c++0x -O0 -g3 -Wall -fmessage-length=0 main.cpp -lGL -lX11 -lpthread -lasound
