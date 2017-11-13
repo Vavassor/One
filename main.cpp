@@ -10142,8 +10142,6 @@ void system_prepare_for_loop()
 	conversion_info.out.format = device_description.format;
 	conversion_info.out.stride = conversion_info.channels;
 
-	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
-	double delta_time = device_description.frames / static_cast<double>(device_description.sample_rate);
 	float delta_time_per_frame = 1.0f / device_description.sample_rate;
 
 	// Setup voices.
@@ -11077,6 +11075,8 @@ static void* run_mixer_thread(void* argument)
 
 	system_prepare_for_loop();
 	
+	int frame_size = conversion_info.channels * format_byte_count(conversion_info.out.format);
+
 	while(atomic_flag_test_and_set(&quit))
 	{
 		system_update_loop();
