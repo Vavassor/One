@@ -142,6 +142,12 @@ Table Of Contents...............................................................
 
 using std::fmin;
 using std::fmax;
+using std::abs;
+using std::sqrt;
+using std::isfinite;
+using std::signbit;
+using std::sin;
+using std::cos;
 
 // §1.1 Globally-Useful Things..................................................
 
@@ -243,6 +249,11 @@ static bool almost_zero(float x)
 static bool almost_one(float x)
 {
 	return abs(x - 1.0f) <= 0.5e-5f;
+}
+
+static bool almost_equals(float x, float y)
+{
+	return abs(x - y) < 1e-6f;
 }
 
 const float tau = 6.28318530717958647692f;
@@ -573,7 +584,8 @@ u64 x;
 
 static uint64_t splitmix64()
 {
-	uint64_t z = (x += UINT64_C(0x9E3779B97F4A7C15));
+	x += UINT64_C(0x9E3779B97F4A7C15);
+	uint64_t z = x;
 	z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
 	z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
 	return z ^ (z >> 31);
@@ -632,7 +644,7 @@ static inline float to_float(u64 x)
 		u32 i;
 		float f;
 	} u;
-	u.i = UINT32_C(0x7F) << 23 | x >> 41;
+	u.i = UINT32_C(0x7f) << 23 | x >> 41;
 	return u.f - 1.0f;
 }
 
@@ -650,13 +662,6 @@ float float_range(float min, float max)
 #include <climits>
 
 const float infinity = FLT_MAX;
-
-using std::abs;
-using std::sqrt;
-using std::isfinite;
-using std::signbit;
-using std::sin;
-using std::cos;
 
 struct Vector2
 {
@@ -866,6 +871,11 @@ Vector3& operator /= (Vector3& v, float s)
 	return v;
 }
 
+Vector3 operator + (Vector3 v)
+{
+	return v;
+}
+
 Vector3 operator - (Vector3 v)
 {
 	return {-v.x, -v.y, -v.z};
@@ -923,6 +933,12 @@ Vector3 pointwise_divide(Vector3 v0, Vector3 v1)
 float lerp(float v0, float v1, float t)
 {
 	return (1.0f - t) * v0 + t * v1;
+}
+
+float unlerp(float v0, float v1, float t)
+{
+	ASSERT(v0 != v1);
+	return (t - v0) / (v1 - v0);
 }
 
 Vector3 lerp(Vector3 v0, Vector3 v1, float t)
@@ -3194,14 +3210,14 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 	floor->vertices[o + 13].position = {r, n, t};
 	floor->vertices[o + 14].position = {l, n, b};
 	floor->vertices[o + 15].position = {r, n, b};
-	floor->vertices[o     ].normal   =  vector3_unit_z;
-	floor->vertices[o +  1].normal   =  vector3_unit_z;
-	floor->vertices[o +  2].normal   =  vector3_unit_z;
-	floor->vertices[o +  3].normal   =  vector3_unit_z;
-	floor->vertices[o +  4].normal   =  vector3_unit_x;
-	floor->vertices[o +  5].normal   =  vector3_unit_x;
-	floor->vertices[o +  6].normal   =  vector3_unit_x;
-	floor->vertices[o +  7].normal   =  vector3_unit_x;
+	floor->vertices[o     ].normal   = +vector3_unit_z;
+	floor->vertices[o +  1].normal   = +vector3_unit_z;
+	floor->vertices[o +  2].normal   = +vector3_unit_z;
+	floor->vertices[o +  3].normal   = +vector3_unit_z;
+	floor->vertices[o +  4].normal   = +vector3_unit_x;
+	floor->vertices[o +  5].normal   = +vector3_unit_x;
+	floor->vertices[o +  6].normal   = +vector3_unit_x;
+	floor->vertices[o +  7].normal   = +vector3_unit_x;
 	floor->vertices[o +  8].normal   = -vector3_unit_x;
 	floor->vertices[o +  9].normal   = -vector3_unit_x;
 	floor->vertices[o + 10].normal   = -vector3_unit_x;
@@ -4910,9 +4926,9 @@ static void draw_tweaker(Tweaker* tweaker)
 }
 
 // The tweaker shouldn't be present in release mode. It isn't needed, but more
-// importantly these macros use initialisation to register its variables which
-// causes structures to become non-POD types. All structures in this file are
-// assumed to be POD, so many behaviours would become undefined. This isn't
+// importantly these macros use static initialisation to register its variables
+// which causes structures to become non-POD types. All structures in this file
+// are assumed to be POD, so many behaviours would become undefined. This isn't
 // likely to be any trouble in development but is strictly unacceptable for
 // shipping.
 //
@@ -5290,7 +5306,7 @@ static void inspector_fill_lines(Inspector* inspector)
 
 			int char_limit = scroll_panel_line_char_limit - indent;
 			int name_limit = 12 - indent;
-			int milliticks = record->ticks / 1e3;
+			int milliticks = record->ticks / 1000;
 			snprintf(line + indent, char_limit, "%-*.*s %6d %3d", name_limit, name_limit, name, milliticks, record->calls);
 		}
 	}
@@ -5778,6 +5794,476 @@ static Vector2* create_blue_noise(int samples, float side)
 
 	return points;
 }
+
+// Marching Cubes...............................................................
+
+namespace marching_cubes {
+
+// edge_table and index_table are copied from public domain source code
+// Marching Cubes Example Program by Cory Bloyd (corysama@yahoo.com)
+//
+// For a description of the algorithm go to
+// http://paulbourke.net/geometry/polygonise/
+
+// This table lists the edges intersected by the surface for all 256 possible
+// vertex states. There are 12 edges to a cube. For each entry in the table, if
+// edge #n is intersected, then bit #n is set to 1
+static const u16 edge_table[256] =
+{
+	0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+	0x190, 0x099, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+	0x230, 0x339, 0x033, 0x13a, 0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+	0x3a0, 0x2a9, 0x1a3, 0x0aa, 0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+	0x460, 0x569, 0x663, 0x76a, 0x066, 0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+	0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0x0ff, 0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+	0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x055, 0x15c, 0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+	0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0x0cc, 0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+	0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0x0cc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+	0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x055, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+	0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5, 0x0ff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+	0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x066, 0x76a, 0x663, 0x569, 0x460,
+	0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0x0aa, 0x1a3, 0x2a9, 0x3a0,
+	0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x033, 0x339, 0x230,
+	0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x099, 0x190,
+	0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000
+};
+
+// For each of the possible vertex states listed in edge_table there is a
+// specific triangulation of the edge intersection points. This lists all of
+// them in the form of 0-5 edge triples with the list terminated by the invalid
+// value -1.
+static const s8 index_table[256][16] =
+{
+	{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+	{3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+	{3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+	{3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+	{9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1},
+	{9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+	{2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+	{8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+	{9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+	{4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1},
+	{3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1},
+	{1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1},
+	{4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+	{4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+	{5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+	{2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1},
+	{9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+	{0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+	{2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1},
+	{10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1},
+	{5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+	{5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+	{9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+	{0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+	{1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1},
+	{10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1},
+	{8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1},
+	{2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+	{7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+	{2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1},
+	{11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1},
+	{5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1},
+	{11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1},
+	{11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+	{1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1},
+	{9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+	{5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1},
+	{2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1},
+	{6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+	{3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1},
+	{6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+	{10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+	{6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1},
+	{8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1},
+	{7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1},
+	{3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+	{0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1},
+	{9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1},
+	{8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+	{5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1},
+	{0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1},
+	{6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1},
+	{10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1},
+	{10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+	{8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+	{1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1},
+	{0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+	{10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1},
+	{3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+	{6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1},
+	{9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1},
+	{8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1},
+	{3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+	{6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+	{0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1},
+	{10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1},
+	{10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+	{2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1},
+	{7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+	{7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+	{2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1},
+	{1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1},
+	{11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1},
+	{8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1},
+	{0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1},
+	{7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+	{10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+	{2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+	{6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1},
+	{7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+	{2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1},
+	{1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1},
+	{10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+	{10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1},
+	{0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1},
+	{7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+	{6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+	{8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1},
+	{6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1},
+	{4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1},
+	{10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1},
+	{8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+	{0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1},
+	{1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+	{8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1},
+	{10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+	{4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1},
+	{10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+	{5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+	{11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1},
+	{9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+	{6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1},
+	{7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1},
+	{3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1},
+	{7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1},
+	{3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1},
+	{6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1},
+	{9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1},
+	{1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1},
+	{4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1},
+	{7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1},
+	{6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+	{3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1},
+	{0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1},
+	{6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1},
+	{0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1},
+	{11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1},
+	{6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1},
+	{5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1},
+	{9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+	{1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1},
+	{1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1},
+	{10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1},
+	{0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1},
+	{5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1},
+	{10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1},
+	{11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1},
+	{9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1},
+	{7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1},
+	{2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+	{8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1},
+	{9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1},
+	{9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1},
+	{1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+	{9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+	{9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+	{5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1},
+	{0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1},
+	{10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1},
+	{2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1},
+	{0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1},
+	{0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1},
+	{9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1},
+	{5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+	{3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1},
+	{5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1},
+	{8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1},
+	{9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1},
+	{1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1},
+	{3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1},
+	{4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1},
+	{9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1},
+	{11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+	{11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1},
+	{2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1},
+	{9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1},
+	{3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1},
+	{1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1},
+	{4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+	{3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1},
+	{0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+	{9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1},
+	{1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+};
+
+static Vector3 interpolate_vertex(float isovalue, Vector3 p0, Vector3 p1, float i0, float i1)
+{
+	if(almost_equals(i0, i1))
+	{
+		return p0;
+	}
+	float t = unlerp(i0, i1, isovalue);
+	return lerp(p0, p1, t);
+}
+
+struct Grid
+{
+	float* values;
+	int columns;
+	int rows;
+	int slices;
+};
+
+void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** result, int* result_count)
+{
+	int columns = grid->columns;
+	int rows = grid->rows;
+	int slices = grid->slices;
+
+	int rc = columns * rows;
+	int c = columns;
+
+	Triangle* triangles = nullptr;
+	int triangles_count = 0;
+	int triangles_capacity = 0;
+
+	for(int i = 0; i < slices - 1; ++i)
+	{
+		for(int j = 0; j < rows - 1; ++j)
+		{
+			for(int k = 0; k < columns - 1; ++k)
+			{
+				// Take samples of the field at each corner of the cell.
+				float x[8];
+				x[0] = grid->values[rc * (i    ) + c * (j    ) + (k    )];
+				x[1] = grid->values[rc * (i + 1) + c * (j    ) + (k    )];
+				x[2] = grid->values[rc * (i + 1) + c * (j + 1) + (k    )];
+				x[3] = grid->values[rc * (i    ) + c * (j + 1) + (k    )];
+				x[4] = grid->values[rc * (i    ) + c * (j    ) + (k + 1)];
+				x[5] = grid->values[rc * (i + 1) + c * (j    ) + (k + 1)];
+				x[6] = grid->values[rc * (i + 1) + c * (j + 1) + (k + 1)];
+				x[7] = grid->values[rc * (i    ) + c * (j + 1) + (k + 1)];
+
+				// Calculate the positions of each vertex.
+				Vector3 p[8];
+				p[0] = {scale.x * (i)    , scale.y * (j)    , scale.z * (k)    };
+				p[1] = {scale.x * (i + 1), scale.y * (j)    , scale.z * (k)    };
+				p[2] = {scale.x * (i + 1), scale.y * (j + 1), scale.z * (k)    };
+				p[3] = {scale.x * (i)    , scale.y * (j + 1), scale.z * (k)    };
+				p[4] = {scale.x * (i)    , scale.y * (j)    , scale.z * (k + 1)};
+				p[5] = {scale.x * (i + 1), scale.y * (j)    , scale.z * (k + 1)};
+				p[6] = {scale.x * (i + 1), scale.y * (j + 1), scale.z * (k + 1)};
+				p[7] = {scale.x * (i    ), scale.y * (j + 1), scale.z * (k + 1)};
+
+				// Check the value at each corner of the cell and use that to
+				// build an index into the edge table.
+				int cube_index = 0;
+				if(x[0] < isovalue) cube_index |= 1;
+				if(x[1] < isovalue) cube_index |= 2;
+				if(x[2] < isovalue) cube_index |= 4;
+				if(x[3] < isovalue) cube_index |= 8;
+				if(x[4] < isovalue) cube_index |= 16;
+				if(x[5] < isovalue) cube_index |= 32;
+				if(x[6] < isovalue) cube_index |= 64;
+				if(x[7] < isovalue) cube_index |= 128;
+
+				// If any part of the surface intersects the cell, then
+				// triangles can be output.
+				u16 edge = edge_table[cube_index];
+				if(edge != 0)
+				{
+					ENSURE_ARRAY_SIZE(triangles, 4);
+
+					Vector3 vertices[12];
+
+					// Find the vertices where the surface intersects the cell.
+					if(edge & 1) vertices[0] = interpolate_vertex(isovalue, p[0], p[1], x[0], x[1]);
+					if(edge & 2) vertices[1] = interpolate_vertex(isovalue, p[1], p[2], x[1], x[2]);
+					if(edge & 4) vertices[2] = interpolate_vertex(isovalue, p[2], p[3], x[2], x[3]);
+					if(edge & 8) vertices[3] = interpolate_vertex(isovalue, p[3], p[0], x[3], x[0]);
+					if(edge & 16) vertices[4] = interpolate_vertex(isovalue, p[4], p[5], x[4], x[5]);
+					if(edge & 32) vertices[5] = interpolate_vertex(isovalue, p[5], p[6], x[5], x[6]);
+					if(edge & 64) vertices[6] = interpolate_vertex(isovalue, p[6], p[7], x[6], x[7]);
+					if(edge & 128) vertices[7] = interpolate_vertex(isovalue, p[7], p[4], x[7], x[4]);
+					if(edge & 256) vertices[8] = interpolate_vertex(isovalue, p[0], p[4], x[0], x[4]);
+					if(edge & 512) vertices[9] = interpolate_vertex(isovalue, p[1], p[5], x[1], x[5]);
+					if(edge & 1024) vertices[10] = interpolate_vertex(isovalue, p[2], p[6], x[2], x[6]);
+					if(edge & 2048) vertices[11] = interpolate_vertex(isovalue, p[3], p[7], x[3], x[7]);
+
+					// Output the triangles that the index table indicates for
+					// this cell's configuration.
+					for(int m = 0; index_table[cube_index][m] != -1; m += 3)
+					{
+						triangles[triangles_count].vertices[0] = vertices[index_table[cube_index][m]];
+						triangles[triangles_count].vertices[1] = vertices[index_table[cube_index][m + 1]];
+						triangles[triangles_count].vertices[2] = vertices[index_table[cube_index][m + 2]];
+						triangles_count += 1;
+					}
+				}
+			}
+		}
+	}
+
+	*result = triangles;
+	*result_count = triangles_count;
+}
+
+void draw_metaballs(Grid* grid)
+{
+	int rc = grid->rows * grid->columns;
+	int c = grid->columns;
+
+	AABB bounds;
+	bounds.min = vector3_zero;
+	bounds.max.x = grid->columns - 1;
+	bounds.max.y = grid->rows - 1;
+	bounds.max.z = grid->slices - 1;
+
+	const int metaballs = 7;
+	for(int i = 0; i < metaballs; ++i)
+	{
+		Vector3 center;
+		center.x = arandom::float_range(bounds.min.x, bounds.max.x);
+		center.y = arandom::float_range(bounds.min.y, bounds.max.y);
+		center.z = arandom::float_range(bounds.min.z, bounds.max.z);
+
+		float radius = arandom::float_range(3.0f, 12.0f);
+
+		Vector3 extents = {radius, radius, radius};
+		AABB sphere_bounds = aabb_from_ellipsoid(center, extents);
+		sphere_bounds.min = max3(sphere_bounds.min, bounds.min);
+		sphere_bounds.max = min3(sphere_bounds.max, bounds.max);
+
+		int lx = sphere_bounds.min.x;
+		int ly = sphere_bounds.min.y;
+		int lz = sphere_bounds.min.z;
+		int hx = sphere_bounds.max.x;
+		int hy = sphere_bounds.max.y;
+		int hz = sphere_bounds.max.z;
+
+		float rs = radius * radius;
+
+		for(int j = lz; j <= hz; ++j)
+		{
+			for(int k = ly; k <= hy; ++k)
+			{
+				for(int m = lx; m <= hx; ++m)
+				{
+					Vector3 p;
+					p.x = m;
+					p.y = k;
+					p.z = j;
+					Vector3 v = p - center;
+					float d = squared_length(v);
+					if(d < rs)
+					{
+						float value = (rs - d) / rs;
+						int index = rc * j + c * k + m;
+						grid->values[index] = fmin(grid->values[index] + value, 1.0f);
+					}
+				}
+			}
+		}
+	}
+}
+
+} // namespace marching_cubes
 
 // §3.14 Render System..........................................................
 
@@ -6279,6 +6765,51 @@ void object_generate_sky(Object* object)
 	DEALLOCATE(indices);
 }
 
+static void object_copy_triangles(Object* object, AABB* bounds, Triangle* triangles, int triangles_count)
+{
+	const u32 colour = rgba_to_u32(colour_cyan);
+
+	AABB box = {vector3_max, vector3_min};
+
+	int vertices_count = 3 * triangles_count;
+	VertexPNC* vertices = ALLOCATE(VertexPNC, vertices_count);
+	for(int i = 0; i < triangles_count; ++i)
+	{
+		AABB triangle_bounds = aabb_from_triangle(&triangles[i]);
+		box = aabb_merge(box, triangle_bounds);
+
+		Vector3 p0 = triangles[i].vertices[0];
+		Vector3 p1 = triangles[i].vertices[1];
+		Vector3 p2 = triangles[i].vertices[2];
+		vertices[3 * i    ].position = p0;
+		vertices[3 * i + 1].position = p1;
+		vertices[3 * i + 2].position = p2;
+
+		Vector3 normal = normalise(cross(p1 - p0, p2 - p0));
+		vertices[3 * i    ].normal = normal;
+		vertices[3 * i + 1].normal = normal;
+		vertices[3 * i + 2].normal = normal;
+
+		vertices[3 * i    ].colour = colour;
+		vertices[3 * i + 1].colour = colour;
+		vertices[3 * i + 2].colour = colour;
+	}
+
+	int indices_count = vertices_count;
+	u16* indices = ALLOCATE(u16, indices_count);
+	for(int i = 0; i < indices_count; ++i)
+	{
+		indices[i] = i;
+	}
+
+	object_set_surface(object, vertices, vertices_count, indices, indices_count);
+
+	DEALLOCATE(vertices);
+	DEALLOCATE(indices);
+
+	*bounds = box;
+}
+
 // Whole system
 
 struct CallList
@@ -6326,9 +6857,9 @@ GLuint nearest_repeat;
 Matrix4 projection;
 Matrix4 sky_projection;
 Matrix4 screen_projection;
-int objects_count = 4;
-Object objects[4];
-AABB objects_bounds[4];
+int objects_count = 5;
+Object objects[5];
+AABB objects_bounds[5];
 Object sky;
 Triangle* terrain_triangles;
 int terrain_triangles_count;
@@ -6394,6 +6925,31 @@ static bool system_initialise()
 	object_create(&terrain);
 	object_generate_terrain(&terrain, &objects_bounds[3], &terrain_triangles, &terrain_triangles_count);
 	objects[3] = terrain;
+
+	Object metaballs;
+	object_create(&metaballs);
+	{
+		const int side = 24;
+		marching_cubes::Grid grid;
+		grid.columns = side;
+		grid.rows = side;
+		grid.slices = side;
+		grid.values = ALLOCATE(float, side * side * side);
+		marching_cubes::draw_metaballs(&grid);
+
+		Triangle* triangles;
+		int triangles_count;
+		Vector3 scale = {0.1f, 0.1f, 0.1f};
+		float isovalue = 0.7f;
+		marching_cubes::triangulate_grid(&grid, scale, isovalue, &triangles, &triangles_count);
+
+		DEALLOCATE(grid.values);
+
+		object_copy_triangles(&metaballs, &objects_bounds[4], triangles, triangles_count);
+
+		DEALLOCATE(triangles);
+	}
+	objects[4] = metaballs;
 
 	object_create(&sky);
 	object_generate_sky(&sky);
@@ -6598,7 +7154,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 	const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
 
-	Matrix4 models[5];
+	Matrix4 models[6];
 
 	// Set up the matrices.
 	Matrix4 view_projection;
@@ -6626,24 +7182,27 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 		Matrix4 model3 = matrix4_identity;
 		Matrix4 model4 = matrix4_identity;
+		Matrix4 model5 = matrix4_identity;
 
 		models[0] = model0;
 		models[1] = model1;
 		models[2] = model2;
 		models[3] = model3;
 		models[4] = model4;
+		models[5] = model5;
 
 		const Vector3 camera_target = {0.0f, 0.0f, 0.5f};
 		const Matrix4 view = look_at_matrix(camera_position, camera_target, vector3_unit_z);
 
 		Vector3 direction = normalise(camera_target - camera_position);
-		const Matrix4 view4 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
+		const Matrix4 view5 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
 
 		object_set_matrices(&objects[0], model0, view, projection);
 		object_set_matrices(&objects[1], model1, view, projection);
 		object_set_matrices(&objects[2], model2, view, projection);
 		object_set_matrices(&objects[3], model3, view, projection);
-		object_set_matrices(&sky, model4, view4, sky_projection);
+		object_set_matrices(&objects[4], model4, view, projection);
+		object_set_matrices(&sky, model5, view5, sky_projection);
 
 		immediate::set_matrices(view, projection);
 
@@ -8137,21 +8696,10 @@ struct Track
 	int style;
 };
 
-static void sort_events(Track::Event* events, int events_count)
-{
-	// Just do insertion sort, because events are likely to be mostly sorted
-	// and very small in number.
-	for(int i = 1; i < events_count; ++i)
-	{
-		Track::Event temp = events[i];
-		int j;
-		for(j = i - 1; j >= 0 && events[j].time > temp.time; --j)
-		{
-			events[j + 1] = events[j];
-		}
-		events[j + 1] = temp;
-	}
-}
+#define COMPARE_TIME(a, b)\
+	a.time > b.time
+
+DEFINE_INSERTION_SORT(Track::Event, COMPARE_TIME, by_time);
 
 void track_setup(Track* track)
 {
@@ -8277,8 +8825,8 @@ void track_generate(Track* track, double finish_time, Composer* composer)
 
 	track->notes_count = MIN(track->notes_count + generated, track->notes_capacity);
 
-	sort_events(track->start_events, track->notes_count);
-	sort_events(track->stop_events, track->notes_count);
+	insertion_sort_by_time(track->start_events, track->notes_count);
+	insertion_sort_by_time(track->stop_events, track->notes_count);
 }
 
 static void transfer_unfinished_notes(Track* track, double time)
@@ -10779,7 +11327,7 @@ void initialise_clock(Clock* clock)
 {
 	struct timespec resolution;
 	clock_getres(CLOCK_MONOTONIC, &resolution);
-	s64 nanoseconds = resolution.tv_nsec + resolution.tv_sec * 1e9;
+	s64 nanoseconds = resolution.tv_nsec + resolution.tv_sec * 1000000000;
 	clock->frequency = static_cast<double>(nanoseconds) / 1.0e9;
 }
 
@@ -10787,7 +11335,7 @@ double get_time(Clock* clock)
 {
 	struct timespec timestamp;
 	clock_gettime(CLOCK_MONOTONIC, &timestamp);
-	s64 nanoseconds = timestamp.tv_nsec + timestamp.tv_sec * 1e9;
+	s64 nanoseconds = timestamp.tv_nsec + timestamp.tv_sec * 1000000000;
 	return static_cast<double>(nanoseconds) * clock->frequency;
 }
 
@@ -10803,7 +11351,7 @@ u64 get_timestamp_from_system()
 {
 	timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	return now.tv_sec * 1e9 + now.tv_nsec;
+	return now.tv_sec * 1000000000 + now.tv_nsec;
 }
 
 // §9.3 Audio Functions.........................................................
