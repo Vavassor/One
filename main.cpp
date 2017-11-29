@@ -6542,6 +6542,45 @@ static void object_generate_player(Object* object, AABB* bounds)
 	floor_destroy(&floor);
 }
 
+static void generate_normals_from_faces(VertexPNC* vertices, int vertices_count, u16* indices, int indices_count)
+{
+	int* seen = ALLOCATE(int, vertices_count);
+	if(!seen)
+	{
+		DEALLOCATE(vertices);
+		DEALLOCATE(indices);
+		return;
+	}
+	for(int i = 0; i < indices_count; i += 3)
+	{
+		u16 ia = indices[i + 0];
+		u16 ib = indices[i + 1];
+		u16 ic = indices[i + 2];
+		Vector3 a = vertices[ia].position;
+		Vector3 b = vertices[ib].position;
+		Vector3 c = vertices[ic].position;
+		Vector3 normal = normalise(cross(b - a, c - a));
+
+		u16 v[3] = {ia, ib, ic};
+		for(int j = 0; j < 3; ++j)
+		{
+			GLushort cv = v[j];
+			seen[cv] += 1;
+			if(seen[cv] == 1)
+			{
+				vertices[cv].normal = normal;
+			}
+			else
+			{
+				// Average each vertex normal with its face normal.
+				Vector3 n = lerp(vertices[cv].normal, normal, 1.0f / seen[cv]);
+				vertices[cv].normal = normalise(n);
+			}
+		}
+	}
+	DEALLOCATE(seen);
+}
+
 static void object_generate_terrain(Object* object, AABB* bounds, Triangle** triangles, int* triangles_count)
 {
 	const int side = 10;
@@ -6609,42 +6648,7 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 		indices[o + 5] = k;
 	}
 
-	// Generate vertex normals from the triangles.
-	int* seen = ALLOCATE(int, vertices_count);
-	if(!seen)
-	{
-		DEALLOCATE(vertices);
-		DEALLOCATE(indices);
-		return;
-	}
-	for(int i = 0; i < indices_count; i += 3)
-	{
-		u16 ia = indices[i + 0];
-		u16 ib = indices[i + 1];
-		u16 ic = indices[i + 2];
-		Vector3 a = vertices[ia].position;
-		Vector3 b = vertices[ib].position;
-		Vector3 c = vertices[ic].position;
-		Vector3 normal = normalise(cross(b - a, c - a));
-
-		u16 v[3] = {ia, ib, ic};
-		for(int j = 0; j < 3; ++j)
-		{
-			GLushort cv = v[j];
-			seen[cv] += 1;
-			if(seen[cv] == 1)
-			{
-				vertices[cv].normal = normal;
-			}
-			else
-			{
-				// Average each vertex normal with its face normal.
-				Vector3 n = lerp(vertices[cv].normal, normal, 1.0f / seen[cv]);
-				vertices[cv].normal = normalise(n);
-			}
-		}
-	}
-	DEALLOCATE(seen);
+	generate_normals_from_faces(vertices, vertices_count, indices, indices_count);
 
 	int t_count = 2 * area;
 	Triangle* t = ALLOCATE(Triangle, t_count);
@@ -6765,42 +6769,149 @@ void object_generate_sky(Object* object)
 	DEALLOCATE(indices);
 }
 
+static const int point_entry_points_cap = 8;
+
+struct PointEntry
+{
+	Vector3 points[point_entry_points_cap];
+	int indices[point_entry_points_cap];
+	int points_count;
+};
+
+struct PointTable
+{
+	AABB bounds;
+	PointEntry** entries;
+	int entries_count;
+	int divisions;
+};
+
+static void point_table_create(PointTable* table, AABB bounds, int divisions)
+{
+	int dc = divisions * divisions * divisions;
+	table->bounds = bounds;
+	table->entries = ALLOCATE(PointEntry*, dc);
+	table->entries_count = dc;
+	table->divisions = divisions;
+}
+
+static void point_table_destroy(PointTable* table)
+{
+	for(int i = 0; i < table->entries_count; ++i)
+	{
+		DEALLOCATE(table->entries[i]);
+	}
+	DEALLOCATE(table->entries);
+}
+
+static int hash_point(PointTable* table, Vector3 point)
+{
+	AABB bounds = table->bounds;
+	Vector3 p = pointwise_divide(point - bounds.min, bounds.max - bounds.min);
+	int d = table->divisions;
+	Vector3 v = (d - 1) * p;
+	int ix = round(v.x);
+	int iy = round(v.y);
+	int iz = round(v.z);
+	int index = (d * d * iz) + (d * iy) + ix;
+	return index % table->entries_count;
+}
+
+static bool vector3_close(Vector3 v0, Vector3 v1)
+{
+	return
+		almost_equals(v0.x, v1.x) &&
+		almost_equals(v0.y, v1.y) &&
+		almost_equals(v0.z, v1.z);
+}
+
+static void insert(PointTable* table, Vector3 point, int index)
+{
+	int entry_index = hash_point(table, point);
+	PointEntry* entry = table->entries[entry_index];
+	if(!entry)
+	{
+		entry = ALLOCATE(PointEntry, 1);
+		table->entries[entry_index] = entry;
+	}
+
+	entry->points[entry->points_count] = point;
+	entry->indices[entry->points_count] = index;
+	entry->points_count += 1;
+	ASSERT(entry->points_count < point_entry_points_cap);
+}
+
+static bool find_index(PointTable* table, Vector3 point, int* index)
+{
+	int entry_index = hash_point(table, point);
+	PointEntry* entry = table->entries[entry_index];
+	if(!entry)
+	{
+		return false;
+	}
+
+	for(int i = 0; i < entry->points_count; ++i)
+	{
+		if(vector3_close(point, entry->points[i]))
+		{
+			*index = entry->indices[i];
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static void object_copy_triangles(Object* object, AABB* bounds, Triangle* triangles, int triangles_count)
 {
 	const u32 colour = rgba_to_u32(colour_cyan);
 
+	// The bounds will be useful for indexing the vertices, so compute that
+	// first, even though it involves redundant vertex checks.
 	AABB box = {vector3_max, vector3_min};
-
-	int vertices_count = 3 * triangles_count;
-	VertexPNC* vertices = ALLOCATE(VertexPNC, vertices_count);
 	for(int i = 0; i < triangles_count; ++i)
 	{
 		AABB triangle_bounds = aabb_from_triangle(&triangles[i]);
 		box = aabb_merge(box, triangle_bounds);
-
-		Vector3 p0 = triangles[i].vertices[0];
-		Vector3 p1 = triangles[i].vertices[1];
-		Vector3 p2 = triangles[i].vertices[2];
-		vertices[3 * i    ].position = p0;
-		vertices[3 * i + 1].position = p1;
-		vertices[3 * i + 2].position = p2;
-
-		Vector3 normal = normalise(cross(p1 - p0, p2 - p0));
-		vertices[3 * i    ].normal = normal;
-		vertices[3 * i + 1].normal = normal;
-		vertices[3 * i + 2].normal = normal;
-
-		vertices[3 * i    ].colour = colour;
-		vertices[3 * i + 1].colour = colour;
-		vertices[3 * i + 2].colour = colour;
 	}
 
-	int indices_count = vertices_count;
+	// Allocate the maximum amount of space even though the finished vertices
+	// will be fewer.
+	int vertices_capacity = 3 * triangles_count;
+	VertexPNC* vertices = ALLOCATE(VertexPNC, vertices_capacity);
+
+	// The indices for sure won't change in number.
+	int indices_count = vertices_capacity;
 	u16* indices = ALLOCATE(u16, indices_count);
-	for(int i = 0; i < indices_count; ++i)
+
+	// Assign indices to unique vertices and output positions and colour.
+	PointTable table;
+	point_table_create(&table, box, 24);
+	u16 index = 0;
+	for(int i = 0; i < triangles_count; ++i)
 	{
-		indices[i] = i;
+		for(int j = 0; j < 3; ++j)
+		{
+			Vector3 p = triangles[i].vertices[j];
+			int found_index;
+			if(find_index(&table, p, &found_index))
+			{
+				indices[3 * i + j] = found_index;
+			}
+			else
+			{
+				insert(&table, p, index);
+				vertices[index].position = p;
+				vertices[index].colour = colour;
+				indices[3 * i + j] = index;
+				index += 1;
+			}
+		}
 	}
+	point_table_destroy(&table);
+	int vertices_count = index;
+
+	generate_normals_from_faces(vertices, vertices_count, indices, indices_count);
 
 	object_set_surface(object, vertices, vertices_count, indices, indices_count);
 
