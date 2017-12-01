@@ -216,6 +216,17 @@ static float clamp(float a, float min, float max)
 	return fmin(fmax(a, min), max);
 }
 
+float lerp(float v0, float v1, float t)
+{
+	return (1.0f - t) * v0 + t * v1;
+}
+
+float unlerp(float v0, float v1, float t)
+{
+	ASSERT(v0 != v1);
+	return (t - v0) / (v1 - v0);
+}
+
 static bool is_power_of_two(unsigned int x)
 {
 	return (x != 0) && !(x & (x - 1));
@@ -778,6 +789,14 @@ Vector2 pointwise_multiply(Vector2 v0, Vector2 v1)
 	return result;
 }
 
+Vector2 lerp(Vector2 v0, Vector2 v1, float t)
+{
+	Vector2 result;
+	result.x = lerp(v0.x, v1.x, t);
+	result.y = lerp(v0.y, v1.y, t);
+	return result;
+}
+
 struct Vector3
 {
 	float x, y, z;
@@ -928,17 +947,6 @@ Vector3 pointwise_divide(Vector3 v0, Vector3 v1)
 	result.y = v0.y / v1.y;
 	result.z = v0.z / v1.z;
 	return result;
-}
-
-float lerp(float v0, float v1, float t)
-{
-	return (1.0f - t) * v0 + t * v1;
-}
-
-float unlerp(float v0, float v1, float t)
-{
-	ASSERT(v0 != v1);
-	return (t - v0) / (v1 - v0);
 }
 
 Vector3 lerp(Vector3 v0, Vector3 v1, float t)
@@ -5795,6 +5803,190 @@ static Vector2* create_blue_noise(int samples, float side)
 	return points;
 }
 
+// Marching Squares.............................................................
+
+struct LineSegment
+{
+	Vector2 vertices[2];
+};
+
+static Vector2 min2(Vector2 a, Vector2 b)
+{
+	Vector2 result;
+	result.x = fmin(a.x, b.x);
+	result.y = fmin(a.y, b.y);
+	return result;
+}
+
+static Vector2 max2(Vector2 a, Vector2 b)
+{
+	Vector2 result;
+	result.x = fmax(a.x, b.x);
+	result.y = fmax(a.y, b.y);
+	return result;
+}
+
+namespace marching_squares {
+
+static const u8 edge_table[16] =
+{
+	0x00, 0x09, 0x03, 0x0a,
+	0x06, 0x0f, 0x05, 0x0c,
+	0x0c, 0x05, 0x0f, 0x06,
+	0x0a, 0x03, 0x09, 0x00
+};
+
+static const s8 index_table[16][4] =
+{
+	{-1, -1, -1, -1},
+	{3, 0, -1, -1},
+	{0, 1, -1, -1},
+	{3, 1, -1, -1},
+	{1, 2, -1, -1},
+	{0, 1, 2, 3},
+	{0, 2, -1, -1},
+	{2, 3, -1, -1},
+	{2, 3, -1, -1},
+	{0, 2, -1, -1},
+	{3, 0, 1, 2},
+	{1, 2, -1, -1},
+	{3, 1, -1, -1},
+	{0, 1, -1, -1},
+	{3, 0, -1, -1},
+	{-1, -1, -1, -1},
+};
+
+struct Grid
+{
+	float* values;
+	int columns;
+	int rows;
+};
+
+static Vector2 interpolate_vertex(float isovalue, Vector2 p0, Vector2 p1, float i0, float i1)
+{
+	if(almost_equals(i0, i1))
+	{
+		return p0;
+	}
+	float t = unlerp(i0, i1, isovalue);
+	return lerp(p0, p1, t);
+}
+
+void delineate(Grid* grid, float isovalue, Vector2 scale, LineSegment** result, int* result_count)
+{
+	int columns = grid->columns;
+	int rows = grid->rows;
+
+	LineSegment* lines = nullptr;
+	int lines_count = 0;
+	int lines_capacity = 0;
+
+	for(int i = 0; i < rows - 1; ++i)
+	{
+		for(int j = 0; j < columns - 1; ++j)
+		{
+			float x[4];
+			x[0] = grid->values[columns * (i    ) + (j    )];
+			x[1] = grid->values[columns * (i    ) + (j + 1)];
+			x[2] = grid->values[columns * (i + 1) + (j + 1)];
+			x[3] = grid->values[columns * (i + 1) + (j    )];
+
+			Vector2 p[4];
+			p[0] = {static_cast<float>(j    ), static_cast<float>(i    )};
+			p[1] = {static_cast<float>(j + 1), static_cast<float>(i    )};
+			p[2] = {static_cast<float>(j + 1), static_cast<float>(i + 1)};
+			p[3] = {static_cast<float>(j    ), static_cast<float>(i + 1)};
+
+			int square_index = 0;
+			if(x[0] < isovalue) square_index |= 1;
+			if(x[1] < isovalue) square_index |= 2;
+			if(x[2] < isovalue) square_index |= 4;
+			if(x[3] < isovalue) square_index |= 8;
+
+			u8 edge = edge_table[square_index];
+			if(edge != 0)
+			{
+				ENSURE_ARRAY_SIZE(lines, 2);
+
+				Vector2 vertices[4];
+				if(edge & 1) vertices[0] = interpolate_vertex(isovalue, p[0], p[1], x[0], x[1]);
+				if(edge & 2) vertices[1] = interpolate_vertex(isovalue, p[1], p[2], x[1], x[2]);
+				if(edge & 4) vertices[2] = interpolate_vertex(isovalue, p[2], p[3], x[2], x[3]);
+				if(edge & 8) vertices[3] = interpolate_vertex(isovalue, p[3], p[0], x[3], x[0]);
+
+				for(int k = 0; k < 4 && index_table[square_index][k] != -1; k += 2)
+				{
+					Vector2 v0 = vertices[index_table[square_index][k]];
+					Vector2 v1 = vertices[index_table[square_index][k + 1]];
+					v0 = pointwise_multiply(v0, scale);
+					v1 = pointwise_multiply(v1, scale);
+					lines[lines_count].vertices[0] = v0;
+					lines[lines_count].vertices[1] = v1;
+					lines_count += 1;
+				}
+			}
+		}
+	}
+
+	*result = lines;
+	*result_count = lines_count;
+}
+
+void draw_metaballs(Grid* grid)
+{
+	int columns = grid->columns;
+	int rows = grid->rows;
+
+	Vector2 grid_min = vector2_zero;
+	Vector2 grid_max;
+	grid_max.x = columns - 1;
+	grid_max.y = rows - 1;
+
+	const int metaballs = 7;
+
+	for(int i = 0; i < metaballs; ++i)
+	{
+		Vector2 center;
+		center.x = arandom::float_range(0.0f, columns - 1);
+		center.y = arandom::float_range(0.0f, rows - 1);
+
+		float radius = arandom::float_range(3.0f, 12.0f);
+		float rs = radius * radius;
+		Vector2 extents = {radius, radius};
+
+		Vector2 min = center - extents;
+		Vector2 max = center + extents;
+		min = max2(min, grid_min);
+		max = min2(max, grid_max);
+
+		int lx = min.x;
+		int ly = min.y;
+		int hx = max.x;
+		int hy = max.y;
+
+		for(int j = ly; j <= hy; ++j)
+		{
+			for(int k = lx; k <= hx; ++k)
+			{
+				Vector2 p;
+				p.x = k + 0.5f;
+				p.y = j + 0.5f;
+				Vector2 v = p - center;
+				float d = squared_length(v);
+				if(d <= rs)
+				{
+					float value = (rs - d) / rs;
+					int index = columns * j + k;
+					grid->values[index] = fmin(grid->values[index] + value, 1.0f);
+				}
+			}
+		}
+	}
+}
+
+} // namespace marching_squares
+
 // Marching Cubes...............................................................
 
 namespace marching_cubes {
@@ -6142,14 +6334,14 @@ void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** resu
 
 				// Calculate the positions of each vertex.
 				Vector3 p[8];
-				p[0] = {scale.x * (i)    , scale.y * (j)    , scale.z * (k)    };
-				p[1] = {scale.x * (i + 1), scale.y * (j)    , scale.z * (k)    };
-				p[2] = {scale.x * (i + 1), scale.y * (j + 1), scale.z * (k)    };
-				p[3] = {scale.x * (i)    , scale.y * (j + 1), scale.z * (k)    };
-				p[4] = {scale.x * (i)    , scale.y * (j)    , scale.z * (k + 1)};
-				p[5] = {scale.x * (i + 1), scale.y * (j)    , scale.z * (k + 1)};
-				p[6] = {scale.x * (i + 1), scale.y * (j + 1), scale.z * (k + 1)};
-				p[7] = {scale.x * (i    ), scale.y * (j + 1), scale.z * (k + 1)};
+				p[0] = {scale.x * (k    ), scale.y * (i    ), scale.z * (j    )};
+				p[1] = {scale.x * (k    ), scale.y * (i + 1), scale.z * (j    )};
+				p[2] = {scale.x * (k    ), scale.y * (i + 1), scale.z * (j + 1)};
+				p[3] = {scale.x * (k    ), scale.y * (i    ), scale.z * (j + 1)};
+				p[4] = {scale.x * (k + 1), scale.y * (i    ), scale.z * (j    )};
+				p[5] = {scale.x * (k + 1), scale.y * (i + 1), scale.z * (j    )};
+				p[6] = {scale.x * (k + 1), scale.y * (i + 1), scale.z * (j + 1)};
+				p[7] = {scale.x * (k + 1), scale.y * (i    ), scale.z * (j + 1)};
 
 				// Check the value at each corner of the cell and use that to
 				// build an index into the edge table.
@@ -6188,7 +6380,7 @@ void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** resu
 
 					// Output the triangles that the index table indicates for
 					// this cell's configuration.
-					for(int m = 0; index_table[cube_index][m] != -1; m += 3)
+					for(int m = 0; m < 16 && index_table[cube_index][m] != -1; m += 3)
 					{
 						triangles[triangles_count].vertices[0] = vertices[index_table[cube_index][m]];
 						triangles[triangles_count].vertices[1] = vertices[index_table[cube_index][m + 1]];
@@ -6981,6 +7173,8 @@ const int traces_count = 2;
 Trace traces[traces_count];
 Vector2* particles;
 int particles_count;
+LineSegment* isolines[5];
+int isolines_count[5];
 
 TWEAKER_BOOL(debug_draw_colliders, false);
 TWEAKER_INT_RANGE(debug_bih_tree_depth, 0, -1, 16);
@@ -7226,6 +7420,25 @@ static bool system_initialise()
 		SAFE_DEALLOCATE(noise_square);
 	}
 
+	// Make 2D metaballs.
+	{
+		const int side = 24;
+		marching_squares::Grid grid;
+		grid.columns = side;
+		grid.rows = side;
+		grid.values = ALLOCATE(float, side * side);
+		marching_squares::draw_metaballs(&grid);
+
+		for(int i = 0; i < 5; ++i)
+		{
+			float isovalue = 0.14f * i + 0.1f;
+			Vector2 scale = {0.1f, 0.1f};
+			marching_squares::delineate(&grid, isovalue, scale, &isolines[i], &isolines_count[i]);
+		}
+
+		DEALLOCATE(grid.values);
+	}
+
 	return true;
 }
 
@@ -7245,6 +7458,10 @@ static void system_terminate(bool functions_loaded)
 		glDeleteTextures(1, &camera_fade_dither_pattern);
 		immediate::context_destroy();
 		SAFE_DEALLOCATE(particles);
+		for(int i = 0; i < 5; ++i)
+		{
+			SAFE_DEALLOCATE(isolines[i]);
+		}
 	}
 }
 
@@ -7403,6 +7620,21 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 	{
 		Vector3 bottom_left = {-3.0f, -1.0f, 0.0f};
 		draw_particles(particles, particles_count, bottom_left);
+	}
+
+	// Isolines test
+	{
+		for(int i = 0; i < 5; ++i)
+		{
+			for(int j = 0; j < isolines_count[i]; ++j)
+			{
+				LineSegment line = isolines[i][j];
+				Vector3 start = {line.vertices[0].x - 2.0f, 0.0f, line.vertices[0].y};
+				Vector3 end = {line.vertices[1].x - 2.0f, 0.0f, line.vertices[1].y};
+				immediate::add_line(start, end, colour_red);
+			}
+			immediate::draw();
+		}
 	}
 
 	// Draw the sky behind everything else.
