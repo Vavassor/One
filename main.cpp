@@ -1001,6 +1001,16 @@ float norm(Quaternion q)
 	return result;
 }
 
+Quaternion conjugate(Quaternion q)
+{
+	Quaternion result;
+	result.w = q.w;
+	result.x = -q.x;
+	result.y = -q.y;
+	result.z = -q.z;
+	return result;
+}
+
 Vector3 operator * (Quaternion q, Vector3 v)
 {
     Vector3 vector_part = {q.x, q.y, q.z};
@@ -5987,6 +5997,193 @@ void draw_metaballs(Grid* grid)
 
 } // namespace marching_squares
 
+// Voxmap.......................................................................
+
+struct Voxmap
+{
+	u8* voxels;
+	int columns;
+	int rows;
+	int slices;
+};
+
+static AABB get_bounds(Voxmap* map)
+{
+	AABB result;
+	result.min = vector3_zero;
+	result.max.x = map->columns;
+	result.max.y = map->rows;
+	result.max.z = map->slices;
+	return result;
+}
+
+static AABB bind_transformed_bounds(AABB box, Vector3 translation, Quaternion rotation)
+{
+	AABB result;
+
+	Vector3 corners[8];
+	Vector3 center = 0.5f * (box.max + box.min);
+	Vector3 extents = 0.5f * (box.max - box.min);
+	corners[0] = {+extents.x, +extents.y, +extents.z};
+	corners[1] = {+extents.x, +extents.y, -extents.z};
+	corners[2] = {+extents.x, -extents.y, +extents.z};
+	corners[3] = {+extents.x, -extents.y, -extents.z};
+	corners[4] = {-extents.x, +extents.y, +extents.z};
+	corners[5] = {-extents.x, +extents.y, -extents.z};
+	corners[6] = {-extents.x, -extents.y, +extents.z};
+	corners[7] = {-extents.x, -extents.y, -extents.z};
+
+	AABB rotated_bounds = {vector3_max, vector3_min};
+	for(int i = 0; i < 8; ++i)
+	{
+		Vector3 corner = rotation * corners[i] + center;
+		rotated_bounds.min = min3(rotated_bounds.min, corner);
+		rotated_bounds.max = max3(rotated_bounds.max, corner);
+	}
+
+	result.min = rotated_bounds.min + translation;
+	result.max = rotated_bounds.max + translation;
+
+	return result;
+}
+
+static AABB aabb_clip(AABB to, AABB from)
+{
+	AABB result;
+	result.min = max3(to.min, from.min);
+	result.max = min3(to.max, from.max);
+	return result;
+}
+
+static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quaternion rotation)
+{
+	AABB brush_bounds = get_bounds(brush);
+	AABB canvas_bounds = get_bounds(canvas);
+	canvas_bounds.max -= vector3_one;
+
+	AABB transformed_bounds = bind_transformed_bounds(brush_bounds, translation, rotation);
+	AABB draw_bounds = aabb_clip(canvas_bounds, transformed_bounds);
+
+	int min_x = round(draw_bounds.min.x);
+	int min_y = round(draw_bounds.min.y);
+	int min_z = round(draw_bounds.min.z);
+	int max_x = round(draw_bounds.max.x);
+	int max_y = round(draw_bounds.max.y);
+	int max_z = round(draw_bounds.max.z);
+
+	Vector3 transformed_center = 0.5f * (transformed_bounds.max + transformed_bounds.min);
+	Vector3 brush_center = 0.5f * (brush_bounds.max + brush_bounds.min);
+
+	for(int i = min_z; i <= max_z; ++i)
+	{
+		for(int j = min_y; j <= max_y; ++j)
+		{
+			for(int k = min_x; k <= max_x; ++k)
+			{
+				Vector3 canvas_voxel;
+				canvas_voxel.x = k;
+				canvas_voxel.y = j;
+				canvas_voxel.z = i;
+				Vector3 brush_voxel = conjugate(rotation) * (canvas_voxel - transformed_center) + brush_center;
+				int u = round(brush_voxel.x);
+				int v = round(brush_voxel.y);
+				int w = round(brush_voxel.z);
+
+				if(
+					u >= 0 && u < brush->columns &&
+					v >= 0 && v < brush->rows &&
+					w >= 0 && w < brush->slices)
+				{
+					int bc = brush->columns;
+					int br = brush->rows;
+					int brush_index = (bc * br * w) + (bc * v) + u;
+					int cc = canvas->columns;
+					int cr = canvas->rows;
+					int canvas_index = (cc * cr * i) + (cc * j) + k;
+					canvas->voxels[canvas_index] = brush->voxels[brush_index];
+				}
+			}
+		}
+	}
+}
+
+static void draw_checkers(Voxmap* map)
+{
+	int columns = map->columns;
+	int rows = map->rows;
+	int slices = map->slices;
+	for(int i = 0; i < slices; ++i)
+	{
+		for(int j = 0; j < rows; ++j)
+		{
+			for(int k = ~(i | j) & 1; k < columns; k += 2)
+			{
+				int index = (rows * columns * i) + (columns * j) + k;
+				map->voxels[index] = 0xff;
+			}
+		}
+	}
+}
+
+void draw_metaballs(Voxmap* map)
+{
+	int rc = map->rows * map->columns;
+	int c = map->columns;
+
+	AABB bounds;
+	bounds.min = vector3_zero;
+	bounds.max.x = map->columns - 1;
+	bounds.max.y = map->rows - 1;
+	bounds.max.z = map->slices - 1;
+
+	const int metaballs = 7;
+	for(int i = 0; i < metaballs; ++i)
+	{
+		Vector3 center;
+		center.x = arandom::float_range(bounds.min.x, bounds.max.x);
+		center.y = arandom::float_range(bounds.min.y, bounds.max.y);
+		center.z = arandom::float_range(bounds.min.z, bounds.max.z);
+
+		float radius = arandom::float_range(3.0f, 12.0f);
+
+		Vector3 extents = {radius, radius, radius};
+		AABB sphere_bounds = aabb_from_ellipsoid(center, extents);
+		sphere_bounds.min = max3(sphere_bounds.min, bounds.min);
+		sphere_bounds.max = min3(sphere_bounds.max, bounds.max);
+
+		int lx = sphere_bounds.min.x;
+		int ly = sphere_bounds.min.y;
+		int lz = sphere_bounds.min.z;
+		int hx = sphere_bounds.max.x;
+		int hy = sphere_bounds.max.y;
+		int hz = sphere_bounds.max.z;
+
+		float rs = radius * radius;
+
+		for(int j = lz; j <= hz; ++j)
+		{
+			for(int k = ly; k <= hy; ++k)
+			{
+				for(int m = lx; m <= hx; ++m)
+				{
+					Vector3 p;
+					p.x = m;
+					p.y = k;
+					p.z = j;
+					Vector3 v = p - center;
+					float d = squared_length(v);
+					if(d < rs)
+					{
+						float value = (rs - d) / rs;
+						int index = rc * j + c * k + m;
+						map->voxels[index] = fmin(map->voxels[index] + value, 1.0f);
+					}
+				}
+			}
+		}
+	}
+}
+
 // Marching Cubes...............................................................
 
 namespace marching_cubes {
@@ -6294,19 +6491,11 @@ static Vector3 interpolate_vertex(float isovalue, Vector3 p0, Vector3 p1, float 
 	return lerp(p0, p1, t);
 }
 
-struct Grid
+void triangulate(Voxmap* map, Vector3 scale, u8 isovalue, Triangle** result, int* result_count)
 {
-	float* values;
-	int columns;
-	int rows;
-	int slices;
-};
-
-void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** result, int* result_count)
-{
-	int columns = grid->columns;
-	int rows = grid->rows;
-	int slices = grid->slices;
+	int columns = map->columns;
+	int rows = map->rows;
+	int slices = map->slices;
 
 	int rc = columns * rows;
 	int c = columns;
@@ -6323,25 +6512,25 @@ void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** resu
 			{
 				// Take samples of the field at each corner of the cell.
 				float x[8];
-				x[0] = grid->values[rc * (i    ) + c * (j    ) + (k    )];
-				x[1] = grid->values[rc * (i + 1) + c * (j    ) + (k    )];
-				x[2] = grid->values[rc * (i + 1) + c * (j + 1) + (k    )];
-				x[3] = grid->values[rc * (i    ) + c * (j + 1) + (k    )];
-				x[4] = grid->values[rc * (i    ) + c * (j    ) + (k + 1)];
-				x[5] = grid->values[rc * (i + 1) + c * (j    ) + (k + 1)];
-				x[6] = grid->values[rc * (i + 1) + c * (j + 1) + (k + 1)];
-				x[7] = grid->values[rc * (i    ) + c * (j + 1) + (k + 1)];
+				x[0] = map->voxels[rc * (i    ) + c * (j    ) + (k    )];
+				x[1] = map->voxels[rc * (i + 1) + c * (j    ) + (k    )];
+				x[2] = map->voxels[rc * (i + 1) + c * (j + 1) + (k    )];
+				x[3] = map->voxels[rc * (i    ) + c * (j + 1) + (k    )];
+				x[4] = map->voxels[rc * (i    ) + c * (j    ) + (k + 1)];
+				x[5] = map->voxels[rc * (i + 1) + c * (j    ) + (k + 1)];
+				x[6] = map->voxels[rc * (i + 1) + c * (j + 1) + (k + 1)];
+				x[7] = map->voxels[rc * (i    ) + c * (j + 1) + (k + 1)];
 
 				// Calculate the positions of each vertex.
 				Vector3 p[8];
-				p[0] = {scale.x * (k    ), scale.y * (i    ), scale.z * (j    )};
-				p[1] = {scale.x * (k    ), scale.y * (i + 1), scale.z * (j    )};
-				p[2] = {scale.x * (k    ), scale.y * (i + 1), scale.z * (j + 1)};
-				p[3] = {scale.x * (k    ), scale.y * (i    ), scale.z * (j + 1)};
-				p[4] = {scale.x * (k + 1), scale.y * (i    ), scale.z * (j    )};
-				p[5] = {scale.x * (k + 1), scale.y * (i + 1), scale.z * (j    )};
-				p[6] = {scale.x * (k + 1), scale.y * (i + 1), scale.z * (j + 1)};
-				p[7] = {scale.x * (k + 1), scale.y * (i    ), scale.z * (j + 1)};
+				p[0] = {scale.x * (k    ), scale.y * (j    ), scale.z * (i    )};
+				p[1] = {scale.x * (k    ), scale.y * (j    ), scale.z * (i + 1)};
+				p[2] = {scale.x * (k    ), scale.y * (j + 1), scale.z * (i + 1)};
+				p[3] = {scale.x * (k    ), scale.y * (j + 1), scale.z * (i    )};
+				p[4] = {scale.x * (k + 1), scale.y * (j    ), scale.z * (i    )};
+				p[5] = {scale.x * (k + 1), scale.y * (j    ), scale.z * (i + 1)};
+				p[6] = {scale.x * (k + 1), scale.y * (j + 1), scale.z * (i + 1)};
+				p[7] = {scale.x * (k + 1), scale.y * (j + 1), scale.z * (i    )};
 
 				// Check the value at each corner of the cell and use that to
 				// build an index into the edge table.
@@ -6382,9 +6571,12 @@ void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** resu
 					// this cell's configuration.
 					for(int m = 0; m < 16 && index_table[cube_index][m] != -1; m += 3)
 					{
+						// Warning: the table's triangle indices are wound
+						// counterclockwise. This is opposite the winding of the
+						// desired output, so they're swapped here.
 						triangles[triangles_count].vertices[0] = vertices[index_table[cube_index][m]];
-						triangles[triangles_count].vertices[1] = vertices[index_table[cube_index][m + 1]];
-						triangles[triangles_count].vertices[2] = vertices[index_table[cube_index][m + 2]];
+						triangles[triangles_count].vertices[2] = vertices[index_table[cube_index][m + 1]];
+						triangles[triangles_count].vertices[1] = vertices[index_table[cube_index][m + 2]];
 						triangles_count += 1;
 					}
 				}
@@ -6394,65 +6586,6 @@ void triangulate_grid(Grid* grid, Vector3 scale, float isovalue, Triangle** resu
 
 	*result = triangles;
 	*result_count = triangles_count;
-}
-
-void draw_metaballs(Grid* grid)
-{
-	int rc = grid->rows * grid->columns;
-	int c = grid->columns;
-
-	AABB bounds;
-	bounds.min = vector3_zero;
-	bounds.max.x = grid->columns - 1;
-	bounds.max.y = grid->rows - 1;
-	bounds.max.z = grid->slices - 1;
-
-	const int metaballs = 7;
-	for(int i = 0; i < metaballs; ++i)
-	{
-		Vector3 center;
-		center.x = arandom::float_range(bounds.min.x, bounds.max.x);
-		center.y = arandom::float_range(bounds.min.y, bounds.max.y);
-		center.z = arandom::float_range(bounds.min.z, bounds.max.z);
-
-		float radius = arandom::float_range(3.0f, 12.0f);
-
-		Vector3 extents = {radius, radius, radius};
-		AABB sphere_bounds = aabb_from_ellipsoid(center, extents);
-		sphere_bounds.min = max3(sphere_bounds.min, bounds.min);
-		sphere_bounds.max = min3(sphere_bounds.max, bounds.max);
-
-		int lx = sphere_bounds.min.x;
-		int ly = sphere_bounds.min.y;
-		int lz = sphere_bounds.min.z;
-		int hx = sphere_bounds.max.x;
-		int hy = sphere_bounds.max.y;
-		int hz = sphere_bounds.max.z;
-
-		float rs = radius * radius;
-
-		for(int j = lz; j <= hz; ++j)
-		{
-			for(int k = ly; k <= hy; ++k)
-			{
-				for(int m = lx; m <= hx; ++m)
-				{
-					Vector3 p;
-					p.x = m;
-					p.y = k;
-					p.z = j;
-					Vector3 v = p - center;
-					float d = squared_length(v);
-					if(d < rs)
-					{
-						float value = (rs - d) / rs;
-						int index = rc * j + c * k + m;
-						grid->values[index] = fmin(grid->values[index] + value, 1.0f);
-					}
-				}
-			}
-		}
-	}
 }
 
 } // namespace marching_cubes
@@ -7235,20 +7368,47 @@ static bool system_initialise()
 	object_create(&metaballs);
 	{
 		const int side = 24;
-		marching_cubes::Grid grid;
-		grid.columns = side;
-		grid.rows = side;
-		grid.slices = side;
-		grid.values = ALLOCATE(float, side * side * side);
-		marching_cubes::draw_metaballs(&grid);
+		Voxmap canvas;
+		canvas.columns = side;
+		canvas.rows = side;
+		canvas.slices = side;
+		canvas.voxels = ALLOCATE(u8, side * side * side);
+
+		const int brush_side = 6;
+		Voxmap brush;
+		brush.columns = brush_side;
+		brush.rows = brush_side;
+		brush.slices = brush_side;
+		brush.voxels = ALLOCATE(u8, brush_side * brush_side * brush_side);
+		draw_checkers(&brush);
+
+		for(int i = 0; i < 1; ++i)
+		{
+			Vector3 tip;
+			tip.x = arandom::float_range(0.0f, side - 1);
+			tip.y = arandom::float_range(0.0f, side - 1);
+			tip.z = arandom::float_range(0.0f, side - 1);
+			tip = {side / 2.0f, side / 2.0f, side / 2.0f};
+
+			Vector3 axis;
+			axis.x = arandom::float_range(-1.0f, 1.0f);
+			axis.y = arandom::float_range(-1.0f, 1.0f);
+			axis.z = arandom::float_range(-1.0f, 1.0f);
+			float angle = arandom::float_range(0.0f, tau);
+			Quaternion rotation = axis_angle_rotation(axis, angle);
+
+			draw_voxmap(&canvas, &brush, tip, rotation);
+		}
+
+		DEALLOCATE(brush.voxels);
 
 		Triangle* triangles;
 		int triangles_count;
 		Vector3 scale = {0.1f, 0.1f, 0.1f};
-		float isovalue = 0.7f;
-		marching_cubes::triangulate_grid(&grid, scale, isovalue, &triangles, &triangles_count);
+		u8 isovalue = 128;
+		marching_cubes::triangulate(&canvas, scale, isovalue, &triangles, &triangles_count);
 
-		DEALLOCATE(grid.values);
+		DEALLOCATE(canvas.voxels);
 
 		object_copy_triangles(&metaballs, &objects_bounds[4], triangles, triangles_count);
 
