@@ -161,6 +161,12 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
+#if defined(COMPILER_MSVC)
+#define RESTRICT __restrict
+#elif defined(COMPILER_GCC)
+#define RESTRICT __restrict__
+#endif
+
 #define ASSERT(expression)\
 	assert(expression)
 
@@ -295,7 +301,7 @@ static const char* bool_to_string(bool b)
 
 // Use this instead of the function strncpy from string.h, because strncpy
 // doesn't guarantee null-termination and should be considered hazardous.
-static int copy_string(char* to, int to_size, const char* from)
+static int copy_string(char* RESTRICT to, int to_size, const char* RESTRICT from)
 {
 	ASSERT(from);
 	ASSERT(to);
@@ -797,6 +803,22 @@ Vector2 lerp(Vector2 v0, Vector2 v1, float t)
 	return result;
 }
 
+static Vector2 min2(Vector2 a, Vector2 b)
+{
+	Vector2 result;
+	result.x = fmin(a.x, b.x);
+	result.y = fmin(a.y, b.y);
+	return result;
+}
+
+static Vector2 max2(Vector2 a, Vector2 b)
+{
+	Vector2 result;
+	result.x = fmax(a.x, b.x);
+	result.y = fmax(a.y, b.y);
+	return result;
+}
+
 struct Vector3
 {
 	float x, y, z;
@@ -910,6 +932,11 @@ float length(Vector3 v)
 	return sqrt(squared_length(v));
 }
 
+float distance(Vector3 v0, Vector3 v1)
+{
+	return length(v1 - v0);
+}
+
 Vector3 normalise(Vector3 v)
 {
 	float l = length(v);
@@ -965,6 +992,24 @@ Vector3 reciprocal(Vector3 v)
 	result.x = 1.0f / v.x;
 	result.y = 1.0f / v.y;
 	result.z = 1.0f / v.z;
+	return result;
+}
+
+static Vector3 max3(Vector3 v0, Vector3 v1)
+{
+	Vector3 result;
+	result.x = fmax(v0.x, v1.x);
+	result.y = fmax(v0.y, v1.y);
+	result.z = fmax(v0.z, v1.z);
+	return result;
+}
+
+static Vector3 min3(Vector3 v0, Vector3 v1)
+{
+	Vector3 result;
+	result.x = fmin(v0.x, v1.x);
+	result.y = fmin(v0.y, v1.y);
+	result.z = fmin(v0.z, v1.z);
 	return result;
 }
 
@@ -1343,6 +1388,11 @@ Matrix4 inverse_transform(const Matrix4& m)
 
 // §2.1 Geometry Functions......................................................
 
+struct LineSegment
+{
+	Vector2 vertices[2];
+};
+
 struct Triangle
 {
 	// assumes clockwise winding for the front face
@@ -1395,28 +1445,11 @@ static bool aabb_overlap(AABB b0, AABB b1)
 
 static bool aabb_validate(AABB b)
 {
+	// Check that the box actually has positive volume.
 	return
 		b.max.x > b.min.x &&
 		b.max.y > b.min.y &&
 		b.max.z > b.min.z;
-}
-
-static Vector3 max3(Vector3 v0, Vector3 v1)
-{
-	Vector3 result;
-	result.x = fmax(v0.x, v1.x);
-	result.y = fmax(v0.y, v1.y);
-	result.z = fmax(v0.z, v1.z);
-	return result;
-}
-
-static Vector3 min3(Vector3 v0, Vector3 v1)
-{
-	Vector3 result;
-	result.x = fmin(v0.x, v1.x);
-	result.y = fmin(v0.y, v1.y);
-	result.z = fmin(v0.z, v1.z);
-	return result;
 }
 
 static AABB aabb_from_triangle(Triangle* triangle)
@@ -1443,6 +1476,14 @@ static AABB aabb_merge(AABB o0, AABB o1)
 	AABB result;
 	result.min = min3(o0.min, o1.min);
 	result.max = max3(o0.max, o1.max);
+	return result;
+}
+
+static AABB aabb_clip(AABB to, AABB from)
+{
+	AABB result;
+	result.min = max3(to.min, from.min);
+	result.max = min3(to.max, from.max);
 	return result;
 }
 
@@ -5815,27 +5856,6 @@ static Vector2* create_blue_noise(int samples, float side)
 
 // Marching Squares.............................................................
 
-struct LineSegment
-{
-	Vector2 vertices[2];
-};
-
-static Vector2 min2(Vector2 a, Vector2 b)
-{
-	Vector2 result;
-	result.x = fmin(a.x, b.x);
-	result.y = fmin(a.y, b.y);
-	return result;
-}
-
-static Vector2 max2(Vector2 a, Vector2 b)
-{
-	Vector2 result;
-	result.x = fmax(a.x, b.x);
-	result.y = fmax(a.y, b.y);
-	return result;
-}
-
 namespace marching_squares {
 
 static const u8 edge_table[16] =
@@ -5997,6 +6017,83 @@ void draw_metaballs(Grid* grid)
 
 } // namespace marching_squares
 
+static void segment_spline(Vector3* points, int points_count, Vector3* result, int segments)
+{
+	// Pad the ends of the polyline to use as terminal control points.
+	points[0] = (points[1] - points[2]) + points[1];
+	int end = points_count - 2;
+	points[end + 1] = (points[end] - points[end - 1]) + points[end];
+
+	auto blend = [](Vector3 p0, Vector3 p1, float t, float ta, float tb)
+	{
+		float u = (ta - t) / (ta - tb);
+		float v = (t - tb) / (ta - tb);
+		return (u * p0) + (v * p1);
+	};
+
+	for(int i = 0; i < points_count - 3; ++i)
+	{
+		// control points
+		Vector3 p[4];
+		p[0] = points[i];
+		p[1] = points[i + 1];
+		p[2] = points[i + 2];
+		p[3] = points[i + 3];
+
+		// knot parameters
+		float t[4];
+		t[0] = 0.0f;
+		t[1] = sqrt(distance(p[0], p[1])) + t[0];
+		t[2] = sqrt(distance(p[1], p[2])) + t[1];
+		t[3] = sqrt(distance(p[2], p[3])) + t[2];
+
+		for(int j = 0; j <= segments; ++j)
+		{
+			float q = j / static_cast<float>(segments);
+			float tj = lerp(t[1], t[2], q);
+			Vector3 a0 = blend(p[0], p[1], tj, t[1], t[0]);
+			Vector3 a1 = blend(p[1], p[2], tj, t[2], t[1]);
+			Vector3 a2 = blend(p[2], p[3], tj, t[3], t[2]);
+			Vector3 b0 = blend(a0, a1, tj, t[2], t[0]);
+			Vector3 b1 = blend(a1, a2, tj, t[3], t[1]);
+			Vector3 c  = blend(b0, b1, tj, t[2], t[1]);
+			result[(segments + 1) * i + j] = c;
+		}
+	}
+}
+
+static Vector3 random_point_in_box(AABB bounds)
+{
+	Vector3 result;
+	result.x = arandom::float_range(bounds.min.x, bounds.max.x);
+	result.y = arandom::float_range(bounds.min.y, bounds.max.y);
+	result.z = arandom::float_range(bounds.min.z, bounds.max.z);
+	return result;
+}
+
+static void generate_random_spline(Vector3** result, int* result_count)
+{
+	// Make a random polyline.
+	const int polyline_points_count = 5;
+	const int polyline_cap = polyline_points_count + 2;
+	AABB bounds = {{0.0f, 0.0f, 0.0f}, {24.0f, 24.0f, 24.0f}};
+	Vector3* polyline = ALLOCATE(Vector3, polyline_cap);
+	for(int i = 1; i <= polyline_points_count; ++i)
+	{
+		polyline[i] = random_point_in_box(bounds);
+	}
+
+	// Interpolate that into a spline and discard the polyline.
+	int segments = 5;
+	int spline_cap = (polyline_cap - 3) * (segments + 1);
+	Vector3* spline = ALLOCATE(Vector3, spline_cap);
+	segment_spline(polyline, polyline_cap, spline, segments);
+	DEALLOCATE(polyline);
+
+	*result = spline;
+	*result_count = spline_cap;
+}
+
 // Voxmap.......................................................................
 
 struct Voxmap
@@ -6047,14 +6144,6 @@ static AABB bind_transformed_bounds(AABB box, Vector3 translation, Quaternion ro
 	return result;
 }
 
-static AABB aabb_clip(AABB to, AABB from)
-{
-	AABB result;
-	result.min = max3(to.min, from.min);
-	result.max = min3(to.max, from.max);
-	return result;
-}
-
 static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quaternion rotation)
 {
 	AABB brush_bounds = get_bounds(brush);
@@ -6100,7 +6189,8 @@ static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quat
 					int cc = canvas->columns;
 					int cr = canvas->rows;
 					int canvas_index = (cc * cr * i) + (cc * j) + k;
-					canvas->voxels[canvas_index] = brush->voxels[brush_index];
+					u8 paint = brush->voxels[brush_index];
+					canvas->voxels[canvas_index] = MIN(canvas->voxels[canvas_index] + paint, 0xff);
 				}
 			}
 		}
@@ -7374,7 +7464,7 @@ static bool system_initialise()
 		canvas.slices = side;
 		canvas.voxels = ALLOCATE(u8, side * side * side);
 
-		const int brush_side = 6;
+		const int brush_side = 4;
 		Voxmap brush;
 		brush.columns = brush_side;
 		brush.rows = brush_side;
@@ -7382,13 +7472,13 @@ static bool system_initialise()
 		brush.voxels = ALLOCATE(u8, brush_side * brush_side * brush_side);
 		draw_checkers(&brush);
 
-		for(int i = 0; i < 1; ++i)
+		Vector3* spline;
+		int spline_count;
+		generate_random_spline(&spline, &spline_count);
+
+		for(int i = 0; i < spline_count; ++i)
 		{
-			Vector3 tip;
-			tip.x = arandom::float_range(0.0f, side - 1);
-			tip.y = arandom::float_range(0.0f, side - 1);
-			tip.z = arandom::float_range(0.0f, side - 1);
-			tip = {side / 2.0f, side / 2.0f, side / 2.0f};
+			Vector3 tip = spline[i];
 
 			Vector3 axis;
 			axis.x = arandom::float_range(-1.0f, 1.0f);
@@ -7399,6 +7489,8 @@ static bool system_initialise()
 
 			draw_voxmap(&canvas, &brush, tip, rotation);
 		}
+
+		DEALLOCATE(spline);
 
 		DEALLOCATE(brush.voxels);
 
