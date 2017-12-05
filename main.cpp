@@ -450,6 +450,9 @@ void go_to_sleep(Clock* clock, double amount_to_sleep);
 
 u64 get_timestamp_from_system();
 
+void yield();
+u64 get_timestamp();
+
 // §1.5 Logging Declarations....................................................
 
 enum class LogLevel
@@ -597,12 +600,10 @@ This software is distributed without any warranty.
 
 See <http://creativecommons.org/publicdomain/zero/1.0/>. */
 
-u64 x;
-
-static uint64_t splitmix64()
+static uint64_t splitmix64(uint64_t* x)
 {
-	x += UINT64_C(0x9E3779B97F4A7C15);
-	uint64_t z = x;
+	*x += UINT64_C(0x9E3779B97F4A7C15);
+	uint64_t z = *x;
 	z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
 	z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
 	return z ^ (z >> 31);
@@ -616,7 +617,11 @@ This software is distributed without any warranty.
 
 See <http://creativecommons.org/publicdomain/zero/1.0/>. */
 
-u64 s[2];
+struct Sequence
+{
+	u64 s[2];
+	u64 seed;
+};
 
 static inline u64 rotl(const u64 x, int k)
 {
@@ -624,33 +629,38 @@ static inline u64 rotl(const u64 x, int k)
 }
 
 // Xoroshiro128+
-u64 generate()
+u64 generate(Sequence* sequence)
 {
-	const u64 s0 = s[0];
-	u64 s1 = s[1];
+	const u64 s0 = sequence->s[0];
+	u64 s1 = sequence->s[1];
 	const u64 result = s0 + s1;
 
 	s1 ^= s0;
-	s[0] = rotl(s0, 55) ^ s1 ^ (s1 << 14); // a, b
-	s[1] = rotl(s1, 36); // c
+	sequence->s[0] = rotl(s0, 55) ^ s1 ^ (s1 << 14); // a, b
+	sequence->s[1] = rotl(s1, 36); // c
 
 	return result;
 }
 
 // End of Blackman & Vigna's code
 
-u64 seed(u64 value)
+u64 seed(Sequence* sequence, u64 value)
 {
-	u64 old_seed = x;
-	x = value;
-	s[0] = splitmix64();
-	s[1] = splitmix64();
+	u64 old_seed = sequence->seed;
+	sequence->seed = value;
+	sequence->s[0] = splitmix64(&sequence->seed);
+	sequence->s[1] = splitmix64(&sequence->seed);
 	return old_seed;
 }
 
-int int_range(int min, int max)
+u64 seed_by_time(Sequence* sequence)
 {
-	int x = generate() % static_cast<u64>(max - min + 1);
+	return seed(sequence, get_timestamp());
+}
+
+int int_range(Sequence* sequence, int min, int max)
+{
+	int x = generate(sequence) % static_cast<u64>(max - min + 1);
 	return min + x;
 }
 
@@ -665,9 +675,9 @@ static inline float to_float(u64 x)
 	return u.f - 1.0f;
 }
 
-float float_range(float min, float max)
+float float_range(Sequence* sequence, float min, float max)
 {
-	float f = to_float(generate());
+	float f = to_float(generate(sequence));
 	return min + f * (max - min);
 }
 
@@ -3236,7 +3246,7 @@ static void floor_destroy(Floor* floor)
 }
 
 // This box only has 4 faces.
-static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
+static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions, arandom::Sequence* randomness)
 {
 	bool resized0 = ENSURE_ARRAY_SIZE(floor->vertices, 16);
 	bool resized1 = ENSURE_ARRAY_SIZE(floor->indices, 24);
@@ -3287,7 +3297,7 @@ static bool floor_add_box(Floor* floor, Vector3 bottom_left, Vector3 dimensions)
 	floor->vertices[o + 15].normal   = -vector3_unit_y;
 	for(int i = 0; i < 16; ++i)
 	{
-		float rando = arandom::float_range(0.0f, 1.0f);
+		float rando = arandom::float_range(randomness, 0.0f, 1.0f);
 		Vector3 colour = {0.0f, 1.0f, rando};
 		floor->vertices[o + i].colour = rgb_to_u32(colour);
 	}
@@ -5708,10 +5718,10 @@ static Vector3 reflect(Vector3 v, Vector3 n)
 	return v - (2.0f * dot(v, n) / squared_length(n)) * n;
 }
 
-static Vector3 pick_point_in_triangle(Vector3 u, Vector3 v)
+static Vector3 pick_point_in_triangle(Vector3 u, Vector3 v, arandom::Sequence* randomness)
 {
-	float a0 = arandom::float_range(0.0f, 1.0f);
-	float a1 = arandom::float_range(0.0f, 1.0f);
+	float a0 = arandom::float_range(randomness, 0.0f, 1.0f);
+	float a1 = arandom::float_range(randomness, 0.0f, 1.0f);
 	Vector3 parallelogram_point = (a0 * u) + (a1 * v);
 	Vector3 triangle_point = parallelogram_point;
 	if(a0 + a1 > 1.0f)
@@ -5724,7 +5734,7 @@ static Vector3 pick_point_in_triangle(Vector3 u, Vector3 v)
 	return triangle_point;
 }
 
-static Vector3* create_particles(int* result_count)
+static Vector3* create_particles(int* result_count, arandom::Sequence* randomness)
 {
 	const int width = 16;
 	const int height = 16;
@@ -5750,7 +5760,7 @@ static Vector3* create_particles(int* result_count)
 			Vector3 point = {x, y, z};
 			Vector3 u = uv[row_flip];
 			Vector3 v = uv[row_flip + 1];
-			Vector3 nudge = pick_point_in_triangle(u, v);
+			Vector3 nudge = pick_point_in_triangle(u, v, randomness);
 			points[width * i + j] = point + nudge;
 		}
 	}
@@ -5784,7 +5794,7 @@ struct SpashCell
 	int count;
 };
 
-static Vector2* create_blue_noise(int samples, float side)
+static Vector2* create_blue_noise(int samples, float side, arandom::Sequence* randomness)
 {
 	const float factor = 1.0f;
 
@@ -5807,8 +5817,8 @@ static Vector2* create_blue_noise(int samples, float side)
 		int best_cell_y = 0;
 		for(int j = 0; j < candidates; ++j)
 		{
-			float x = arandom::float_range(0.0f, side);
-			float y = arandom::float_range(0.0f, side);
+			float x = arandom::float_range(randomness, 0.0f, side);
+			float y = arandom::float_range(randomness, 0.0f, side);
 			Vector2 candidate = {x, y};
 			// Search the grid cell where the candidate is for potentially
 			// close points.
@@ -5963,7 +5973,7 @@ void delineate(Grid* grid, float isovalue, Vector2 scale, LineSegment** result, 
 	*result_count = lines_count;
 }
 
-void draw_metaballs(Grid* grid)
+void draw_metaballs(Grid* grid, arandom::Sequence* randomness)
 {
 	int columns = grid->columns;
 	int rows = grid->rows;
@@ -5978,10 +5988,10 @@ void draw_metaballs(Grid* grid)
 	for(int i = 0; i < metaballs; ++i)
 	{
 		Vector2 center;
-		center.x = arandom::float_range(0.0f, columns - 1);
-		center.y = arandom::float_range(0.0f, rows - 1);
+		center.x = arandom::float_range(randomness, 0.0f, columns - 1);
+		center.y = arandom::float_range(randomness, 0.0f, rows - 1);
 
-		float radius = arandom::float_range(3.0f, 12.0f);
+		float radius = arandom::float_range(randomness, 3.0f, 12.0f);
 		float rs = radius * radius;
 		Vector2 extents = {radius, radius};
 
@@ -6062,16 +6072,16 @@ static void segment_spline(Vector3* points, int points_count, Vector3* result, i
 	}
 }
 
-static Vector3 random_point_in_box(AABB bounds)
+static Vector3 random_point_in_box(AABB bounds, arandom::Sequence* randomness)
 {
 	Vector3 result;
-	result.x = arandom::float_range(bounds.min.x, bounds.max.x);
-	result.y = arandom::float_range(bounds.min.y, bounds.max.y);
-	result.z = arandom::float_range(bounds.min.z, bounds.max.z);
+	result.x = arandom::float_range(randomness, bounds.min.x, bounds.max.x);
+	result.y = arandom::float_range(randomness, bounds.min.y, bounds.max.y);
+	result.z = arandom::float_range(randomness, bounds.min.z, bounds.max.z);
 	return result;
 }
 
-static void generate_random_spline(Vector3** result, int* result_count)
+static void generate_random_spline(arandom::Sequence* randomness, Vector3** result, int* result_count)
 {
 	// Make a random polyline.
 	const int polyline_points_count = 5;
@@ -6080,7 +6090,7 @@ static void generate_random_spline(Vector3** result, int* result_count)
 	Vector3* polyline = ALLOCATE(Vector3, polyline_cap);
 	for(int i = 1; i <= polyline_points_count; ++i)
 	{
-		polyline[i] = random_point_in_box(bounds);
+		polyline[i] = random_point_in_box(bounds, randomness);
 	}
 
 	// Interpolate that into a spline and discard the polyline.
@@ -6215,7 +6225,7 @@ static void draw_checkers(Voxmap* map)
 	}
 }
 
-void draw_metaballs(Voxmap* map)
+void draw_metaballs(Voxmap* map, arandom::Sequence* randomness)
 {
 	int rc = map->rows * map->columns;
 	int c = map->columns;
@@ -6230,11 +6240,11 @@ void draw_metaballs(Voxmap* map)
 	for(int i = 0; i < metaballs; ++i)
 	{
 		Vector3 center;
-		center.x = arandom::float_range(bounds.min.x, bounds.max.x);
-		center.y = arandom::float_range(bounds.min.y, bounds.max.y);
-		center.z = arandom::float_range(bounds.min.z, bounds.max.z);
+		center.x = arandom::float_range(randomness, bounds.min.x, bounds.max.x);
+		center.y = arandom::float_range(randomness, bounds.min.y, bounds.max.y);
+		center.z = arandom::float_range(randomness, bounds.min.z, bounds.max.z);
 
-		float radius = arandom::float_range(3.0f, 12.0f);
+		float radius = arandom::float_range(randomness, 3.0f, 12.0f);
 
 		Vector3 extents = {radius, radius, radius};
 		AABB sphere_bounds = aabb_from_ellipsoid(center, extents);
@@ -6908,7 +6918,7 @@ static void object_set_matrices(Object* object, Matrix4 model, Matrix4 view, Mat
 	object->normal_matrix = transpose(inverse_transform(model_view));
 }
 
-static void object_generate_floor(Object* object, AABB* bounds)
+static void object_generate_floor(Object* object, arandom::Sequence* randomness, AABB* bounds)
 {
 	Floor floor = {};
 	AABB box = {vector3_max, vector3_min};
@@ -6918,7 +6928,7 @@ static void object_generate_floor(Object* object, AABB* bounds)
 		{
 			Vector3 bottom_left = {0.4f * (x - 10.0f), 0.4f * y, -1.4f};
 			Vector3 dimensions = {0.4f, 0.4f, 0.4f};
-			bool added = floor_add_box(&floor, bottom_left, dimensions);
+			bool added = floor_add_box(&floor, bottom_left, dimensions, randomness);
 			if(!added)
 			{
 				floor_destroy(&floor);
@@ -6929,7 +6939,7 @@ static void object_generate_floor(Object* object, AABB* bounds)
 	}
 	Vector3 wall_position = {1.0f, 0.0f, -1.0f};
 	Vector3 wall_dimensions = {0.1f, 2.0f, 1.0f};
-	bool added = floor_add_box(&floor, wall_position, wall_dimensions);
+	bool added = floor_add_box(&floor, wall_position, wall_dimensions, randomness);
 	if(!added)
 	{
 		floor_destroy(&floor);
@@ -6940,14 +6950,14 @@ static void object_generate_floor(Object* object, AABB* bounds)
 	floor_destroy(&floor);
 }
 
-static void object_generate_player(Object* object, AABB* bounds)
+static void object_generate_player(Object* object, arandom::Sequence* randomness, AABB* bounds)
 {
 	Floor floor = {};
 	Vector3 dimensions = {0.5f, 0.5f, 0.7f};
 	Vector3 position = -dimensions / 2.0f;
 	bounds->min = position;
 	bounds->max = position + dimensions;
-	bool added = floor_add_box(&floor, position, dimensions);
+	bool added = floor_add_box(&floor, position, dimensions, randomness);
 	if(!added)
 	{
 		floor_destroy(&floor);
@@ -6996,7 +7006,7 @@ static void generate_normals_from_faces(VertexPNC* vertices, int vertices_count,
 	DEALLOCATE(seen);
 }
 
-static void object_generate_terrain(Object* object, AABB* bounds, Triangle** triangles, int* triangles_count)
+static void object_generate_terrain(Object* object, arandom::Sequence* randomness, AABB* bounds, Triangle** triangles, int* triangles_count)
 {
 	const int side = 10;
 	const int area = side * side;
@@ -7016,7 +7026,7 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 		{
 			float fx = static_cast<float>(x) - 5.0f;
 			float fy = static_cast<float>(y) - 1.0f;
-			float fz = arandom::float_range(-0.5f, 0.5f) - 1.0f;
+			float fz = arandom::float_range(randomness, -0.5f, 0.5f) - 1.0f;
 			vertices[columns * y + x].position = {fx, fy, fz};
 		}
 	}
@@ -7032,9 +7042,9 @@ static void object_generate_terrain(Object* object, AABB* bounds, Triangle** tri
 	// Generate random vertex colours.
 	for(int i = 0; i < vertices_count; ++i)
 	{
-		float h = arandom::float_range(0.0f, 0.1f);
-		float s = arandom::float_range(0.7f, 0.9f);
-		float l = arandom::float_range(0.5f, 1.0f);
+		float h = arandom::float_range(randomness, 0.0f, 0.1f);
+		float s = arandom::float_range(randomness, 0.7f, 0.9f);
+		float l = arandom::float_range(randomness, 0.5f, 1.0f);
 		Vector3 rgb = hsl_to_rgb({h, s, l});
 		Vector4 rgba = make_vector4(rgb);
 		vertices[i].colour = rgba_to_u32(rgba);
@@ -7383,6 +7393,7 @@ GLuint nearest_repeat;
 Matrix4 projection;
 Matrix4 sky_projection;
 Matrix4 screen_projection;
+arandom::Sequence randomness;
 int objects_count = 5;
 Object objects[5];
 AABB objects_bounds[5];
@@ -7411,6 +7422,8 @@ static bool system_initialise()
 {
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
+
+	arandom::seed_by_time(&randomness);
 
 	Object tetrahedron;
 	Vector3 positions[4] =
@@ -7441,17 +7454,17 @@ static bool system_initialise()
 
 	Object floor;
 	object_create(&floor);
-	object_generate_floor(&floor, &objects_bounds[1]);
+	object_generate_floor(&floor, &randomness, &objects_bounds[1]);
 	objects[1] = floor;
 
 	Object player;
 	object_create(&player);
-	object_generate_player(&player, &objects_bounds[2]);
+	object_generate_player(&player, &randomness, &objects_bounds[2]);
 	objects[2] = player;
 
 	Object terrain;
 	object_create(&terrain);
-	object_generate_terrain(&terrain, &objects_bounds[3], &terrain_triangles, &terrain_triangles_count);
+	object_generate_terrain(&terrain, &randomness, &objects_bounds[3], &terrain_triangles, &terrain_triangles_count);
 	objects[3] = terrain;
 
 	Object metaballs;
@@ -7474,17 +7487,17 @@ static bool system_initialise()
 
 		Vector3* spline;
 		int spline_count;
-		generate_random_spline(&spline, &spline_count);
+		generate_random_spline(&randomness, &spline, &spline_count);
 
 		for(int i = 0; i < spline_count; ++i)
 		{
 			Vector3 tip = spline[i];
 
 			Vector3 axis;
-			axis.x = arandom::float_range(-1.0f, 1.0f);
-			axis.y = arandom::float_range(-1.0f, 1.0f);
-			axis.z = arandom::float_range(-1.0f, 1.0f);
-			float angle = arandom::float_range(0.0f, tau);
+			axis.x = arandom::float_range(&randomness, -1.0f, 1.0f);
+			axis.y = arandom::float_range(&randomness, -1.0f, 1.0f);
+			axis.z = arandom::float_range(&randomness, -1.0f, 1.0f);
+			float angle = arandom::float_range(&randomness, 0.0f, tau);
 			Quaternion rotation = axis_angle_rotation(axis, angle);
 
 			draw_voxmap(&canvas, &brush, tip, rotation);
@@ -7607,7 +7620,7 @@ static bool system_initialise()
 	{
 		const float side = 5.0f;
 		int noise_square_count = 512;
-		Vector2* noise_square = create_blue_noise(noise_square_count, side);
+		Vector2* noise_square = create_blue_noise(noise_square_count, side, &randomness);
 		particles = ALLOCATE(Vector2, noise_square_count);
 #if 0
 		const int map_side = 20;
@@ -7643,7 +7656,7 @@ static bool system_initialise()
 			int x = map_side * p.x / side;
 			int y = map_side * p.y / side;
 			float m = map[map_side * y + x] / 255.0f;
-			if(arandom::float_range(0.0f, 1.0f) < m)
+			if(arandom::float_range(&randomness, 0.0f, 1.0f) < m)
 			{
 				particles[particles_count] = p;
 				particles_count += 1;
@@ -7679,7 +7692,7 @@ static bool system_initialise()
 		grid.columns = side;
 		grid.rows = side;
 		grid.values = ALLOCATE(float, side * side);
-		marching_squares::draw_metaballs(&grid);
+		marching_squares::draw_metaballs(&grid, &randomness);
 
 		for(int i = 0; i < 5; ++i)
 		{
@@ -9046,6 +9059,7 @@ struct Voice
 {
 	ADSR amp_envelope;
 	ADSR pitch_envelope;
+	arandom::Sequence randomness;
 	float phase_accumulator;
 	float phase_step;
 	float fm_phase_accumulator;
@@ -9070,6 +9084,7 @@ static void voice_reset(Voice* voice)
 {
 	envelope_reset(&voice->amp_envelope);
 	envelope_reset(&voice->pitch_envelope);
+	arandom::seed_by_time(&voice->randomness);
 	voice->phase_accumulator = 0.0f;
 	voice->phase_step = 0.0f;
 	voice->fm_phase_accumulator = 0.0f;
@@ -9307,7 +9322,7 @@ void track_setup(Track* track)
 	track->style = 0;
 }
 
-void track_generate(Track* track, double finish_time, Composer* composer)
+void track_generate(Track* track, double finish_time, Composer* composer, arandom::Sequence* randomness)
 {
 	Composer::State* state = &composer->states[composer->state];
 
@@ -9391,12 +9406,12 @@ void track_generate(Track* track, double finish_time, Composer* composer)
 		}
 
 		int degrees = pentatonic_major[0];
-		int degree = arandom::int_range(0, degrees - 1);
+		int degree = arandom::int_range(randomness, 0, degrees - 1);
 		int pitch_class = pentatonic_major[degree + 1];
 
 		int lowest_octave = track->octave;
 		int highest_octave = track->octave + track->octave_range;
-		int octave = arandom::int_range(lowest_octave, highest_octave);
+		int octave = arandom::int_range(randomness, lowest_octave, highest_octave);
 
 		Track::Note* note = &track->notes[i];
 		note->pitch = 12 * octave + pitch_class;
@@ -10219,7 +10234,7 @@ static float process_noise(Voice* voice, Instrument* instrument, float theta, in
 	float high = frequency_given_interval(theta, passband_extent);
 	BPF* filter = &instrument->noise.filter;
 	bpf_set_passband(filter, low, high, delta_time);
-	float value = arandom::float_range(-1.0f, 1.0f);
+	float value = arandom::float_range(&voice->randomness, -1.0f, 1.0f);
 	value = bpf_apply(filter, value);
 	return value;
 }
@@ -10793,6 +10808,7 @@ namespace
 	Instrument instruments[tracks_count];
 	Composer composer;
 	History history;
+	arandom::Sequence randomness;
 	double time;
 	bool boop_on;
 }
@@ -10876,40 +10892,43 @@ void system_prepare_for_loop()
 		Voice* voice = &voices[i];
 		envelope_setup(&voice->amp_envelope);
 		envelope_setup(&voice->pitch_envelope);
+		arandom::seed_by_time(&voice->randomness);
 	}
 
 	voice_map_setup(voice_map, voice_count);
 
 	// Setup the composer and tracks.
 
+	arandom::seed_by_time(&randomness);
+
 	compose_form(&composer);
 
 	track_setup(&tracks[0]);
-	track_generate(&tracks[0], first_section_length, &composer);
+	track_generate(&tracks[0], first_section_length, &composer, &randomness);
 
 	track_setup(&tracks[1]);
 	tracks[1].octave = 4;
 	tracks[1].octave_range = 0;
 	tracks[1].style = 1;
-	track_generate(&tracks[1], first_section_length, &composer);
+	track_generate(&tracks[1], first_section_length, &composer, &randomness);
 
 	track_setup(&tracks[2]);
 	tracks[2].octave = 4;
 	tracks[2].octave_range = 0;
 	tracks[2].style = 1;
-	track_generate(&tracks[2], first_section_length, &composer);
+	track_generate(&tracks[2], first_section_length, &composer, &randomness);
 
 	track_setup(&tracks[3]);
 	tracks[3].octave = 4;
 	tracks[3].octave_range = 1;
 	tracks[3].style = 2;
-	track_generate(&tracks[3], first_section_length, &composer);
+	track_generate(&tracks[3], first_section_length, &composer, &randomness);
 
 	track_setup(&tracks[4]);
 	tracks[4].octave = 5;
 	tracks[4].octave_range = 0;
 	tracks[4].style = 3;
-	track_generate(&tracks[4], first_section_length, &composer);
+	track_generate(&tracks[4], first_section_length, &composer, &randomness);
 
 	// Setup test instruments and streams.
 
@@ -11103,7 +11122,7 @@ static void system_update_loop()
 			{
 				composer_update_state(&composer);
 			}
-			track_generate(track, section_finish_time, &composer);
+			track_generate(track, section_finish_time, &composer, &randomness);
 
 			cue_time_reset = true;
 
@@ -11156,9 +11175,6 @@ static void system_update_loop()
 } // namespace audio
 
 // 6. Profile...................................................................
-
-void yield();
-u64 get_timestamp();
 
 namespace profile {
 
@@ -12318,8 +12334,6 @@ void system_send_message(Message* message)
 #include <X11/X.h>
 #include <X11/Xlib.h>
 
-#include <cstdlib>
-
 namespace
 {
 	Display* display;
@@ -12395,8 +12409,6 @@ static bool main_create()
 		LOG_ERROR("Failed to attach the GLX context to the window.");
 		return false;
 	}
-
-	arandom::seed(time(nullptr));
 
 	functions_loaded = ogl_load_functions();
 	if(!functions_loaded)
