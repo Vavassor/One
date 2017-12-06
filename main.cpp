@@ -1295,17 +1295,17 @@ Matrix4 compose_transform(Vector3 position, Quaternion orientation, Vector3 scal
 	Matrix4 result;
 
 	result[0]  = (1.0f - 2.0f * (yy + zz)) * scale.x;
-	result[1]  = (       2.0f * (xy - zw)) * scale.y;
-	result[2]  = (       2.0f * (xz + yw)) * scale.z;
+	result[1]  = (       2.0f * (xy + zw)) * scale.y;
+	result[2]  = (       2.0f * (xz - yw)) * scale.z;
 	result[3]  = position.x;
 
-	result[4]  = (       2.0f * (xy + zw)) * scale.x;
+	result[4]  = (       2.0f * (xy - zw)) * scale.x;
 	result[5]  = (1.0f - 2.0f * (xx + zz)) * scale.y;
-	result[6]  = (       2.0f * (yz - xw)) * scale.z;
+	result[6]  = (       2.0f * (yz + xw)) * scale.z;
 	result[7]  = position.y;
 
-	result[8]  = (       2.0f * (xw - yw)) * scale.x;
-	result[9]  = (       2.0f * (yz + xw)) * scale.y;
+	result[8]  = (       2.0f * (xz + yw)) * scale.x;
+	result[9]  = (       2.0f * (yz - xw)) * scale.y;
 	result[10] = (1.0f - 2.0f * (xx + yy)) * scale.z;
 	result[11] = position.z;
 
@@ -1351,22 +1351,22 @@ Matrix4 inverse_transform(const Matrix4& m)
 	// The scale can be extracted from the rotation data by just taking the
 	// length of the first three row vectors.
 
-	float dx = sqrt(m[0] * m[0] + m[1] * m[1] + m[2]  * m[2]);
-	float dy = sqrt(m[4] * m[4] + m[5] * m[5] + m[6]  * m[6]);
-	float dz = sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+	float dx = sqrt(m[0] * m[0] + m[4] * m[4] + m[8]  * m[8]);
+	float dy = sqrt(m[1] * m[1] + m[5] * m[5] + m[9]  * m[9]);
+	float dz = sqrt(m[2] * m[2] + m[6] * m[6] + m[10] * m[10]);
 
 	// The extracted scale can then be divided out to isolate the rotation rows.
 
 	float m00 = m[0] / dx;
-	float m10 = m[4] / dy;
-	float m20 = m[8] / dz;
+	float m10 = m[4] / dx;
+	float m20 = m[8] / dx;
 
-	float m01 = m[1] / dx;
+	float m01 = m[1] / dy;
 	float m11 = m[5] / dy;
-	float m21 = m[9] / dz;
+	float m21 = m[9] / dy;
 
-	float m02 = m[2] / dx;
-	float m12 = m[6] / dy;
+	float m02 = m[2] / dz;
+	float m12 = m[6] / dz;
 	float m22 = m[10] / dz;
 
 	// The inverse of the translation elements is the negation of the
@@ -1381,7 +1381,15 @@ Matrix4 inverse_transform(const Matrix4& m)
 	// inverse translation, they can be modified with the inverse dilation.
 
 	m00 /= dx;
+	m10 /= dx;
+	m20 /= dx;
+
+	m01 /= dy;
 	m11 /= dy;
+	m21 /= dy;
+
+	m02 /= dz;
+	m12 /= dz;
 	m22 /= dz;
 
 	// Put everything in, making sure to place the rotation elements in
@@ -5866,6 +5874,13 @@ static Vector2* create_blue_noise(int samples, float side, arandom::Sequence* ra
 
 // Marching Squares.............................................................
 
+struct Floatmap
+{
+	float* values;
+	int columns;
+	int rows;
+};
+
 namespace marching_squares {
 
 static const u8 edge_table[16] =
@@ -5896,13 +5911,6 @@ static const s8 index_table[16][4] =
 	{-1, -1, -1, -1},
 };
 
-struct Grid
-{
-	float* values;
-	int columns;
-	int rows;
-};
-
 static Vector2 interpolate_vertex(float isovalue, Vector2 p0, Vector2 p1, float i0, float i1)
 {
 	if(almost_equals(i0, i1))
@@ -5913,10 +5921,10 @@ static Vector2 interpolate_vertex(float isovalue, Vector2 p0, Vector2 p1, float 
 	return lerp(p0, p1, t);
 }
 
-void delineate(Grid* grid, float isovalue, Vector2 scale, LineSegment** result, int* result_count)
+void delineate(Floatmap* map, float isovalue, Vector2 scale, LineSegment** result, int* result_count)
 {
-	int columns = grid->columns;
-	int rows = grid->rows;
+	int columns = map->columns;
+	int rows = map->rows;
 
 	LineSegment* lines = nullptr;
 	int lines_count = 0;
@@ -5927,10 +5935,10 @@ void delineate(Grid* grid, float isovalue, Vector2 scale, LineSegment** result, 
 		for(int j = 0; j < columns - 1; ++j)
 		{
 			float x[4];
-			x[0] = grid->values[columns * (i    ) + (j    )];
-			x[1] = grid->values[columns * (i    ) + (j + 1)];
-			x[2] = grid->values[columns * (i + 1) + (j + 1)];
-			x[3] = grid->values[columns * (i + 1) + (j    )];
+			x[0] = map->values[columns * (i    ) + (j    )];
+			x[1] = map->values[columns * (i    ) + (j + 1)];
+			x[2] = map->values[columns * (i + 1) + (j + 1)];
+			x[3] = map->values[columns * (i + 1) + (j    )];
 
 			Vector2 p[4];
 			p[0] = {static_cast<float>(j    ), static_cast<float>(i    )};
@@ -5973,10 +5981,10 @@ void delineate(Grid* grid, float isovalue, Vector2 scale, LineSegment** result, 
 	*result_count = lines_count;
 }
 
-void draw_metaballs(Grid* grid, arandom::Sequence* randomness)
+void draw_metaballs(Floatmap* map, arandom::Sequence* randomness)
 {
-	int columns = grid->columns;
-	int rows = grid->rows;
+	int columns = map->columns;
+	int rows = map->rows;
 
 	Vector2 grid_min = vector2_zero;
 	Vector2 grid_max;
@@ -6018,7 +6026,7 @@ void draw_metaballs(Grid* grid, arandom::Sequence* randomness)
 				{
 					float value = (rs - d) / rs;
 					int index = columns * j + k;
-					grid->values[index] = fmin(grid->values[index] + value, 1.0f);
+					map->values[index] = fmin(map->values[index] + value, 1.0f);
 				}
 			}
 		}
@@ -6026,6 +6034,8 @@ void draw_metaballs(Grid* grid, arandom::Sequence* randomness)
 }
 
 } // namespace marching_squares
+
+// Spline.......................................................................
 
 static void segment_spline(Vector3* points, int points_count, Vector3* result, int segments)
 {
@@ -6094,7 +6104,7 @@ static void generate_random_spline(arandom::Sequence* randomness, Vector3** resu
 	}
 
 	// Interpolate that into a spline and discard the polyline.
-	int segments = 5;
+	int segments = 10;
 	int spline_cap = (polyline_cap - 3) * (segments + 1);
 	Vector3* spline = ALLOCATE(Vector3, spline_cap);
 	segment_spline(polyline, polyline_cap, spline, segments);
@@ -6124,43 +6134,38 @@ static AABB get_bounds(Voxmap* map)
 	return result;
 }
 
-static AABB bind_transformed_bounds(AABB box, Vector3 translation, Quaternion rotation)
+static Vector3 max_rotated_extent(Vector3 v, Matrix4 m)
+{
+	Vector3 result;
+	result.x = (abs(m[0]) * v.x) + (abs(m[1]) * v.y) + (abs(m[2])  * v.z);
+	result.y = (abs(m[4]) * v.x) + (abs(m[5]) * v.y) + (abs(m[6])  * v.z);
+	result.z = (abs(m[8]) * v.x) + (abs(m[9]) * v.y) + (abs(m[10]) * v.z);
+	return result;
+}
+
+static AABB bounds_after_transform(AABB box, Matrix4 transform)
 {
 	AABB result;
 
-	Vector3 corners[8];
 	Vector3 center = 0.5f * (box.max + box.min);
 	Vector3 extents = 0.5f * (box.max - box.min);
-	corners[0] = {+extents.x, +extents.y, +extents.z};
-	corners[1] = {+extents.x, +extents.y, -extents.z};
-	corners[2] = {+extents.x, -extents.y, +extents.z};
-	corners[3] = {+extents.x, -extents.y, -extents.z};
-	corners[4] = {-extents.x, +extents.y, +extents.z};
-	corners[5] = {-extents.x, +extents.y, -extents.z};
-	corners[6] = {-extents.x, -extents.y, +extents.z};
-	corners[7] = {-extents.x, -extents.y, -extents.z};
 
-	AABB rotated_bounds = {vector3_max, vector3_min};
-	for(int i = 0; i < 8; ++i)
-	{
-		Vector3 corner = rotation * corners[i] + center;
-		rotated_bounds.min = min3(rotated_bounds.min, corner);
-		rotated_bounds.max = max3(rotated_bounds.max, corner);
-	}
+	center = transform * center;
+	extents = max_rotated_extent(extents, transform);
 
-	result.min = rotated_bounds.min + translation;
-	result.max = rotated_bounds.max + translation;
+	result.min = center - extents;
+	result.max = center + extents;
 
 	return result;
 }
 
-static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quaternion rotation)
+static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Matrix4 transform)
 {
 	AABB brush_bounds = get_bounds(brush);
 	AABB canvas_bounds = get_bounds(canvas);
 	canvas_bounds.max -= vector3_one;
 
-	AABB transformed_bounds = bind_transformed_bounds(brush_bounds, translation, rotation);
+	AABB transformed_bounds = bounds_after_transform(brush_bounds, transform);
 	AABB draw_bounds = aabb_clip(canvas_bounds, transformed_bounds);
 
 	int min_x = round(draw_bounds.min.x);
@@ -6170,8 +6175,7 @@ static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quat
 	int max_y = round(draw_bounds.max.y);
 	int max_z = round(draw_bounds.max.z);
 
-	Vector3 transformed_center = 0.5f * (transformed_bounds.max + transformed_bounds.min);
-	Vector3 brush_center = 0.5f * (brush_bounds.max + brush_bounds.min);
+	Matrix4 inverse = inverse_transform(transform);
 
 	for(int i = min_z; i <= max_z; ++i)
 	{
@@ -6183,7 +6187,7 @@ static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Vector3 translation, Quat
 				canvas_voxel.x = k;
 				canvas_voxel.y = j;
 				canvas_voxel.z = i;
-				Vector3 brush_voxel = conjugate(rotation) * (canvas_voxel - transformed_center) + brush_center;
+				Vector3 brush_voxel = inverse * canvas_voxel;
 				int u = round(brush_voxel.x);
 				int v = round(brush_voxel.y);
 				int w = round(brush_voxel.z);
@@ -7500,7 +7504,11 @@ static bool system_initialise()
 			float angle = arandom::float_range(&randomness, 0.0f, tau);
 			Quaternion rotation = axis_angle_rotation(axis, angle);
 
-			draw_voxmap(&canvas, &brush, tip, rotation);
+			Vector3 scale = {1.2f, 1.2f, 1.2f};
+
+			Matrix4 transform = compose_transform(tip, rotation, scale);
+
+			draw_voxmap(&canvas, &brush, transform);
 		}
 
 		DEALLOCATE(spline);
@@ -7688,20 +7696,20 @@ static bool system_initialise()
 	// Make 2D metaballs.
 	{
 		const int side = 24;
-		marching_squares::Grid grid;
-		grid.columns = side;
-		grid.rows = side;
-		grid.values = ALLOCATE(float, side * side);
-		marching_squares::draw_metaballs(&grid, &randomness);
+		Floatmap map;
+		map.columns = side;
+		map.rows = side;
+		map.values = ALLOCATE(float, side * side);
+		marching_squares::draw_metaballs(&map, &randomness);
 
 		for(int i = 0; i < 5; ++i)
 		{
 			float isovalue = 0.14f * i + 0.1f;
 			Vector2 scale = {0.1f, 0.1f};
-			marching_squares::delineate(&grid, isovalue, scale, &isolines[i], &isolines_count[i]);
+			marching_squares::delineate(&map, isovalue, scale, &isolines[i], &isolines_count[i]);
 		}
 
-		DEALLOCATE(grid.values);
+		DEALLOCATE(map.values);
 	}
 
 	return true;
