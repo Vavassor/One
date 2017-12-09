@@ -942,6 +942,11 @@ float length(Vector3 v)
 	return sqrt(squared_length(v));
 }
 
+float squared_distance(Vector3 v0, Vector3 v1)
+{
+	return squared_length(v1 - v1);
+}
+
 float distance(Vector3 v0, Vector3 v1)
 {
 	return length(v1 - v0);
@@ -1101,6 +1106,76 @@ Quaternion axis_angle_rotation(Vector3 axis, float angle)
 }
 
 // §1.12 Matrices...............................................................
+
+struct Matrix3
+{
+	float elements[9]; // in row-major order
+
+	float& operator [] (int index) {return elements[index];}
+	const float& operator [] (int index) const {return elements[index];}
+};
+
+const Matrix3 matrix3_identity =
+{{
+	1.0f, 0.0f, 0.0f,
+	0.0f, 1.0f, 0.0f,
+	0.0f, 0.0f, 1.0f
+}};
+
+Matrix3 transpose(Matrix3 m)
+{
+	return
+	{{
+		m[0], m[3], m[6],
+		m[1], m[4], m[7],
+		m[2], m[5], m[8],
+	}};
+}
+
+Vector2 operator * (Matrix3 m, Vector3 v)
+{
+	Vector2 result;
+	result.x = (m[0] * v.x) + (m[1] * v.y) + (m[2] * v.z);
+	result.y = (m[3] * v.x) + (m[4] * v.y) + (m[5] * v.z);
+	return result;
+}
+
+Matrix3 orthogonal_basis(Vector3 v)
+{
+	Matrix3 result;
+	float l = (v.x * v.x) + (v.y * v.y);
+	if(!almost_zero(l))
+	{
+		float d = sqrt(l);
+		Vector3 n = {v.y / d, -v.x / d, 0.0f};
+		result[0] = n.x;
+		result[1] = n.y;
+		result[2] = n.z;
+		result[3] = (-v.z * n.y);
+		result[4] = (v.z * n.x);
+		result[5] = (v.x * n.y) - (v.y * n.x);
+	}
+	else
+	{
+		if(v.z < 0.0f)
+		{
+			result[0] = -1.0f;
+		}
+		else
+		{
+			result[0] = 1.0f;
+		}
+		result[1] = 0.0f;
+		result[2] = 0.0f;
+		result[3] = 0.0f;
+		result[4] = 1.0f;
+		result[5] = 0.0f;
+	}
+	result[6] = v.x;
+	result[7] = v.y;
+	result[8] = v.z;
+	return result;
+}
 
 struct Matrix4
 {
@@ -2803,7 +2878,10 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_DEPTH_BUFFER_BIT 0x00000100
 #define GL_DEPTH_TEST 0x0B71
 #define GL_FALSE 0
+#define GL_FILL 0x1B02
 #define GL_FLOAT 0x1406
+#define GL_FRONT_AND_BACK 0x0408
+#define GL_LINE 0x1B01
 #define GL_LINEAR 0x2601
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703
 #define GL_LINEAR_MIPMAP_NEAREST 0x2701
@@ -2861,6 +2939,7 @@ void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
 void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
 void (APIENTRYA *p_glDisable)(GLenum cap) = nullptr;
 void (APIENTRYA *p_glEnable)(GLenum cap) = nullptr;
+void (APIENTRYA *p_glPolygonMode)(GLenum face, GLenum mode) = nullptr;
 void (APIENTRYA *p_glTexImage2D)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels) = nullptr;
 void (APIENTRYA *p_glViewport)(GLint x, GLint y, GLsizei width, GLsizei height) = nullptr;
 
@@ -2927,6 +3006,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 #define glDepthMask p_glDepthMask
 #define glDisable p_glDisable
 #define glEnable p_glEnable
+#define glPolygonMode p_glPolygonMode
 #define glTexImage2D p_glTexImage2D
 #define glViewport p_glViewport
 
@@ -3214,6 +3294,16 @@ static u32 texcoord_to_u32(Vector2 v)
 	ASSERT(is_unorm(v.x));
 	ASSERT(is_unorm(v.y));
 	return pack_unorm16x2(v);
+}
+
+static u32 broadcast_u8(u8 x)
+{
+	Pack4x8 u;
+	u.r = x;
+	u.g = x;
+	u.b = x;
+	u.a = x;
+	return u.packed;
 }
 
 struct VertexPC
@@ -6134,6 +6224,16 @@ static AABB get_bounds(Voxmap* map)
 	return result;
 }
 
+static AABB get_bounds_excluding_max(Voxmap* map)
+{
+	AABB result;
+	result.min = vector3_zero;
+	result.max.x = map->columns - 1;
+	result.max.y = map->rows - 1;
+	result.max.z = map->slices - 1;
+	return result;
+}
+
 static Vector3 max_rotated_extent(Vector3 v, Matrix4 m)
 {
 	Vector3 result;
@@ -6162,8 +6262,7 @@ static AABB bounds_after_transform(AABB box, Matrix4 transform)
 static void draw_voxmap(Voxmap* canvas, Voxmap* brush, Matrix4 transform)
 {
 	AABB brush_bounds = get_bounds(brush);
-	AABB canvas_bounds = get_bounds(canvas);
-	canvas_bounds.max -= vector3_one;
+	AABB canvas_bounds = get_bounds_excluding_max(canvas);
 
 	AABB transformed_bounds = bounds_after_transform(brush_bounds, transform);
 	AABB draw_bounds = aabb_clip(canvas_bounds, transformed_bounds);
@@ -6229,7 +6328,7 @@ static void draw_checkers(Voxmap* map)
 	}
 }
 
-void draw_metaballs(Voxmap* map, arandom::Sequence* randomness)
+static void draw_metaballs(Voxmap* map, arandom::Sequence* randomness)
 {
 	int rc = map->rows * map->columns;
 	int c = map->columns;
@@ -6280,11 +6379,62 @@ void draw_metaballs(Voxmap* map, arandom::Sequence* randomness)
 					{
 						float value = (rs - d) / rs;
 						int index = rc * j + c * k + m;
-						map->voxels[index] = fmin(map->voxels[index] + value, 1.0f);
+						map->voxels[index] = MIN(map->voxels[index] + value, 0xff);
 					}
 				}
 			}
 		}
+	}
+}
+
+static AABB aabb_from_sphere(Vector3 center, float radius)
+{
+	Vector3 extents = {radius, radius, radius};
+	return aabb_from_ellipsoid(center, extents);
+}
+
+static void draw_sphere(Voxmap* map, Vector3 center, float radius)
+{
+	AABB map_bounds = get_bounds_excluding_max(map);
+	AABB sphere_bounds = aabb_from_sphere(center, radius);
+	AABB draw_bounds = aabb_clip(map_bounds, sphere_bounds);
+
+	int min_x = draw_bounds.min.x;
+	int min_y = draw_bounds.min.y;
+	int min_z = draw_bounds.min.z;
+	int max_x = draw_bounds.max.x;
+	int max_y = draw_bounds.max.y;
+	int max_z = draw_bounds.max.z;
+
+	float squared_radius = radius * radius;
+	int c = map->columns;
+	int rc = map->rows * map->columns;
+
+	for(int i = min_z; i <= max_z; ++i)
+	{
+		for(int j = min_y; j <= max_y; ++j)
+		{
+			for(int k = min_x; k <= max_x; ++k)
+			{
+				Vector3 voxel;
+				voxel.x = k;
+				voxel.y = j;
+				voxel.z = i;
+				if(squared_distance(voxel, center) <= squared_radius)
+				{
+					map->voxels[rc * i + c * j + k] |= 0xff;
+				}
+			}
+		}
+	}
+}
+
+static void invert(Voxmap* map)
+{
+	int voxels = map->columns * map->rows * map->slices;
+	for(int i = 0; i < voxels; ++i)
+	{
+		map->voxels[i] = ~map->voxels[i];
 	}
 }
 
@@ -6693,6 +6843,169 @@ void triangulate(Voxmap* map, Vector3 scale, u8 isovalue, Triangle** result, int
 }
 
 } // namespace marching_cubes
+
+namespace gen {
+
+namespace
+{
+	const int max_vertices_per_face = 8;
+}
+
+struct Vertex
+{
+	Vector3 position;
+	Vector3 normal;
+	Vector3 colour;
+	bool selected;
+};
+
+struct Face
+{
+	int vertices[max_vertices_per_face];
+	int opposite[max_vertices_per_face];
+	Vector3 normal;
+	int edges;
+	bool selected;
+};
+
+struct Mesh
+{
+	Vertex* vertices;
+	Face* faces;
+	int vertices_count;
+	int faces_count;
+};
+
+static void compute_face_normal(Face* face, Vertex* vertices)
+{
+	int first = 0;
+	int last_vertex = face->vertices[max_vertices_per_face - 1];
+	Vector3 prior = vertices[last_vertex].position;
+	Vector3 current = vertices[face->vertices[0]].position;
+	int i = first;
+	Vector3 normal = vector3_zero;
+	do
+	{
+		normal.x += (prior.y - current.y) * (prior.z + current.z);
+		normal.y += (prior.z - current.z) * (prior.x + current.x);
+		normal.z += (prior.x - current.x) * (prior.y + current.y);
+		i = (i + 1) % max_vertices_per_face;
+		prior = current;
+		current = vertices[face->vertices[i]].position;
+	} while(i != first);
+	face->normal = normalise(normal);
+}
+
+static float signed_double_area(Vector2 v0, Vector2 v1, Vector2 v2)
+{
+	return (v0.x - v2.x) * (v1.y - v2.y) - (v1.x - v2.x) * (v0.y - v2.y);
+}
+
+static bool is_clockwise(Vector2 v0, Vector2 v1, Vector2 v2)
+{
+	return signed_double_area(v0, v1, v2) < 0.0f;
+}
+
+static bool point_in_triangle(Vector2 v0, Vector2 v1, Vector2 v2, Vector2 p)
+{
+	bool f0 = signed_double_area(p, v0, v1) < 0.0f;
+	bool f1 = signed_double_area(p, v1, v2) < 0.0f;
+	bool f2 = signed_double_area(p, v2, v0) < 0.0f;
+	return (f0 == f1) && (f1 == f2);
+}
+
+static bool find_ear(Vector2* vertices, int vertices_count, int i, int j, int k)
+{
+	Vector2 v[3];
+	v[0] = vertices[i];
+	v[1] = vertices[j];
+	v[2] = vertices[k];
+
+	if(is_clockwise(v[0], v[1], v[2]))
+	{
+		return false;
+	}
+
+	for(int m = 0; m < vertices_count; ++m)
+	{
+		Vector2 point = vertices[m];
+		if(m != i && m != j && m != k && point_in_triangle(v[0], v[1], v[2], point))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static void project_stuff(Triangle** result, int* result_count)
+{
+	// Generate a weird face.
+	Vertex vertices[8];
+	vertices[0].position = {-0.05012f, -0.82722f, 0.0f};
+	vertices[1].position = {-0.59335f, -0.28583f, 0.0f};
+	vertices[2].position = {-0.58114f, +0.56986f, 0.0f};
+	vertices[3].position = {+0.58252f, +0.83783f, 0.0f};
+	vertices[4].position = {+0.86623f, -0.76310f, 0.0f};
+	vertices[5].position = {+0.19402f, -0.55426f, 0.0f};
+	vertices[6].position = {+0.53383f, -0.31467f, 0.0f};
+	vertices[7].position = {-0.20842f, +0.20493f, 0.0f};
+	Face face;
+	face.edges = 8;
+	for(int i = 0; i < face.edges; ++i)
+	{
+		face.vertices[i] = i;
+	}
+	compute_face_normal(&face, vertices);
+
+	// Project vertices onto a plane to produce 2D coordinates.
+	Vector2 projected[max_vertices_per_face];
+	ASSERT(face.edges <= max_vertices_per_face);
+	Matrix3 m = orthogonal_basis(face.normal);
+	Matrix3 mi = transpose(m);
+	for(int i = 0; i < face.edges; ++i)
+	{
+		int vertex_index = face.vertices[i];
+		Vector3 p = vertices[vertex_index].position;
+		projected[i] = mi * p;
+	}
+
+	// Produce a triangle list using ear-clipping.
+	Triangle* triangles = ALLOCATE(Triangle, face.edges - 2);
+	int triangles_count = 0;
+
+	// Keep vertex chains to walk both ways around the polygon.
+	int l[max_vertices_per_face];
+	int r[max_vertices_per_face];
+	for(int i = 0; i < face.edges; ++i)
+	{
+		l[i] = mod(i - 1, face.edges);
+		r[i] = mod(i + 1, face.edges);
+	}
+
+	int i = face.edges - 1;
+	while(triangles_count < face.edges - 2)
+	{
+		i = r[i];
+		if(find_ear(projected, face.edges, l[i], i, r[i]))
+		{
+			Triangle triangle;
+			triangle.vertices[0] = vertices[r[i]].position;
+			triangle.vertices[1] = vertices[i].position;
+			triangle.vertices[2] = vertices[l[i]].position;
+			triangles[triangles_count] = triangle;
+			triangles_count += 1;
+
+			l[r[i]] = l[i];
+			r[l[i]] = r[i];
+		}
+	}
+
+	*result = triangles;
+	*result_count = triangles_count;
+}
+
+} // namespace gen
 
 // §3.14 Render System..........................................................
 
@@ -7350,6 +7663,116 @@ static void object_copy_triangles(Object* object, AABB* bounds, Triangle* triang
 	*bounds = box;
 }
 
+static const Vector3 cube_corners[8] =
+{
+	{0.0f, 0.0f, 0.0f},
+	{0.0f, 0.0f, 1.0f},
+	{0.0f, 1.0f, 0.0f},
+	{0.0f, 1.0f, 1.0f},
+	{1.0f, 0.0f, 0.0f},
+	{1.0f, 0.0f, 1.0f},
+	{1.0f, 1.0f, 0.0f},
+	{1.0f, 1.0f, 1.0f},
+};
+
+static void triangulate_as_blocks(Voxmap* map, Vector3 scale, VertexPNC** out_vertices, int* out_vertices_count, u16** out_indices, int* out_indices_count)
+{
+	VertexPNC* vertices = nullptr;
+	int vertices_count = 0;
+	int vertices_capacity = 0;
+
+	int columns = map->columns;
+	int rows = map->rows;
+	int slices = map->slices;
+	int c = columns;
+	int rc = rows * columns;
+
+	auto add_face = [&vertices, &vertices_count](int corners[4], Vector3 normal, Vector3 position, Vector3 scale, u32 colour)
+	{
+		for(int i = 0; i < 4; ++i)
+		{
+			Vector3 p = position + cube_corners[corners[i]];
+			vertices[vertices_count + i].position = pointwise_multiply(p, scale);
+			vertices[vertices_count + i].normal = normal;
+			vertices[vertices_count + i].colour = colour;
+		}
+		vertices_count += 4;
+	};
+
+	for(int i = 0; i < slices; ++i)
+	{
+		for(int j = 0; j < rows; ++j)
+		{
+			for(int k = 0; k < columns; ++k)
+			{
+				u8 voxel = map->voxels[rc * i + c * j + k];
+				if(!voxel)
+				{
+					continue;
+				}
+
+				ENSURE_ARRAY_SIZE(vertices, 24);
+
+				Vector3 position;
+				position.x = k;
+				position.y = j;
+				position.z = i;
+
+				u32 colour = broadcast_u8(voxel);
+
+				if(k == 0 || !map->voxels[rc * i + c * j + (k - 1)])
+				{
+					int corners[4] = {2, 3, 0, 1};
+					add_face(corners, -vector3_unit_x, position, scale, colour);
+				}
+				if(k == columns - 1 || !map->voxels[rc * i + c * j + (k + 1)])
+				{
+					int corners[4] = {4, 5, 6, 7};
+					add_face(corners, +vector3_unit_x, position, scale, colour);
+				}
+				if(j == 0 || !map->voxels[rc * i + c * (j - 1) + k])
+				{
+					int corners[4] = {0, 1, 4, 5};
+					add_face(corners, -vector3_unit_y, position, scale, colour);
+				}
+				if(j == rows - 1 || !map->voxels[rc * i + c * (j + 1) + k])
+				{
+					int corners[4] = {6, 7, 2, 3};
+					add_face(corners, +vector3_unit_y, position, scale, colour);
+				}
+				if(i == 0 || !map->voxels[rc * (i - 1) + c * j + k])
+				{
+					int corners[4] = {4, 6, 0, 2};
+					add_face(corners, -vector3_unit_z, position, scale, colour);
+				}
+				if(i == slices - 1 || !map->voxels[rc * (i + 1) + c * j + k])
+				{
+					int corners[4] = {1, 3, 5, 7};
+					add_face(corners, +vector3_unit_z, position, scale, colour);
+				}
+			}
+		}
+	}
+
+	int face_count = vertices_count / 4;
+	int indices_count = 6 * face_count;
+	u16* indices = ALLOCATE(u16, indices_count);
+	for(int i = 0; i < face_count; ++i)
+	{
+		indices[6 * i    ] = 4 * i;
+		indices[6 * i + 1] = 4 * i + 3;
+		indices[6 * i + 2] = 4 * i + 1;
+		indices[6 * i + 3] = 4 * i;
+		indices[6 * i + 4] = 4 * i + 2;
+		indices[6 * i + 5] = 4 * i + 3;
+	}
+
+	*out_vertices = vertices;
+	*out_vertices_count = vertices_count;
+	*out_indices = indices;
+	*out_indices_count = indices_count;
+}
+
 // Whole system
 
 struct CallList
@@ -7398,9 +7821,9 @@ Matrix4 projection;
 Matrix4 sky_projection;
 Matrix4 screen_projection;
 arandom::Sequence randomness;
-int objects_count = 5;
-Object objects[5];
-AABB objects_bounds[5];
+int objects_count = 6;
+Object objects[6];
+AABB objects_bounds[6];
 Object sky;
 Triangle* terrain_triangles;
 int terrain_triangles_count;
@@ -7487,7 +7910,8 @@ static bool system_initialise()
 		brush.rows = brush_side;
 		brush.slices = brush_side;
 		brush.voxels = ALLOCATE(u8, brush_side * brush_side * brush_side);
-		draw_checkers(&brush);
+		Vector3 brush_center = {brush_side / 2.0f, brush_side / 2.0f, brush_side / 2.0f};
+		draw_sphere(&brush, brush_center, 1.0f);
 
 		Vector3* spline;
 		int spline_count;
@@ -7520,14 +7944,46 @@ static bool system_initialise()
 		Vector3 scale = {0.1f, 0.1f, 0.1f};
 		u8 isovalue = 128;
 		marching_cubes::triangulate(&canvas, scale, isovalue, &triangles, &triangles_count);
+#if 1
+		object_copy_triangles(&metaballs, &objects_bounds[4], triangles, triangles_count);
+#else
+		VertexPNC* vertices;
+		int vertices_count;
+		u16* indices;
+		int indices_count;
+		triangulate_as_blocks(&canvas, scale, &vertices, &vertices_count, &indices, &indices_count);
+
+		object_set_surface(&metaballs, vertices, vertices_count, indices, indices_count);
+
+		AABB bounds = {vector3_max, vector3_min};
+		for(int i = 0; i < vertices_count; ++i)
+		{
+			bounds.min = min3(bounds.min, vertices[i].position);
+			bounds.max = max3(bounds.max, vertices[i].position);
+		}
+		objects_bounds[4] = bounds;
+
+		DEALLOCATE(vertices);
+		DEALLOCATE(indices);
+#endif
 
 		DEALLOCATE(canvas.voxels);
-
-		object_copy_triangles(&metaballs, &objects_bounds[4], triangles, triangles_count);
-
 		DEALLOCATE(triangles);
 	}
 	objects[4] = metaballs;
+
+	Object octagon;
+	AABB octagon_bounds;
+	object_create(&octagon);
+	{
+		Triangle* triangles;
+		int triangles_count;
+		gen::project_stuff(&triangles, &triangles_count);
+		object_copy_triangles(&octagon, &octagon_bounds, triangles, triangles_count);
+		DEALLOCATE(triangles);
+	}
+	objects[5] = octagon;
+	objects_bounds[5] = octagon_bounds;
 
 	object_create(&sky);
 	object_generate_sky(&sky);
@@ -7755,7 +8211,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 	const Vector3 camera_position = {0.0f, -3.5f, 1.5f};
 
-	Matrix4 models[6];
+	Matrix4 models[7];
 
 	// Set up the matrices.
 	Matrix4 view_projection;
@@ -7784,6 +8240,7 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		Matrix4 model3 = matrix4_identity;
 		Matrix4 model4 = matrix4_identity;
 		Matrix4 model5 = matrix4_identity;
+		Matrix4 model6 = matrix4_identity;
 
 		models[0] = model0;
 		models[1] = model1;
@@ -7791,19 +8248,21 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 		models[3] = model3;
 		models[4] = model4;
 		models[5] = model5;
+		models[6] = model6;
 
 		const Vector3 camera_target = {0.0f, 0.0f, 0.5f};
 		const Matrix4 view = look_at_matrix(camera_position, camera_target, vector3_unit_z);
 
 		Vector3 direction = normalise(camera_target - camera_position);
-		const Matrix4 view5 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
+		const Matrix4 view6 = look_at_matrix(vector3_zero, direction, vector3_unit_z);
 
 		object_set_matrices(&objects[0], model0, view, projection);
 		object_set_matrices(&objects[1], model1, view, projection);
 		object_set_matrices(&objects[2], model2, view, projection);
 		object_set_matrices(&objects[3], model3, view, projection);
 		object_set_matrices(&objects[4], model4, view, projection);
-		object_set_matrices(&sky, model5, view5, sky_projection);
+		object_set_matrices(&objects[5], model5, view, projection);
+		object_set_matrices(&sky, model6, view6, sky_projection);
 
 		immediate::set_matrices(view, projection);
 
@@ -11658,6 +12117,7 @@ static bool ogl_load_functions()
 	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
 	p_glDisable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glDisable"));
 	p_glEnable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glEnable"));
+	p_glPolygonMode = reinterpret_cast<void (APIENTRYA*)(GLenum, GLenum)>(GET_PROC("glPolygonMode"));
 	p_glTexImage2D = reinterpret_cast<void (APIENTRYA*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*)>(GET_PROC("glTexImage2D"));
 	p_glViewport = reinterpret_cast<void (APIENTRYA*)(GLint, GLint, GLsizei, GLsizei)>(GET_PROC("glViewport"));
 
@@ -11715,6 +12175,7 @@ static bool ogl_load_functions()
 	failure_count += p_glDepthMask == nullptr;
 	failure_count += p_glDisable == nullptr;
 	failure_count += p_glEnable == nullptr;
+	failure_count += p_glPolygonMode == nullptr;
 	failure_count += p_glTexImage2D == nullptr;
 	failure_count += p_glViewport == nullptr;
 
