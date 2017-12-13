@@ -437,6 +437,51 @@ static int find_last_char(const char* s, char c, int limit)
 		insertion_sort(a, count);\
 	}
 
+#define DEFINE_HEAP_SORT(type, before, suffix)\
+	static void sift_down_##suffix(type* a, int left, int right)\
+	{\
+		int root = left;\
+		while(2 * root + 1 <= right)\
+		{\
+			int child = 2 * root + 1;\
+			int index = root;\
+			if(before(a[index], a[child]))\
+			{\
+				index = child;\
+			}\
+			if(child + 1 <= right && before(a[index], a[child + 1]))\
+			{\
+				index = child + 1;\
+			}\
+			if(index == root)\
+			{\
+				return;\
+			}\
+			else\
+			{\
+				auto temp = a[index];\
+				a[index] = a[root];\
+				a[root] = temp;\
+				root = index;\
+			}\
+		}\
+	}\
+	static void heap_sort_##suffix(type* a, int count)\
+	{\
+		for(int left = floor((count - 2) / 2); left >= 0; --left)\
+		{\
+			sift_down_##suffix(a, left, count - 1);\
+		}\
+		for(int right = count - 1; right > 0;)\
+		{\
+			auto temp = a[right];\
+			a[right] = a[0];\
+			a[0] = temp;\
+			right -= 1;\
+			sift_down_##suffix(a, 0, right);\
+		}\
+	}
+
 // §1.4 Clock Declarations......................................................
 
 struct Clock
@@ -5708,7 +5753,7 @@ static void inspector_draw(Inspector* inspector)
 			Record* records = history->records[i][head];
 			if(!records)
 			{
-				// If there's fewer than books than thread_history_book_count, the
+				// If there's fewer books than thread_history_book_count, the
 				// end of the line may come sooner than encountering the tail.
 				break;
 			}
@@ -5834,6 +5879,8 @@ static Vector3 pick_point_in_triangle(Vector3 u, Vector3 v, arandom::Sequence* r
 
 static Vector3* create_particles(int* result_count, arandom::Sequence* randomness)
 {
+	// Base points off of a regular triangle tessellation and randomly nudge
+	// them within their triangles.
 	const int width = 16;
 	const int height = 16;
 	const float spacing = 0.4f;
@@ -6856,16 +6903,20 @@ struct Vertex
 	Vector3 position;
 	Vector3 normal;
 	Vector3 colour;
-	bool selected;
+};
+
+struct HalfEdgeId
+{
+	s32 face: 29;
+	u32 slot: 3;
 };
 
 struct Face
 {
 	int vertices[max_vertices_per_face];
-	int opposite[max_vertices_per_face];
+	HalfEdgeId opposite[max_vertices_per_face];
 	Vector3 normal;
 	int edges;
-	bool selected;
 };
 
 struct Mesh
@@ -6873,13 +6924,25 @@ struct Mesh
 	Vertex* vertices;
 	Face* faces;
 	int vertices_count;
+	int vertices_capacity;
 	int faces_count;
+	int faces_capacity;
+	bool rebuild_face_adjacency;
 };
+
+static void mesh_destroy(Mesh* mesh)
+{
+	if(mesh)
+	{
+		SAFE_DEALLOCATE(mesh->vertices);
+		SAFE_DEALLOCATE(mesh->faces);
+	}
+}
 
 static void compute_face_normal(Face* face, Vertex* vertices)
 {
 	int first = 0;
-	int last_vertex = face->vertices[max_vertices_per_face - 1];
+	int last_vertex = face->vertices[face->edges - 1];
 	Vector3 prior = vertices[last_vertex].position;
 	Vector3 current = vertices[face->vertices[0]].position;
 	int i = first;
@@ -6889,11 +6952,58 @@ static void compute_face_normal(Face* face, Vertex* vertices)
 		normal.x += (prior.y - current.y) * (prior.z + current.z);
 		normal.y += (prior.z - current.z) * (prior.x + current.x);
 		normal.z += (prior.x - current.x) * (prior.y + current.y);
-		i = (i + 1) % max_vertices_per_face;
+		i = (i + 1) % face->edges;
 		prior = current;
 		current = vertices[face->vertices[i]].position;
 	} while(i != first);
 	face->normal = normalise(normal);
+}
+
+static void add_face(Mesh* mesh, Face face)
+{
+	compute_face_normal(&face, mesh->vertices);
+	for(int i = 0; i < face.edges; ++i)
+	{
+		face.opposite[i].face = -1;
+		face.opposite[i].slot = 0;
+	}
+
+	ENSURE_ARRAY_SIZE(mesh->faces, 1);
+	mesh->faces[mesh->faces_count] = face;
+	mesh->faces_count += 1;
+}
+
+static void add_vertex(Mesh* mesh, Vertex vertex)
+{
+	ENSURE_ARRAY_SIZE(mesh->vertices, 1);
+	mesh->vertices[mesh->vertices_count] = vertex;
+	mesh->vertices_count += 1;
+}
+
+static void make_a_weird_face(Mesh* mesh)
+{
+	int vertices_count = 8;
+	Vertex vertices[vertices_count];
+	vertices[0].position = {-0.20842f, +0.20493f, 0.0f};
+	vertices[1].position = {+0.53383f, -0.31467f, 0.0f};
+	vertices[2].position = {+0.19402f, -0.55426f, 0.0f};
+	vertices[3].position = {+0.86623f, -0.76310f, 0.0f};
+	vertices[4].position = {+0.58252f, +0.83783f, 0.0f};
+	vertices[5].position = {-0.58114f, +0.56986f, 0.0f};
+	vertices[6].position = {-0.59335f, -0.28583f, 0.0f};
+	vertices[7].position = {-0.05012f, -0.82722f, 0.0f};
+	for(int i = 0; i < vertices_count; ++i)
+	{
+		add_vertex(mesh, vertices[i]);
+	}
+
+	Face face;
+	face.edges = 8;
+	for(int i = 0; i < face.edges; ++i)
+	{
+		face.vertices[i] = i;
+	}
+	add_face(mesh, face);
 }
 
 static float signed_double_area(Vector2 v0, Vector2 v1, Vector2 v2)
@@ -6914,95 +7024,352 @@ static bool point_in_triangle(Vector2 v0, Vector2 v1, Vector2 v2, Vector2 p)
 	return (f0 == f1) && (f1 == f2);
 }
 
-static bool find_ear(Vector2* vertices, int vertices_count, int i, int j, int k)
+static bool is_clockwise(Vector2* vertices, int vertices_count)
 {
-	Vector2 v[3];
-	v[0] = vertices[i];
-	v[1] = vertices[j];
-	v[2] = vertices[k];
-
-	if(is_clockwise(v[0], v[1], v[2]))
+	float d = 0.0f;
+	for(int i = 0; i < vertices_count; ++i)
 	{
-		return false;
+		Vector2 v0 = vertices[i];
+		Vector2 v1 = vertices[(i + 1) % vertices_count];
+		d += (v1.x - v0.x) * (v1.y + v0.y);
 	}
-
-	for(int m = 0; m < vertices_count; ++m)
-	{
-		Vector2 point = vertices[m];
-		if(m != i && m != j && m != k && point_in_triangle(v[0], v[1], v[2], point))
-		{
-			return false;
-		}
-	}
-
-	return true;
+	return d < 0.0f;
 }
 
-static void project_stuff(Triangle** result, int* result_count)
+static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 {
-	// Generate a weird face.
-	Vertex vertices[8];
-	vertices[0].position = {-0.05012f, -0.82722f, 0.0f};
-	vertices[1].position = {-0.59335f, -0.28583f, 0.0f};
-	vertices[2].position = {-0.58114f, +0.56986f, 0.0f};
-	vertices[3].position = {+0.58252f, +0.83783f, 0.0f};
-	vertices[4].position = {+0.86623f, -0.76310f, 0.0f};
-	vertices[5].position = {+0.19402f, -0.55426f, 0.0f};
-	vertices[6].position = {+0.53383f, -0.31467f, 0.0f};
-	vertices[7].position = {-0.20842f, +0.20493f, 0.0f};
-	Face face;
-	face.edges = 8;
-	for(int i = 0; i < face.edges; ++i)
-	{
-		face.vertices[i] = i;
-	}
-	compute_face_normal(&face, vertices);
-
-	// Project vertices onto a plane to produce 2D coordinates.
-	Vector2 projected[max_vertices_per_face];
-	ASSERT(face.edges <= max_vertices_per_face);
-	Matrix3 m = orthogonal_basis(face.normal);
-	Matrix3 mi = transpose(m);
-	for(int i = 0; i < face.edges; ++i)
-	{
-		int vertex_index = face.vertices[i];
-		Vector3 p = vertices[vertex_index].position;
-		projected[i] = mi * p;
-	}
-
 	// Produce a triangle list using ear-clipping.
-	Triangle* triangles = ALLOCATE(Triangle, face.edges - 2);
+	Triangle* triangles = nullptr;
 	int triangles_count = 0;
+	int triangles_capacity = 0;
 
-	// Keep vertex chains to walk both ways around the polygon.
-	int l[max_vertices_per_face];
-	int r[max_vertices_per_face];
-	for(int i = 0; i < face.edges; ++i)
+	for(int i = 0; i < mesh->faces_count; ++i)
 	{
-		l[i] = mod(i - 1, face.edges);
-		r[i] = mod(i + 1, face.edges);
-	}
+		Face face = mesh->faces[i];
 
-	int i = face.edges - 1;
-	while(triangles_count < face.edges - 2)
-	{
-		i = r[i];
-		if(find_ear(projected, face.edges, l[i], i, r[i]))
+		// The face is already a triangle.
+		if(face.edges == 3)
 		{
+			ENSURE_ARRAY_SIZE(triangles, 1);
 			Triangle triangle;
-			triangle.vertices[0] = vertices[r[i]].position;
-			triangle.vertices[1] = vertices[i].position;
-			triangle.vertices[2] = vertices[l[i]].position;
+			triangle.vertices[0] = mesh->vertices[face.vertices[0]].position;
+			triangle.vertices[1] = mesh->vertices[face.vertices[1]].position;
+			triangle.vertices[2] = mesh->vertices[face.vertices[2]].position;
 			triangles[triangles_count] = triangle;
 			triangles_count += 1;
+			continue;
+		}
 
-			l[r[i]] = l[i];
-			r[l[i]] = r[i];
+		// Project vertices onto a plane to produce 2D coordinates.
+		Vector2 projected[max_vertices_per_face];
+		ASSERT(face.edges <= max_vertices_per_face);
+		Matrix3 m = orthogonal_basis(face.normal);
+		Matrix3 mi = transpose(m);
+		for(int j = 0; j < face.edges; ++j)
+		{
+			int vertex_index = face.vertices[j];
+			Vector3 p = mesh->vertices[vertex_index].position;
+			projected[j] = mi * p;
+		}
+
+		// The projection may reverse the winding of the triangle. Reversing
+		// the projected vertices would be the most obvious way to handle this
+		// case. However, this would mean the projected and unprojected vertices
+		// would no longer have the same index. So, instead, reverse the order
+		// that the vertices are walked by swapping the left and right chain.
+		int offset[2] = {-1, 1};
+		if(!is_clockwise(projected, face.edges))
+		{
+			offset[0] = 1;
+			offset[1] = -1;
+		}
+
+		// Keep vertex chains to walk both ways around the polygon.
+		int l[max_vertices_per_face];
+		int r[max_vertices_per_face];
+		for(int j = 0; j < face.edges; ++j)
+		{
+			l[j] = mod(j + offset[0], face.edges);
+			r[j] = mod(j + offset[1], face.edges);
+		}
+
+		// A polygon always has exactly n - 2 triangles, where n is the number
+		// of edges in the polygon.
+		ENSURE_ARRAY_SIZE(triangles, face.edges - 2);
+
+		// Walk the right loop and find ears to triangulate using each of those
+		// vertices.
+		int j = face.edges - 1;
+		int triangles_this_face = 0;
+		while(triangles_this_face < face.edges - 2)
+		{
+			j = r[j];
+
+			Vector2 v[3];
+			v[0] = projected[l[j]];
+			v[1] = projected[j];
+			v[2] = projected[r[j]];
+
+			if(is_clockwise(v[0], v[1], v[2]))
+			{
+				continue;
+			}
+
+			bool in_triangle = false;
+			for(int m = 0; m < face.edges; ++m)
+			{
+				Vector2 point = projected[m];
+				if(m != l[j] && m != j && m != r[j] && point_in_triangle(v[0], v[1], v[2], point))
+				{
+					in_triangle = true;
+					break;
+				}
+			}
+			if(!in_triangle)
+			{
+				// An ear has been found.
+				Triangle triangle;
+				triangle.vertices[0] = mesh->vertices[face.vertices[l[j]]].position;
+				triangle.vertices[1] = mesh->vertices[face.vertices[j]].position;
+				triangle.vertices[2] = mesh->vertices[face.vertices[r[j]]].position;
+				triangles[triangles_count] = triangle;
+				triangles_count += 1;
+				triangles_this_face += 1;
+
+				l[r[j]] = l[j];
+				r[l[j]] = r[j];
+			}
 		}
 	}
 
 	*result = triangles;
 	*result_count = triangles_count;
+}
+
+static int start_vertex(Face face, u32 slot)
+{
+	return face.vertices[slot];
+}
+
+static int end_vertex(Face face, u32 slot)
+{
+	int index = (slot + 1) % face.edges;
+	return face.vertices[index];
+}
+
+static HalfEdgeId next_edge(Mesh* mesh, HalfEdgeId id)
+{
+	ASSERT(id.face != -1);
+	HalfEdgeId result;
+	result.face = id.face;
+	result.slot = (id.slot + 1) % mesh->faces[id.face].edges;
+	return result;
+}
+
+static HalfEdgeId prior_edge(Mesh* mesh, HalfEdgeId id)
+{
+	ASSERT(id.face != -1);
+	HalfEdgeId result;
+	result.face = id.face;
+	result.slot = mod(id.slot - 1, mesh->faces[id.face].edges);
+	return result;
+}
+
+struct HalfEdgeDesc
+{
+	HalfEdgeId id;
+	int v0;
+	int v1;
+};
+
+static void connect_faces(Mesh* mesh, HalfEdgeId* edges, int count)
+{
+	ASSERT(count <= 2);
+	if(count == 1)
+	{
+		HalfEdgeId e0 = edges[0];
+		mesh->faces[e0.face].opposite[e0.slot].face = -1;
+	}
+	else if(count == 2)
+	{
+		HalfEdgeId e0 = edges[0];
+		HalfEdgeId e1 = edges[1];
+		mesh->faces[e0.face].opposite[e0.slot] = e1;
+		mesh->faces[e1.face].opposite[e1.slot] = e0;
+	}
+}
+
+static bool starting_vertex_before(HalfEdgeDesc a, HalfEdgeDesc b)
+{
+	return a.v0 < b.v0;
+}
+
+DEFINE_HEAP_SORT(HalfEdgeDesc, starting_vertex_before, by_starting_vertex);
+
+static void rebuild_face_connections(Mesh* mesh)
+{
+	if(!mesh->rebuild_face_adjacency)
+	{
+		return;
+	}
+
+	int edges_count = 0;
+	for(int i = 0; i < mesh->faces_count; ++i)
+	{
+		edges_count += mesh->faces[i].edges;
+	}
+	HalfEdgeDesc* edges = ALLOCATE(HalfEdgeDesc, edges_count);
+
+	// Produce a list of all the half-edges in the mesh.
+	for(int i = 0; i < mesh->faces_count; ++i)
+	{
+		Face face = mesh->faces[i];
+		for(int j = 0; j < face.edges; ++j)
+		{
+			edges[edges_count].id.slot = j;
+			edges[edges_count].id.face = i;
+			int start = start_vertex(face, j);
+			int end = end_vertex(face, j);
+			edges[edges_count].v0 = MIN(start, end);
+			edges[edges_count].v1 = MAX(start, end);
+			edges_count += 1;
+		}
+	}
+
+	// Sorting by the first vertex index will produce a list of half edges
+	// where neighbors are sequential.
+	heap_sort_by_starting_vertex(edges, edges_count);
+
+	// Connect the half edge neighbors.
+	s32 prior[2] = {-1, -1};
+	HalfEdgeId pair[2];
+	int count = 0;
+	for(int i = 0; i < edges_count; ++i)
+	{
+		HalfEdgeDesc e = edges[i];
+		if(e.v0 == prior[0] && e.v1 == prior[1])
+		{
+			pair[count] = e.id;
+			count += 1;
+			if(count == 2)
+			{
+				connect_faces(mesh, pair, count);
+				count = 0;
+			}
+		}
+		else
+		{
+			connect_faces(mesh, pair, count);
+			pair[0] = e.id;
+			count = 1;
+		}
+		prior[0] = e.v0;
+		prior[1] = e.v1;
+	}
+	connect_faces(mesh, pair, count);
+
+	DEALLOCATE(edges);
+
+	mesh->rebuild_face_adjacency = false;
+}
+
+struct Selection
+{
+	int* faces;
+	int faces_count;
+};
+
+static bool face_selected(Selection* selection, int face)
+{
+	for(int i = 0; i < selection->faces_count; ++i)
+	{
+		if(selection->faces[i] == face)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static void extrude(Mesh* mesh, Selection* selection, float distance)
+{
+	ASSERT(selection->faces_count != 0);
+
+	rebuild_face_connections(mesh);
+
+	// Calculate the vector to extrude all the vertices along.
+	Vector3 average_direction = vector3_zero;
+	for(int i = 0; i < selection->faces_count; ++i)
+	{
+		int face_index = selection->faces[i];
+		Face face = mesh->faces[face_index];
+		average_direction += face.normal;
+	}
+	Vector3 extrusion = distance * normalise(average_direction);
+
+	// Use an index map to redirect vertices to their extruded double when it's
+	// already been added.
+	int* map = ALLOCATE(int, mesh->vertices_count);
+	for(int i = 0; i < mesh->vertices_count; ++i)
+	{
+		map[i] = i;
+	}
+
+	// Generate a quad for each edge that either doesn't connect to a face or
+	// connects to an unselected face.
+	for(int i = 0; i < selection->faces_count; ++i)
+	{
+		int face_index = selection->faces[i];
+		Face* face = &mesh->faces[face_index];
+		for(int j = 0; j < face->edges; ++j)
+		{
+			HalfEdgeId half_edge = face->opposite[j];
+			if(half_edge.face == -1 || !face_selected(selection, half_edge.face))
+			{
+				// Add vertices only where they haven't been added already.
+				int start = start_vertex(*face, j);
+				int end = end_vertex(*face, j);
+				if(map[start] == start)
+				{
+					map[start] = mesh->vertices_count;
+					Vertex vertex = mesh->vertices[start];
+					vertex.position += extrusion;
+					add_vertex(mesh, vertex);
+				}
+				if(map[end] == end)
+				{
+					map[end] = mesh->vertices_count;
+					Vertex vertex = mesh->vertices[end];
+					vertex.position += extrusion;
+					add_vertex(mesh, vertex);
+				}
+
+				// Add the extruded side face for this edge.
+				Face face;
+				face.edges = 4;
+				face.vertices[0] = start;
+				face.vertices[1] = end;
+				face.vertices[2] = map[end];
+				face.vertices[3] = map[start];
+				add_face(mesh, face);
+			}
+		}
+	}
+
+	// Adjust the vertices in the existing selected faces to match the extruded
+	// vertices.
+	for(int i = 0; i < selection->faces_count; ++i)
+	{
+		Face* face = &mesh->faces[selection->faces[i]];
+		for(int j = 0; j < face->edges; ++j)
+		{
+			face->vertices[j] = map[face->vertices[j]];
+		}
+	}
+
+	DEALLOCATE(map);
+
+	mesh->rebuild_face_adjacency = true;
 }
 
 } // namespace gen
@@ -7976,9 +8343,20 @@ static bool system_initialise()
 	AABB octagon_bounds;
 	object_create(&octagon);
 	{
+		gen::Mesh mesh = {};
+		gen::make_a_weird_face(&mesh);
+
+		int bleh[1] = {0};
+		gen::Selection selection;
+		selection.faces = bleh;
+		selection.faces_count = 1;
+		gen::extrude(&mesh, &selection, 0.8f);
+
 		Triangle* triangles;
 		int triangles_count;
-		gen::project_stuff(&triangles, &triangles_count);
+		gen::triangulate(&mesh, &triangles, &triangles_count);
+		gen::mesh_destroy(&mesh);
+
 		object_copy_triangles(&octagon, &octagon_bounds, triangles, triangles_count);
 		DEALLOCATE(triangles);
 	}
