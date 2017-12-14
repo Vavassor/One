@@ -6982,8 +6982,8 @@ static void add_vertex(Mesh* mesh, Vertex vertex)
 
 static void make_a_weird_face(Mesh* mesh)
 {
-	int vertices_count = 8;
-	Vertex vertices[vertices_count];
+	const int vertices_count = 8;
+	Vertex vertices[vertices_count] = {};
 	vertices[0].position = {-0.20842f, +0.20493f, 0.0f};
 	vertices[1].position = {+0.53383f, -0.31467f, 0.0f};
 	vertices[2].position = {+0.19402f, -0.55426f, 0.0f};
@@ -7036,12 +7036,15 @@ static bool is_clockwise(Vector2* vertices, int vertices_count)
 	return d < 0.0f;
 }
 
-static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
+static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_count, u16** out_indices, int* out_indices_count)
 {
 	// Produce a triangle list using ear-clipping.
-	Triangle* triangles = nullptr;
-	int triangles_count = 0;
-	int triangles_capacity = 0;
+	VertexPNC* vertices = nullptr;
+	int vertices_count = 0;
+	int vertices_capacity = 0;
+	u16* indices = nullptr;
+	int indices_count = 0;
+	int indices_capacity = 0;
 
 	for(int i = 0; i < mesh->faces_count; ++i)
 	{
@@ -7050,14 +7053,30 @@ static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 		// The face is already a triangle.
 		if(face.edges == 3)
 		{
-			ENSURE_ARRAY_SIZE(triangles, 1);
-			Triangle triangle;
-			triangle.vertices[0] = mesh->vertices[face.vertices[0]].position;
-			triangle.vertices[1] = mesh->vertices[face.vertices[1]].position;
-			triangle.vertices[2] = mesh->vertices[face.vertices[2]].position;
-			triangles[triangles_count] = triangle;
-			triangles_count += 1;
+			ENSURE_ARRAY_SIZE(indices, 3);
+			for(int j = 0; j < 3; ++j)
+			{
+				Vertex vertex = mesh->vertices[face.vertices[j]];
+				int index = vertices_count + j;
+				vertices[index].position = vertex.position;
+				vertices[index].normal = face.normal;
+				vertices[index].colour = rgb_to_u32(vertex.colour);
+				indices[indices_count + j] = index;
+			}
+			vertices_count += 3;
+			indices_count += 3;
 			continue;
+		}
+
+		// Copy all of the vertices in the face.
+		ENSURE_ARRAY_SIZE(vertices, face.edges);
+		for(int j = 0; j < face.edges; ++j)
+		{
+			Vertex vertex = mesh->vertices[face.vertices[j]];
+			int index = vertices_count + j;
+			vertices[index].position = vertex.position;
+			vertices[index].normal = face.normal;
+			vertices[index].colour = rgb_to_u32(vertex.colour);
 		}
 
 		// Project vertices onto a plane to produce 2D coordinates.
@@ -7075,13 +7094,13 @@ static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 		// The projection may reverse the winding of the triangle. Reversing
 		// the projected vertices would be the most obvious way to handle this
 		// case. However, this would mean the projected and unprojected vertices
-		// would no longer have the same index. So, instead, reverse the order
-		// that the vertices are walked by swapping the left and right chain.
-		int offset[2] = {-1, 1};
+		// would no longer have the same index. So, reverse the order that the
+		// chains are used to index the projected vertices later during
+		// ear-finding.
+		bool reverse_winding = false;
 		if(!is_clockwise(projected, face.edges))
 		{
-			offset[0] = 1;
-			offset[1] = -1;
+			reverse_winding = true;
 		}
 
 		// Keep vertex chains to walk both ways around the polygon.
@@ -7089,13 +7108,13 @@ static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 		int r[max_vertices_per_face];
 		for(int j = 0; j < face.edges; ++j)
 		{
-			l[j] = mod(j + offset[0], face.edges);
-			r[j] = mod(j + offset[1], face.edges);
+			l[j] = mod(j - 1, face.edges);
+			r[j] = mod(j + 1, face.edges);
 		}
 
 		// A polygon always has exactly n - 2 triangles, where n is the number
 		// of edges in the polygon.
-		ENSURE_ARRAY_SIZE(triangles, face.edges - 2);
+		ENSURE_ARRAY_SIZE(indices, 3 * (face.edges - 2));
 
 		// Walk the right loop and find ears to triangulate using each of those
 		// vertices.
@@ -7106,9 +7125,18 @@ static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 			j = r[j];
 
 			Vector2 v[3];
-			v[0] = projected[l[j]];
-			v[1] = projected[j];
-			v[2] = projected[r[j]];
+			if(reverse_winding)
+			{
+				v[0] = projected[r[j]];
+				v[1] = projected[j];
+				v[2] = projected[l[j]];
+			}
+			else
+			{
+				v[0] = projected[l[j]];
+				v[1] = projected[j];
+				v[2] = projected[r[j]];
+			}
 
 			if(is_clockwise(v[0], v[1], v[2]))
 			{
@@ -7128,22 +7156,26 @@ static void triangulate(Mesh* mesh, Triangle** result, int* result_count)
 			if(!in_triangle)
 			{
 				// An ear has been found.
-				Triangle triangle;
-				triangle.vertices[0] = mesh->vertices[face.vertices[l[j]]].position;
-				triangle.vertices[1] = mesh->vertices[face.vertices[j]].position;
-				triangle.vertices[2] = mesh->vertices[face.vertices[r[j]]].position;
-				triangles[triangles_count] = triangle;
-				triangles_count += 1;
+				indices[indices_count] = vertices_count + l[j];
+				indices[indices_count + 1] = vertices_count + j;
+				indices[indices_count + 2] = vertices_count + r[j];
+				indices_count += 3;
 				triangles_this_face += 1;
 
 				l[r[j]] = l[j];
 				r[l[j]] = r[j];
 			}
 		}
+
+		// Increment the vertices count after adding all the indices so its
+		// pre-increment value can be used to offset the indices correctly.
+		vertices_count += face.edges;
 	}
 
-	*result = triangles;
-	*result_count = triangles_count;
+	*out_vertices = vertices;
+	*out_vertices_count = vertices_count;
+	*out_indices = indices;
+	*out_indices_count = indices_count;
 }
 
 static int start_vertex(Face face, u32 slot)
@@ -7155,24 +7187,6 @@ static int end_vertex(Face face, u32 slot)
 {
 	int index = (slot + 1) % face.edges;
 	return face.vertices[index];
-}
-
-static HalfEdgeId next_edge(Mesh* mesh, HalfEdgeId id)
-{
-	ASSERT(id.face != -1);
-	HalfEdgeId result;
-	result.face = id.face;
-	result.slot = (id.slot + 1) % mesh->faces[id.face].edges;
-	return result;
-}
-
-static HalfEdgeId prior_edge(Mesh* mesh, HalfEdgeId id)
-{
-	ASSERT(id.face != -1);
-	HalfEdgeId result;
-	result.face = id.face;
-	result.slot = mod(id.slot - 1, mesh->faces[id.face].edges);
-	return result;
 }
 
 struct HalfEdgeDesc
@@ -7370,6 +7384,28 @@ static void extrude(Mesh* mesh, Selection* selection, float distance)
 	DEALLOCATE(map);
 
 	mesh->rebuild_face_adjacency = true;
+}
+
+static void translate(Mesh* mesh, Selection* selection, Vector3 translation)
+{
+	for(int i = 0; i < selection->faces_count; ++i)
+	{
+		int face_index = selection->faces[i];
+		Face* face = &mesh->faces[face_index];
+		for(int j = 0; j < face->edges; ++j)
+		{
+			int index = face->vertices[j];
+			mesh->vertices[index].position += translation;
+		}
+	}
+}
+
+static void colour_all_vertices(Mesh* mesh, Vector3 colour)
+{
+	for(int i = 0; i < mesh->vertices_count; ++i)
+	{
+		mesh->vertices[i].colour = colour;
+	}
 }
 
 } // namespace gen
@@ -8352,13 +8388,22 @@ static bool system_initialise()
 		selection.faces_count = 1;
 		gen::extrude(&mesh, &selection, 0.8f);
 
-		Triangle* triangles;
-		int triangles_count;
-		gen::triangulate(&mesh, &triangles, &triangles_count);
+		Vector3 translation = {-0.5f, 0.2f, 0.0f};
+		gen::translate(&mesh, &selection, translation);
+
+		gen::colour_all_vertices(&mesh, {0.0f, 1.0f, 1.0f});
+
+		VertexPNC* vertices;
+		int vertices_count;
+		u16* indices;
+		int indices_count;
+		gen::triangulate(&mesh, &vertices, &vertices_count, &indices, &indices_count);
 		gen::mesh_destroy(&mesh);
 
-		object_copy_triangles(&octagon, &octagon_bounds, triangles, triangles_count);
-		DEALLOCATE(triangles);
+		object_set_surface(&octagon, vertices, vertices_count, indices, indices_count);
+
+		DEALLOCATE(vertices);
+		DEALLOCATE(indices);
 	}
 	objects[5] = octagon;
 	objects_bounds[5] = octagon_bounds;
@@ -8617,7 +8662,15 @@ static void system_update(Vector3 position, Vector3 dancer_position, World* worl
 
 		Matrix4 model3 = matrix4_identity;
 		Matrix4 model4 = matrix4_identity;
-		Matrix4 model5 = matrix4_identity;
+
+		Matrix4 model5;
+		{
+			static float angle = 0.0f;
+			angle += 0.02f;
+			Quaternion orientation = axis_angle_rotation(vector3_unit_z, angle);
+			model5 = compose_transform(vector3_zero, orientation, scale);
+		}
+
 		Matrix4 model6 = matrix4_identity;
 
 		models[0] = model0;
