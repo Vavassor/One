@@ -258,6 +258,14 @@ static int mod(int x, int n)
 	return (x % n + n) % n;
 }
 
+static void fill_counting_upward(int* a, int count)
+{
+	for(int i = 0; i < count; ++i)
+	{
+		a[i] = i;
+	}
+}
+
 static bool almost_zero(float x)
 {
 	return x > -1e-6f && x < 1e-6f;
@@ -1073,6 +1081,11 @@ static Vector3 min3(Vector3 v0, Vector3 v1)
 	return result;
 }
 
+static bool exactly_equals(Vector3 v0, Vector3 v1)
+{
+	return v0.x == v1.x && v0.y == v1.y && v0.z == v1.z;
+}
+
 static Vector3 make_vector3(Vector2 v)
 {
 	return {v.x, v.y, 0.0f};
@@ -1533,13 +1546,13 @@ struct LineSegment
 
 struct Triangle
 {
-	// assumes clockwise winding for the front face
+	// assumes counter-clockwise winding for the front face
 	Vector3 vertices[3];
 };
 
 struct Quad
 {
-	// assumes clockwise winding for the front face
+	// assumes counter-clockwise winding for the front face
 	// also, there's nothing guaranteeing these are coplanar
 	Vector3 vertices[4];
 };
@@ -2736,7 +2749,7 @@ static Vector3 collide_with_world(Vector3 position, Vector3 radius, Vector3 velo
 			return new_position;
 		}
 
-		if(velocity.x == new_velocity.x && velocity.y == new_velocity.y && velocity.z == new_velocity.z)
+		if(exactly_equals(velocity, new_velocity))
 		{
 			position.x = new_position.x;
 		}
@@ -6891,119 +6904,621 @@ void triangulate(Voxmap* map, Vector3 scale, u8 isovalue, Triangle** result, int
 
 } // namespace marching_cubes
 
-namespace gen {
+#define FOR_N(i, count)\
+	for(int i = 0; i < static_cast<int>(count); ++i)
 
-namespace
+enum class PoolBlockStatus
 {
-	const int max_vertices_per_face = 8;
+	Free,
+	Used,
+};
+
+struct Pool
+{
+	u8* memory;
+	u32 object_size;
+	u32 object_count;
+	void** free_list;
+	PoolBlockStatus* statuses;
+};
+
+struct PoolIterator
+{
+	Pool* pool;
+	int index;
+};
+
+void* pool_iterator_next(PoolIterator* it)
+{
+	int object_count = it->pool->object_count;
+	do
+	{
+		it->index += 1;
+		if(it->index >= object_count)
+		{
+			return nullptr;
+		}
+	} while(it->pool->statuses[it->index] == PoolBlockStatus::Free);
+	return it->pool->memory + (it->pool->object_size * it->index);
 }
+
+void* pool_iterator_create(PoolIterator* it, Pool* pool)
+{
+	it->pool = pool;
+	it->index = -1;
+	return pool_iterator_next(it);
+}
+
+#define FOR_EACH_IN_POOL(type, object, pool)\
+	PoolIterator it;\
+	for(type* object = static_cast<type*>(pool_iterator_create(&it, &pool)); object; object = static_cast<type*>(pool_iterator_next(&it)))
+
+bool pool_create(Pool* pool, u32 object_size, u32 object_count)
+{
+	// The free list can't fit in empty slots unless objects are at least as
+	// large as a pointer.
+	ASSERT(object_size >= sizeof(void*));
+
+	void* memory = ALLOCATE(u8, object_size * object_count);
+	PoolBlockStatus* statuses = ALLOCATE(PoolBlockStatus, object_count);
+	if(!memory || !statuses)
+	{
+		return false;
+	}
+
+	pool->memory = static_cast<u8*>(memory);
+	pool->object_size = object_size;
+	pool->object_count = object_count;
+	pool->free_list = reinterpret_cast<void**>(pool->memory);
+	pool->statuses = statuses;
+
+	void** p = pool->free_list;
+	FOR_N(i, object_count - 1)
+	{
+		*p = reinterpret_cast<u8*>(p) + object_size;
+		p = static_cast<void**>(*p);
+	}
+	*p = nullptr;
+
+	FOR_N(i, object_count)
+	{
+		statuses[i] = PoolBlockStatus::Free;
+	}
+
+	return true;
+}
+
+void pool_destroy(Pool* pool)
+{
+	if(pool)
+	{
+		SAFE_DEALLOCATE(pool->memory);
+		SAFE_DEALLOCATE(pool->statuses);
+		pool->free_list = nullptr;
+	}
+}
+
+static void mark_block_status(Pool* pool, void* object, PoolBlockStatus status)
+{
+	u8* offset = static_cast<u8*>(object);
+	int index = (offset - pool->memory) / pool->object_size;
+	pool->statuses[index] = status;
+}
+
+void* pool_allocate(Pool* pool)
+{
+	if(!pool->free_list)
+	{
+		ASSERT(false);
+		return nullptr;
+	}
+	void* next_free = pool->free_list;
+	pool->free_list = static_cast<void**>(*pool->free_list);
+	mark_block_status(pool, next_free, PoolBlockStatus::Used);
+	return next_free;
+}
+
+void pool_deallocate(Pool* pool, void* memory)
+{
+	ASSERT(memory);
+	memset(memory, 0, pool->object_size);
+	*static_cast<void**>(memory) = pool->free_list;
+	pool->free_list = static_cast<void**>(memory);
+	mark_block_status(pool, memory, PoolBlockStatus::Free);
+}
+
+#define POOL_ALLOCATE(pool, type)\
+	static_cast<type*>(pool_allocate(pool))
+
+namespace jan {
+
+struct Edge;
+struct Link;
+struct Face;
 
 struct Vertex
 {
 	Vector3 position;
 	Vector3 normal;
-	Vector3 colour;
+	Edge* any_edge;
 };
 
-struct HalfEdgeId
+struct Spoke
 {
-	s32 face: 29;
-	u32 slot: 3;
+	Edge* next;
+	Edge* prior;
+};
+
+struct Edge
+{
+	Spoke spokes[2];
+	Vertex* vertices[2];
+	Link* any_link;
+	bool sharp;
+};
+
+struct Link
+{
+	Vector3 colour;
+	Link* next;
+	Link* prior;
+	Link* fin;
+	Vertex* vertex;
+	Edge* edge;
+	Face* face;
 };
 
 struct Face
 {
-	int vertices[max_vertices_per_face];
-	HalfEdgeId opposite[max_vertices_per_face];
+	Link* link;
 	Vector3 normal;
 	int edges;
 };
 
-struct Mesh
+# if 0
+static void compute_vertex_normal(Vertex* vertex)
 {
-	Vertex* vertices;
-	Face* faces;
-	int vertices_count;
-	int vertices_capacity;
-	int faces_count;
-	int faces_capacity;
-	bool rebuild_face_adjacency;
-};
-
-static void mesh_destroy(Mesh* mesh)
-{
-	if(mesh)
+	// This just averages them and does not take into account face area.
+	Edge* edge = vertex->any_edge;
+	Edge* first = edge;
+	Vector3 normal = vector3_zero;
+	do
 	{
-		SAFE_DEALLOCATE(mesh->vertices);
-		SAFE_DEALLOCATE(mesh->faces);
-	}
+		edge = edge->spoke_next;
+		normal += face.normal;
+		link = faces[id.face].links[id.slot];
+	} while(edge != first);
+	vertex->normal = normalise(normal);
 }
+#endif
 
-static void compute_face_normal(Face* face, Vertex* vertices)
+static void compute_face_normal(Face* face)
 {
-	int first = 0;
-	int last_vertex = face->vertices[face->edges - 1];
-	Vector3 prior = vertices[last_vertex].position;
-	Vector3 current = vertices[face->vertices[0]].position;
-	int i = first;
+	// This uses Newell's Method to compute the polygon normal.
+	Link* link = face->link;
+	Link* first = link;
+	Vector3 prior = link->prior->vertex->position;
+	Vector3 current = link->vertex->position;
 	Vector3 normal = vector3_zero;
 	do
 	{
 		normal.x += (prior.y - current.y) * (prior.z + current.z);
 		normal.y += (prior.z - current.z) * (prior.x + current.x);
 		normal.z += (prior.x - current.x) * (prior.y + current.y);
-		i = (i + 1) % face->edges;
 		prior = current;
-		current = vertices[face->vertices[i]].position;
-	} while(i != first);
+		link = link->next;
+		current = link->vertex->position;
+	} while(link != first);
 	face->normal = normalise(normal);
 }
 
-static void add_face(Mesh* mesh, Face face)
+struct Mesh
 {
-	compute_face_normal(&face, mesh->vertices);
-	for(int i = 0; i < face.edges; ++i)
-	{
-		face.opposite[i].face = -1;
-		face.opposite[i].slot = 0;
-	}
+	Pool face_pool;
+	Pool edge_pool;
+	Pool vertex_pool;
+	Pool link_pool;
+	int faces_count;
+	int edges_count;
+	int vertices_count;
+};
 
-	ENSURE_ARRAY_SIZE(mesh->faces, 1);
-	mesh->faces[mesh->faces_count] = face;
-	mesh->faces_count += 1;
+static void create_mesh(Mesh* mesh)
+{
+	pool_create(&mesh->face_pool, sizeof(Face), 1024);
+	pool_create(&mesh->edge_pool, sizeof(Edge), 4096);
+	pool_create(&mesh->vertex_pool, sizeof(Vertex), 4096);
+	pool_create(&mesh->link_pool, sizeof(Link), 8192);
+
+	mesh->faces_count = 0;
+	mesh->edges_count = 0;
+	mesh->vertices_count = 0;
 }
 
-static void add_vertex(Mesh* mesh, Vertex vertex)
+static void destroy_mesh(Mesh* mesh)
 {
-	ENSURE_ARRAY_SIZE(mesh->vertices, 1);
-	mesh->vertices[mesh->vertices_count] = vertex;
+	pool_destroy(&mesh->face_pool);
+	pool_destroy(&mesh->edge_pool);
+	pool_destroy(&mesh->vertex_pool);
+	pool_destroy(&mesh->link_pool);
+}
+
+static Vertex* add_vertex(Mesh* mesh, Vector3 position)
+{
+	Vertex* vertex = POOL_ALLOCATE(&mesh->vertex_pool, Vertex);
+	vertex->position = position;
+
 	mesh->vertices_count += 1;
+
+	return vertex;
+}
+
+static Spoke* get_spoke(Edge* edge, Vertex* vertex)
+{
+	if(edge->vertices[0] == vertex)
+	{
+		return &edge->spokes[0];
+	}
+	else
+	{
+		return &edge->spokes[1];
+	}
+}
+
+static void add_spoke(Edge* edge, Vertex* vertex)
+{
+	Edge* existing_edge = vertex->any_edge;
+	if(existing_edge)
+	{
+		Spoke* a = get_spoke(edge, vertex);
+		Spoke* b = get_spoke(existing_edge, vertex);
+		if(b->prior)
+		{
+			Spoke* c = get_spoke(b->prior, vertex);
+			c->next = edge;
+		}
+		a->next = existing_edge;
+		a->prior = b->prior;
+		b->prior = edge;
+	}
+	else
+	{
+		vertex->any_edge = edge;
+		Spoke* spoke = get_spoke(edge, vertex);
+		spoke->next = edge;
+		spoke->prior = edge;
+	}
+}
+
+static void remove_spoke(Edge* edge, Vertex* vertex)
+{
+	Spoke* spoke = get_spoke(edge, vertex);
+	if(spoke->next)
+	{
+		Spoke* other = get_spoke(spoke->next, vertex);
+		other->prior = spoke->prior;
+	}
+	if(spoke->prior)
+	{
+		Spoke* other = get_spoke(spoke->prior, vertex);
+		other->next = spoke->next;
+	}
+	if(vertex->any_edge == edge)
+	{
+		if(spoke->next == edge)
+		{
+			vertex->any_edge = nullptr;
+		}
+		else
+		{
+			vertex->any_edge = spoke->next;
+		}
+	}
+	spoke->next = nullptr;
+	spoke->prior = nullptr;
+}
+
+static Edge* add_edge(Mesh* mesh, Vertex* start, Vertex* end)
+{
+	Edge* edge = POOL_ALLOCATE(&mesh->edge_pool, Edge);
+	edge->vertices[0] = start;
+	edge->vertices[1] = end;
+
+	add_spoke(edge, start);
+	add_spoke(edge, end);
+
+	mesh->edges_count += 1;
+
+	return edge;
+}
+
+static bool is_boundary(Link* link)
+{
+	return link == link->fin;
+}
+
+static void make_boundary(Link* link)
+{
+	link->fin = link;
+}
+
+static void add_fin(Link* link, Edge* edge)
+{
+	Link* existing_link = edge->any_link;
+	if(existing_link)
+	{
+		link->fin = edge->any_link;
+		existing_link->fin = link;
+	}
+	else
+	{
+		make_boundary(link);
+	}
+	edge->any_link = link;
+	link->edge = edge;
+}
+
+static void remove_fin(Link* link, Edge* edge)
+{
+	if(is_boundary(link))
+	{
+		ASSERT(edge->any_link == link);
+		edge->any_link = nullptr;
+	}
+	else
+	{
+		if(edge->any_link == link)
+		{
+			edge->any_link = link->fin;
+		}
+		make_boundary(link->fin);
+	}
+	link->fin = nullptr;
+	link->edge = nullptr;
+}
+
+static Face* add_face(Mesh* mesh, Vertex** vertices, Edge** edges, int edges_count)
+{
+	Face* face = POOL_ALLOCATE(&mesh->face_pool, Face);
+	face->edges = edges_count;
+
+	// Create each link in the face and chain it to the previous.
+	Link* first = POOL_ALLOCATE(&mesh->link_pool, Link);
+	first->vertex = vertices[0];
+	first->face = face;
+	add_fin(first, edges[0]);
+	face->link = first;
+
+	Link* prior = first;
+	for(int i = 1; i < face->edges; ++i)
+	{
+		Link* link = POOL_ALLOCATE(&mesh->link_pool, Link);
+		link->vertex = vertices[i];
+		link->face = face;
+		add_fin(link, edges[i]);
+
+		prior->next = link;
+		link->prior = prior;
+
+		prior = link;
+	}
+	// Connect the ends to close the loop.
+	first->prior = prior;
+	prior->next = first;
+
+	compute_face_normal(face);
+
+	mesh->faces_count += 1;
+
+	return face;
+}
+
+static void remove_face(Mesh* mesh, Face* face)
+{
+	Link* link = face->link;
+	Link* first = link;
+	do
+	{
+		remove_fin(link, link->edge);
+		Link* next = link->next;
+		pool_deallocate(&mesh->link_pool, link);
+		link = next;
+	} while(link != first);
+	pool_deallocate(&mesh->face_pool, face);
+	mesh->faces_count -= 1;
+}
+
+static void remove_edge(Mesh* mesh, Edge* edge)
+{
+	while(edge->any_link)
+	{
+		remove_face(mesh, edge->any_link->face);
+	}
+	remove_spoke(edge, edge->vertices[0]);
+	remove_spoke(edge, edge->vertices[1]);
+	pool_deallocate(&mesh->edge_pool, edge);
+	mesh->edges_count -= 1;
+}
+
+static void remove_vertex(Mesh* mesh, Vertex* vertex)
+{
+	while(vertex->any_edge)
+	{
+		remove_edge(mesh, vertex->any_edge);
+	}
+	pool_deallocate(&mesh->vertex_pool, vertex);
+	mesh->vertices_count -= 1;
+}
+
+static void reverse_face_winding(Face* face)
+{
+	Link* first = face->link;
+	Link* link = first;
+	Link* prior_fin = link->prior->fin;
+	bool boundary_prior = is_boundary(prior_fin);
+	Edge* prior_edge = link->prior->edge;
+	do
+	{
+		Link* fin = link->fin;
+		bool boundary = is_boundary(fin);
+		if(boundary_prior)
+		{
+			make_boundary(link);
+		}
+		else
+		{
+			link->fin = prior_fin;
+			prior_fin->fin = link;
+		}
+		prior_fin = fin;
+		boundary_prior = boundary;
+
+		Edge* edge = link->edge;
+		if(edge->any_link == link)
+		{
+			edge->any_link = link->next;
+		}
+		link->edge = prior_edge;
+		prior_edge = edge;
+
+		Link* temp = link->next;
+		link->next = link->prior;
+		link->prior = temp;
+		link = temp;
+	} while(link != first);
+}
+
+static void flip_face_normal(Face* face)
+{
+	reverse_face_winding(face);
+	face->normal = -face->normal;
+}
+
+static Face* connect_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count)
+{
+	Edge* edges[vertices_count];
+	int end = vertices_count - 1;
+	FOR_N(i, end)
+	{
+		edges[i] = add_edge(mesh, vertices[i], vertices[i + 1]);
+	}
+	edges[end] = add_edge(mesh, vertices[end], vertices[0]);
+
+	Face* face = add_face(mesh, vertices, edges, vertices_count);
+
+	return face;
+}
+
+static bool edge_contains_vertices(Edge* edge, Vertex* a, Vertex* b)
+{
+	return
+		(edge->vertices[0] == a && edge->vertices[1] == b) ||
+		(edge->vertices[1] == a && edge->vertices[0] == b);
+}
+
+static Edge* get_edge_spoked_from_vertex(Vertex* hub, Vertex* vertex)
+{
+	if(!hub->any_edge)
+	{
+		return nullptr;
+	}
+	Edge* first = hub->any_edge;
+	Edge* edge = first;
+	do
+	{
+		if(edge_contains_vertices(edge, hub, vertex))
+		{
+			return edge;
+		}
+		edge = get_spoke(edge, hub)->next;
+	} while(edge != first);
+	return nullptr;
+}
+
+static Edge* add_edge_if_nonexistant(Mesh* mesh, Vertex* start, Vertex* end)
+{
+	Edge* edge = get_edge_spoked_from_vertex(start, end);
+	if(edge)
+	{
+		return edge;
+	}
+	else
+	{
+		return add_edge(mesh, start, end);
+	}
+}
+
+static Face* connect_disconnected_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count)
+{
+	Edge* edges[vertices_count];
+	int end = vertices_count - 1;
+	FOR_N(i, end)
+	{
+		edges[i] = add_edge_if_nonexistant(mesh, vertices[i], vertices[i + 1]);
+	}
+	edges[end] = add_edge_if_nonexistant(mesh, vertices[end], vertices[0]);
+
+	Face* face = add_face(mesh, vertices, edges, vertices_count);
+
+	return face;
+}
+
+static void remove_face_and_its_unlinked_edges_and_vertices(Mesh* mesh, Face* face)
+{
+	Link* first = face->link;
+	Link* link = first;
+	do
+	{
+		Edge* edge = link->edge;
+		remove_fin(link, edge);
+		Link* next = link->next;
+		pool_deallocate(&mesh->link_pool, link);
+		if(!edge->any_link)
+		{
+			Vertex* vertices[2];
+			vertices[0] = edge->vertices[0];
+			vertices[1] = edge->vertices[1];
+			remove_spoke(edge, vertices[0]);
+			remove_spoke(edge, vertices[1]);
+			pool_deallocate(&mesh->edge_pool, edge);
+			mesh->edges_count -= 1;
+			if(!vertices[0]->any_edge)
+			{
+				pool_deallocate(&mesh->vertex_pool, vertices[0]);
+				mesh->vertices_count -= 1;
+			}
+			if(!vertices[1]->any_edge)
+			{
+				pool_deallocate(&mesh->vertex_pool, vertices[1]);
+				mesh->vertices_count -= 1;
+			}
+		}
+		link = next;
+	} while(link != first);
+	pool_deallocate(&mesh->face_pool, face);
+	mesh->faces_count -= 1;
 }
 
 static void make_a_weird_face(Mesh* mesh)
 {
 	const int vertices_count = 8;
-	Vertex vertices[vertices_count] = {};
-	vertices[0].position = {-0.20842f, +0.20493f, 0.0f};
-	vertices[1].position = {+0.53383f, -0.31467f, 0.0f};
-	vertices[2].position = {+0.19402f, -0.55426f, 0.0f};
-	vertices[3].position = {+0.86623f, -0.76310f, 0.0f};
-	vertices[4].position = {+0.58252f, +0.83783f, 0.0f};
-	vertices[5].position = {-0.58114f, +0.56986f, 0.0f};
-	vertices[6].position = {-0.59335f, -0.28583f, 0.0f};
-	vertices[7].position = {-0.05012f, -0.82722f, 0.0f};
-	for(int i = 0; i < vertices_count; ++i)
+	Vector3 positions[vertices_count];
+	positions[0] = {-0.20842f, +0.20493f, 0.0f};
+	positions[1] = {+0.53383f, -0.31467f, 0.0f};
+	positions[2] = {+0.19402f, -0.55426f, 0.0f};
+	positions[3] = {+0.86623f, -0.76310f, 0.0f};
+	positions[4] = {+0.58252f, +0.83783f, 0.0f};
+	positions[5] = {-0.58114f, +0.56986f, 0.0f};
+	positions[6] = {-0.59335f, -0.28583f, 0.0f};
+	positions[7] = {-0.05012f, -0.82722f, 0.0f};
+
+	Vertex* vertices[vertices_count];
+	FOR_N(i, vertices_count)
 	{
-		add_vertex(mesh, vertices[i]);
+		vertices[i] = add_vertex(mesh, positions[i]);
 	}
 
-	Face face;
-	face.edges = 8;
-	for(int i = 0; i < face.edges; ++i)
-	{
-		face.vertices[i] = i;
-	}
-	add_face(mesh, face);
+	connect_vertices_and_add_face(mesh, vertices, vertices_count);
 }
 
 static float signed_double_area(Vector2 v0, Vector2 v1, Vector2 v2)
@@ -7027,7 +7542,7 @@ static bool point_in_triangle(Vector2 v0, Vector2 v1, Vector2 v2, Vector2 p)
 static bool is_clockwise(Vector2* vertices, int vertices_count)
 {
 	float d = 0.0f;
-	for(int i = 0; i < vertices_count; ++i)
+	FOR_N(i, vertices_count)
 	{
 		Vector2 v0 = vertices[i];
 		Vector2 v1 = vertices[(i + 1) % vertices_count];
@@ -7038,7 +7553,6 @@ static bool is_clockwise(Vector2* vertices, int vertices_count)
 
 static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_count, u16** out_indices, int* out_indices_count)
 {
-	// Produce a triangle list using ear-clipping.
 	VertexPNC* vertices = nullptr;
 	int vertices_count = 0;
 	int vertices_capacity = 0;
@@ -7046,22 +7560,21 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 	int indices_count = 0;
 	int indices_capacity = 0;
 
-	for(int i = 0; i < mesh->faces_count; ++i)
+	FOR_EACH_IN_POOL(Face, face, mesh->face_pool)
 	{
-		Face face = mesh->faces[i];
-
 		// The face is already a triangle.
-		if(face.edges == 3)
+		if(face->edges == 3)
 		{
 			ENSURE_ARRAY_SIZE(indices, 3);
-			for(int j = 0; j < 3; ++j)
+			Link* link = face->link;
+			FOR_N(i, 3)
 			{
-				Vertex vertex = mesh->vertices[face.vertices[j]];
-				int index = vertices_count + j;
-				vertices[index].position = vertex.position;
-				vertices[index].normal = face.normal;
-				vertices[index].colour = rgb_to_u32(vertex.colour);
-				indices[indices_count + j] = index;
+				int index = vertices_count + i;
+				vertices[index].position = link->vertex->position;
+				vertices[index].normal = face->normal;
+				vertices[index].colour = rgb_to_u32(link->colour);
+				indices[indices_count + i] = index;
+				link = link->next;
 			}
 			vertices_count += 3;
 			indices_count += 3;
@@ -7069,26 +7582,29 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 		}
 
 		// Copy all of the vertices in the face.
-		ENSURE_ARRAY_SIZE(vertices, face.edges);
-		for(int j = 0; j < face.edges; ++j)
+		ENSURE_ARRAY_SIZE(vertices, face->edges);
+		Link* link = face->link;
+		FOR_N(i, face->edges)
 		{
-			Vertex vertex = mesh->vertices[face.vertices[j]];
-			int index = vertices_count + j;
-			vertices[index].position = vertex.position;
-			vertices[index].normal = face.normal;
-			vertices[index].colour = rgb_to_u32(vertex.colour);
+			int index = vertices_count + i;
+			vertices[index].position = link->vertex->position;
+			vertices[index].normal = face->normal;
+			vertices[index].colour = rgb_to_u32(link->colour);
+			link = link->next;
 		}
 
 		// Project vertices onto a plane to produce 2D coordinates.
+		const int max_vertices_per_face = 8;
 		Vector2 projected[max_vertices_per_face];
-		ASSERT(face.edges <= max_vertices_per_face);
-		Matrix3 m = orthogonal_basis(face.normal);
+		ASSERT(face->edges <= max_vertices_per_face);
+		Matrix3 m = orthogonal_basis(face->normal);
 		Matrix3 mi = transpose(m);
-		for(int j = 0; j < face.edges; ++j)
+		link = face->link;
+		FOR_N(i, face->edges)
 		{
-			int vertex_index = face.vertices[j];
-			Vector3 p = mesh->vertices[vertex_index].position;
-			projected[j] = mi * p;
+			Vector3 p = link->vertex->position;
+			projected[i] = mi * p;
+			link = link->next;
 		}
 
 		// The projection may reverse the winding of the triangle. Reversing
@@ -7098,7 +7614,7 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 		// chains are used to index the projected vertices later during
 		// ear-finding.
 		bool reverse_winding = false;
-		if(!is_clockwise(projected, face.edges))
+		if(!is_clockwise(projected, face->edges))
 		{
 			reverse_winding = true;
 		}
@@ -7106,21 +7622,21 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 		// Keep vertex chains to walk both ways around the polygon.
 		int l[max_vertices_per_face];
 		int r[max_vertices_per_face];
-		for(int j = 0; j < face.edges; ++j)
+		FOR_N(i, face->edges)
 		{
-			l[j] = mod(j - 1, face.edges);
-			r[j] = mod(j + 1, face.edges);
+			l[i] = mod(i - 1, face->edges);
+			r[i] = mod(i + 1, face->edges);
 		}
 
 		// A polygon always has exactly n - 2 triangles, where n is the number
 		// of edges in the polygon.
-		ENSURE_ARRAY_SIZE(indices, 3 * (face.edges - 2));
+		ENSURE_ARRAY_SIZE(indices, 3 * (face->edges - 2));
 
 		// Walk the right loop and find ears to triangulate using each of those
 		// vertices.
-		int j = face.edges - 1;
+		int j = face->edges - 1;
 		int triangles_this_face = 0;
-		while(triangles_this_face < face.edges - 2)
+		while(triangles_this_face < face->edges - 2)
 		{
 			j = r[j];
 
@@ -7144,10 +7660,10 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 			}
 
 			bool in_triangle = false;
-			for(int m = 0; m < face.edges; ++m)
+			FOR_N(k, face->edges)
 			{
-				Vector2 point = projected[m];
-				if(m != l[j] && m != j && m != r[j] && point_in_triangle(v[0], v[1], v[2], point))
+				Vector2 point = projected[k];
+				if(k != l[j] && k != j && k != r[j] && point_in_triangle(v[0], v[1], v[2], point))
 				{
 					in_triangle = true;
 					break;
@@ -7169,7 +7685,7 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 
 		// Increment the vertices count after adding all the indices so its
 		// pre-increment value can be used to offset the indices correctly.
-		vertices_count += face.edges;
+		vertices_count += face->edges;
 	}
 
 	*out_vertices = vertices;
@@ -7178,126 +7694,26 @@ static void triangulate(Mesh* mesh, VertexPNC** out_vertices, int* out_vertices_
 	*out_indices_count = indices_count;
 }
 
-static int start_vertex(Face face, u32 slot)
-{
-	return face.vertices[slot];
-}
-
-static int end_vertex(Face face, u32 slot)
-{
-	int index = (slot + 1) % face.edges;
-	return face.vertices[index];
-}
-
-struct HalfEdgeDesc
-{
-	HalfEdgeId id;
-	int v0;
-	int v1;
-};
-
-static void connect_faces(Mesh* mesh, HalfEdgeId* edges, int count)
-{
-	ASSERT(count <= 2);
-	if(count == 1)
-	{
-		HalfEdgeId e0 = edges[0];
-		mesh->faces[e0.face].opposite[e0.slot].face = -1;
-	}
-	else if(count == 2)
-	{
-		HalfEdgeId e0 = edges[0];
-		HalfEdgeId e1 = edges[1];
-		mesh->faces[e0.face].opposite[e0.slot] = e1;
-		mesh->faces[e1.face].opposite[e1.slot] = e0;
-	}
-}
-
-static bool starting_vertex_before(HalfEdgeDesc a, HalfEdgeDesc b)
-{
-	return a.v0 < b.v0;
-}
-
-DEFINE_HEAP_SORT(HalfEdgeDesc, starting_vertex_before, by_starting_vertex);
-
-static void rebuild_face_connections(Mesh* mesh)
-{
-	if(!mesh->rebuild_face_adjacency)
-	{
-		return;
-	}
-
-	int edges_count = 0;
-	for(int i = 0; i < mesh->faces_count; ++i)
-	{
-		edges_count += mesh->faces[i].edges;
-	}
-	HalfEdgeDesc* edges = ALLOCATE(HalfEdgeDesc, edges_count);
-
-	// Produce a list of all the half-edges in the mesh.
-	for(int i = 0; i < mesh->faces_count; ++i)
-	{
-		Face face = mesh->faces[i];
-		for(int j = 0; j < face.edges; ++j)
-		{
-			edges[edges_count].id.slot = j;
-			edges[edges_count].id.face = i;
-			int start = start_vertex(face, j);
-			int end = end_vertex(face, j);
-			edges[edges_count].v0 = MIN(start, end);
-			edges[edges_count].v1 = MAX(start, end);
-			edges_count += 1;
-		}
-	}
-
-	// Sorting by the first vertex index will produce a list of half edges
-	// where neighbors are sequential.
-	heap_sort_by_starting_vertex(edges, edges_count);
-
-	// Connect the half edge neighbors.
-	s32 prior[2] = {-1, -1};
-	HalfEdgeId pair[2];
-	int count = 0;
-	for(int i = 0; i < edges_count; ++i)
-	{
-		HalfEdgeDesc e = edges[i];
-		if(e.v0 == prior[0] && e.v1 == prior[1])
-		{
-			pair[count] = e.id;
-			count += 1;
-			if(count == 2)
-			{
-				connect_faces(mesh, pair, count);
-				count = 0;
-			}
-		}
-		else
-		{
-			connect_faces(mesh, pair, count);
-			pair[0] = e.id;
-			count = 1;
-		}
-		prior[0] = e.v0;
-		prior[1] = e.v1;
-	}
-	connect_faces(mesh, pair, count);
-
-	DEALLOCATE(edges);
-
-	mesh->rebuild_face_adjacency = false;
-}
-
 struct Selection
 {
-	int* faces;
-	int faces_count;
+	enum class Type
+	{
+		Vertex,
+		Edge,
+		Face,
+	};
+
+	void** parts;
+	int parts_count;
+	Type type;
 };
 
-static bool face_selected(Selection* selection, int face)
+static bool face_selected(Selection* selection, Face* face)
 {
-	for(int i = 0; i < selection->faces_count; ++i)
+	FOR_N(i, selection->parts_count)
 	{
-		if(selection->faces[i] == face)
+		Face* selected = static_cast<Face*>(selection->parts[i]);
+		if(selected == face)
 		{
 			return true;
 		}
@@ -7305,110 +7721,255 @@ static bool face_selected(Selection* selection, int face)
 	return false;
 }
 
+static Selection select_all(Mesh* mesh)
+{
+	Selection selection;
+	selection.type = Selection::Type::Face;
+	selection.parts_count = mesh->faces_count;
+	selection.parts = ALLOCATE(void*, selection.parts_count);
+
+	int i = 0;
+	FOR_EACH_IN_POOL(Face, face, mesh->face_pool)
+	{
+		selection.parts[i] = face;
+		i += 1;
+	}
+
+	return selection;
+}
+
+// This is just a fixed-size linearly-probed hash map.
+struct VertexMap
+{
+	struct Pair
+	{
+		Vertex* key;
+		Vertex* value;
+	};
+	Pair* pairs;
+	int count;
+	int cap;
+};
+
+static void map_create(VertexMap* map, int cap)
+{
+	map->pairs = ALLOCATE(VertexMap::Pair, cap);
+	map->count = 0;
+	map->cap = cap;
+}
+
+static void map_destroy(VertexMap* map)
+{
+	if(map)
+	{
+		SAFE_DEALLOCATE(map->pairs);
+	}
+}
+
+static uintptr_t hash_pointer(void* pointer)
+{
+	uintptr_t shift = log2(1 + sizeof(pointer));
+	return reinterpret_cast<uintptr_t>(pointer) >> shift;
+}
+
+static Vertex* map_find(VertexMap* map, Vertex* key)
+{
+	int first = hash_pointer(key) % map->cap;
+	int index = first;
+	while(map->pairs[index].value && map->pairs[index].key != key)
+	{
+		index = (index + 1) % map->cap;
+		if(index == first)
+		{
+			return nullptr;
+		}
+	}
+	return map->pairs[index].value;
+}
+
+static void map_add(VertexMap* map, Vertex* key, Vertex* value)
+{
+	ASSERT(map->count < map->cap);
+	int index = hash_pointer(key) % map->cap;
+	while(map->pairs[index].value)
+	{
+		index = (index + 1) % map->cap;
+	}
+	map->pairs[index].key = key;
+	map->pairs[index].value = value;
+}
+
 static void extrude(Mesh* mesh, Selection* selection, float distance)
 {
-	ASSERT(selection->faces_count != 0);
-
-	rebuild_face_connections(mesh);
+	ASSERT(selection->type == Selection::Type::Face);
 
 	// Calculate the vector to extrude all the vertices along.
 	Vector3 average_direction = vector3_zero;
-	for(int i = 0; i < selection->faces_count; ++i)
+	FOR_N(i, selection->parts_count)
 	{
-		int face_index = selection->faces[i];
-		Face face = mesh->faces[face_index];
-		average_direction += face.normal;
+		Face* face = static_cast<Face*>(selection->parts[i]);
+		average_direction += face->normal;
 	}
 	Vector3 extrusion = distance * normalise(average_direction);
 
-	// Use an index map to redirect vertices to their extruded double when it's
+	// Use a map to redirect vertices to their extruded double when it's
 	// already been added.
-	int* map = ALLOCATE(int, mesh->vertices_count);
-	for(int i = 0; i < mesh->vertices_count; ++i)
-	{
-		map[i] = i;
-	}
+	VertexMap map;
+	map_create(&map, mesh->vertices_count);
 
-	// Generate a quad for each edge that either doesn't connect to a face or
-	// connects to an unselected face.
-	for(int i = 0; i < selection->faces_count; ++i)
+	FOR_N(i, selection->parts_count)
 	{
-		int face_index = selection->faces[i];
-		Face* face = &mesh->faces[face_index];
-		for(int j = 0; j < face->edges; ++j)
+		Face* face = static_cast<Face*>(selection->parts[i]);
+		Link* first = face->link;
+		Link* link = first;
+		do
 		{
-			HalfEdgeId half_edge = face->opposite[j];
-			if(half_edge.face == -1 || !face_selected(selection, half_edge.face))
+			if(is_boundary(link) || !face_selected(selection, link->fin->face))
 			{
 				// Add vertices only where they haven't been added already.
-				int start = start_vertex(*face, j);
-				int end = end_vertex(*face, j);
-				if(map[start] == start)
+				Vertex* start = link->vertex;
+				Vertex* end = link->next->vertex;
+				if(!map_find(&map, start))
 				{
-					map[start] = mesh->vertices_count;
-					Vertex vertex = mesh->vertices[start];
-					vertex.position += extrusion;
-					add_vertex(mesh, vertex);
+					Vector3 position = start->position + extrusion;
+					Vertex* vertex = add_vertex(mesh, position);
+					add_edge(mesh, start, vertex);
+					map_add(&map, start, vertex);
 				}
-				if(map[end] == end)
+				if(!map_find(&map, end))
 				{
-					map[end] = mesh->vertices_count;
-					Vertex vertex = mesh->vertices[end];
-					vertex.position += extrusion;
-					add_vertex(mesh, vertex);
+					Vector3 position = end->position + extrusion;
+					Vertex* vertex = add_vertex(mesh, position);
+					add_edge(mesh, end, vertex);
+					map_add(&map, end, vertex);
 				}
 
 				// Add the extruded side face for this edge.
-				Face face;
-				face.edges = 4;
-				face.vertices[0] = start;
-				face.vertices[1] = end;
-				face.vertices[2] = map[end];
-				face.vertices[3] = map[start];
-				add_face(mesh, face);
+				Vertex* vertices[4];
+				vertices[0] = start;
+				vertices[1] = end;
+				vertices[2] = map_find(&map, end);
+				vertices[3] = map_find(&map, start);
+				Edge* edges[4];
+				edges[0] = link->edge;
+				edges[1] = vertices[2]->any_edge;
+				edges[2] = add_edge(mesh, vertices[2], vertices[3]);
+				edges[3] = vertices[3]->any_edge;
+				add_face(mesh, vertices, edges, 4);
 			}
-		}
+			link = link->next;
+		} while(link != first);
 	}
 
-	// Adjust the vertices in the existing selected faces to match the extruded
-	// vertices.
-	for(int i = 0; i < selection->faces_count; ++i)
+	FOR_N(i, selection->parts_count)
 	{
-		Face* face = &mesh->faces[selection->faces[i]];
-		for(int j = 0; j < face->edges; ++j)
+		Face* face = static_cast<Face*>(selection->parts[i]);
+		const int vertices_count = face->edges;
+		Vertex* vertices[vertices_count];
+		Link* link = face->link;
+		FOR_N(j, vertices_count)
 		{
-			face->vertices[j] = map[face->vertices[j]];
+			vertices[j] = map_find(&map, link->vertex);
+			link = link->next;
 		}
+		connect_disconnected_vertices_and_add_face(mesh, vertices, vertices_count);
+		remove_face_and_its_unlinked_edges_and_vertices(mesh, face);
 	}
 
-	DEALLOCATE(map);
-
-	mesh->rebuild_face_adjacency = true;
+	map_destroy(&map);
 }
 
-static void translate(Mesh* mesh, Selection* selection, Vector3 translation)
+static void colour_all_faces(Mesh* mesh, Vector3 colour)
 {
-	for(int i = 0; i < selection->faces_count; ++i)
+	FOR_EACH_IN_POOL(Link, link, mesh->link_pool)
 	{
-		int face_index = selection->faces[i];
-		Face* face = &mesh->faces[face_index];
-		for(int j = 0; j < face->edges; ++j)
-		{
-			int index = face->vertices[j];
-			mesh->vertices[index].position += translation;
-		}
+		link->colour = colour;
 	}
 }
 
-static void colour_all_vertices(Mesh* mesh, Vector3 colour)
+} // namespace jan
+
+struct Stack
 {
-	for(int i = 0; i < mesh->vertices_count; ++i)
+	u8* memory;
+	u32 top;
+	u32 bytes;
+};
+
+static void stack_create(Stack* stack, u32 bytes)
+{
+	stack->memory = ALLOCATE(u8, bytes);
+	stack->top = 0;
+	stack->bytes = bytes;
+}
+
+static void stack_destroy(Stack* stack)
+{
+	if(stack)
 	{
-		mesh->vertices[i].colour = colour;
+		SAFE_DEALLOCATE(stack->memory);
+		stack->top = 0;
+		stack->bytes = 0;
 	}
 }
 
-} // namespace gen
+static void* stack_allocate(Stack* stack, int bytes)
+{
+	u32 prior_top = stack->top;
+	u32 header_size = sizeof(prior_top);
+	u8* top = stack->memory + stack->top;
+
+	uintptr_t address = reinterpret_cast<uintptr_t>(top + header_size);
+	const u32 alignment = 16;
+	u32 adjustment = alignment - (address & (alignment - 1));
+	if(adjustment == alignment)
+	{
+		adjustment = 0;
+	}
+
+	u32 total_bytes = adjustment + header_size + bytes;
+	if(stack->top + total_bytes > stack->bytes)
+	{
+		return nullptr;
+	}
+	stack->top += total_bytes;
+
+	top += adjustment;
+	*reinterpret_cast<u32*>(top) = prior_top;
+
+	void* result = top + header_size;
+	memset(result, 0, bytes);
+	return result;
+}
+
+static void* stack_reallocate(Stack* stack, void* memory, int bytes)
+{
+	u8* place = static_cast<u8*>(memory);
+	u32 more_bytes = stack->top - (place - stack->memory);
+	if(stack->top + more_bytes > stack->bytes)
+	{
+		return nullptr;
+	}
+	stack->top += more_bytes;
+	return memory;
+}
+
+static void stack_deallocate(Stack* stack, void* memory)
+{
+	u32 prior_top;
+	u8* header = static_cast<u8*>(memory) - sizeof(prior_top);
+	prior_top = *header;
+	stack->top = prior_top;
+}
+
+#define STACK_ALLOCATE(stack, type, count)\
+	static_cast<type*>(stack_allocate(stack, sizeof(type) * (count)))
+
+#define STACK_REALLOCATE(stack, type, memory, count)\
+	static_cast<type*>(stack_reallocate(stack, memory, sizeof(type) * (count)))
+
+#define STACK_DEALLOCATE(stack, memory)\
+	stack_deallocate(stack, memory)
 
 // §3.14 Render System..........................................................
 
@@ -8379,26 +8940,22 @@ static bool system_initialise()
 	AABB octagon_bounds;
 	object_create(&octagon);
 	{
-		gen::Mesh mesh = {};
-		gen::make_a_weird_face(&mesh);
+		jan::Mesh mesh;
+		jan::create_mesh(&mesh);
+		jan::make_a_weird_face(&mesh);
 
-		int bleh[1] = {0};
-		gen::Selection selection;
-		selection.faces = bleh;
-		selection.faces_count = 1;
-		gen::extrude(&mesh, &selection, 0.8f);
+		jan::Selection selection = jan::select_all(&mesh);
+		jan::extrude(&mesh, &selection, 0.6f);
 
-		Vector3 translation = {-0.5f, 0.2f, 0.0f};
-		gen::translate(&mesh, &selection, translation);
-
-		gen::colour_all_vertices(&mesh, {0.0f, 1.0f, 1.0f});
+		Vector3 cyan = {0.0f, 1.0f, 1.0f};
+		jan::colour_all_faces(&mesh, cyan);
 
 		VertexPNC* vertices;
 		int vertices_count;
 		u16* indices;
 		int indices_count;
-		gen::triangulate(&mesh, &vertices, &vertices_count, &indices, &indices_count);
-		gen::mesh_destroy(&mesh);
+		jan::triangulate(&mesh, &vertices, &vertices_count, &indices, &indices_count);
+		jan::destroy_mesh(&mesh);
 
 		object_set_surface(&octagon, vertices, vertices_count, indices, indices_count);
 
