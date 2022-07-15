@@ -2935,10 +2935,15 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_CULL_FACE 0x0B44
 #define GL_DEPTH_BUFFER_BIT 0x00000100
 #define GL_DEPTH_TEST 0x0B71
+#define GL_EQUAL 0x0202
 #define GL_FALSE 0
 #define GL_FILL 0x1B02
 #define GL_FLOAT 0x1406
 #define GL_FRONT_AND_BACK 0x0408
+#define GL_GEQUAL 0x0206
+#define GL_GREATER 0x0204
+#define GL_LEQUAL 0x0203
+#define GL_LESS 0x0201
 #define GL_LINE 0x1B01
 #define GL_LINEAR 0x2601
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703
@@ -2994,6 +2999,7 @@ typedef ptrdiff_t GLsizeiptr;
 
 void (APIENTRYA *p_glBlendFunc)(GLenum sfactor, GLenum dfactor) = nullptr;
 void (APIENTRYA *p_glClear)(GLbitfield mask) = nullptr;
+void (APIENTRYA *p_glDepthFunc)(GLenum func) = nullptr;
 void (APIENTRYA *p_glDepthMask)(GLboolean flag) = nullptr;
 void (APIENTRYA *p_glDisable)(GLenum cap) = nullptr;
 void (APIENTRYA *p_glEnable)(GLenum cap) = nullptr;
@@ -3061,6 +3067,7 @@ void (APIENTRYA *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint para
 
 #define glBlendFunc p_glBlendFunc
 #define glClear p_glClear
+#define glDepthFunc p_glDepthFunc
 #define glDepthMask p_glDepthMask
 #define glDisable p_glDisable
 #define glEnable p_glEnable
@@ -7030,6 +7037,88 @@ void pool_deallocate(Pool* pool, void* memory)
 #define POOL_ALLOCATE(pool, type)\
 	static_cast<type*>(pool_allocate(pool))
 
+struct Stack
+{
+	u8* memory;
+	u32 top;
+	u32 bytes;
+};
+
+static void stack_create(Stack* stack, u32 bytes)
+{
+	stack->memory = ALLOCATE(u8, bytes);
+	stack->top = 0;
+	stack->bytes = bytes;
+}
+
+static void stack_destroy(Stack* stack)
+{
+	if (stack)
+	{
+		SAFE_DEALLOCATE(stack->memory);
+		stack->top = 0;
+		stack->bytes = 0;
+	}
+}
+
+static void* stack_allocate(Stack* stack, int bytes)
+{
+	u32 prior_top = stack->top;
+	u32 header_size = sizeof(prior_top);
+	u8* top = stack->memory + stack->top;
+
+	uintptr_t address = reinterpret_cast<uintptr_t>(top + header_size);
+	const u32 alignment = 16;
+	u32 adjustment = alignment - (address & (alignment - 1));
+	if (adjustment == alignment)
+	{
+		adjustment = 0;
+	}
+
+	u32 total_bytes = adjustment + header_size + bytes;
+	if (stack->top + total_bytes > stack->bytes)
+	{
+		return nullptr;
+	}
+	stack->top += total_bytes;
+
+	top += adjustment;
+	*reinterpret_cast<u32*>(top) = prior_top;
+
+	void* result = top + header_size;
+	memset(result, 0, bytes);
+	return result;
+}
+
+static void* stack_reallocate(Stack* stack, void* memory, int bytes)
+{
+	u8* place = static_cast<u8*>(memory);
+	u32 more_bytes = stack->top - (place - stack->memory);
+	if (stack->top + more_bytes > stack->bytes)
+	{
+		return nullptr;
+	}
+	stack->top += more_bytes;
+	return memory;
+}
+
+static void stack_deallocate(Stack* stack, void* memory)
+{
+	u32 prior_top;
+	u8* header = static_cast<u8*>(memory) - sizeof(prior_top);
+	prior_top = *header;
+	stack->top = prior_top;
+}
+
+#define STACK_ALLOCATE(stack, type, count)\
+	static_cast<type*>(stack_allocate(stack, sizeof(type) * (count)))
+
+#define STACK_REALLOCATE(stack, type, memory, count)\
+	static_cast<type*>(stack_reallocate(stack, memory, sizeof(type) * (count)))
+
+#define STACK_DEALLOCATE(stack, memory)\
+	stack_deallocate(stack, memory)
+
 namespace jan {
 
 struct Edge;
@@ -7394,9 +7483,9 @@ static void flip_face_normal(Face* face)
 	face->normal = -face->normal;
 }
 
-static Face* connect_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count)
+static Face* connect_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count, Stack* stack)
 {
-	Edge* edges[vertices_count];
+	Edge** edges = STACK_ALLOCATE(stack, Edge*, vertices_count);
 	int end = vertices_count - 1;
 	FOR_N(i, end)
 	{
@@ -7405,6 +7494,7 @@ static Face* connect_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int ve
 	edges[end] = add_edge(mesh, vertices[end], vertices[0]);
 
 	Face* face = add_face(mesh, vertices, edges, vertices_count);
+	STACK_DEALLOCATE(stack, edges);
 
 	return face;
 }
@@ -7448,9 +7538,9 @@ static Edge* add_edge_if_nonexistant(Mesh* mesh, Vertex* start, Vertex* end)
 	}
 }
 
-static Face* connect_disconnected_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count)
+static Face* connect_disconnected_vertices_and_add_face(Mesh* mesh, Vertex** vertices, int vertices_count, Stack* stack)
 {
-	Edge* edges[vertices_count];
+	Edge** edges = STACK_ALLOCATE(stack, Edge*, vertices_count);
 	int end = vertices_count - 1;
 	FOR_N(i, end)
 	{
@@ -7459,6 +7549,7 @@ static Face* connect_disconnected_vertices_and_add_face(Mesh* mesh, Vertex** ver
 	edges[end] = add_edge_if_nonexistant(mesh, vertices[end], vertices[0]);
 
 	Face* face = add_face(mesh, vertices, edges, vertices_count);
+	STACK_DEALLOCATE(stack, edges);
 
 	return face;
 }
@@ -7499,7 +7590,7 @@ static void remove_face_and_its_unlinked_edges_and_vertices(Mesh* mesh, Face* fa
 	mesh->faces_count -= 1;
 }
 
-static void make_a_weird_face(Mesh* mesh)
+static void make_a_weird_face(Mesh* mesh, Stack* stack)
 {
 	const int vertices_count = 8;
 	Vector3 positions[vertices_count];
@@ -7518,7 +7609,7 @@ static void make_a_weird_face(Mesh* mesh)
 		vertices[i] = add_vertex(mesh, positions[i]);
 	}
 
-	connect_vertices_and_add_face(mesh, vertices, vertices_count);
+	connect_vertices_and_add_face(mesh, vertices, vertices_count, stack);
 }
 
 static float signed_double_area(Vector2 v0, Vector2 v1, Vector2 v2)
@@ -7799,7 +7890,7 @@ static void map_add(VertexMap* map, Vertex* key, Vertex* value)
 	map->pairs[index].value = value;
 }
 
-static void extrude(Mesh* mesh, Selection* selection, float distance)
+static void extrude(Mesh* mesh, Selection* selection, float distance, Stack* stack)
 {
 	ASSERT(selection->type == Selection::Type::Face);
 
@@ -7865,15 +7956,16 @@ static void extrude(Mesh* mesh, Selection* selection, float distance)
 	{
 		Face* face = static_cast<Face*>(selection->parts[i]);
 		const int vertices_count = face->edges;
-		Vertex* vertices[vertices_count];
+		Vertex** vertices = STACK_ALLOCATE(stack, Vertex*, vertices_count);
 		Link* link = face->link;
 		FOR_N(j, vertices_count)
 		{
 			vertices[j] = map_find(&map, link->vertex);
 			link = link->next;
 		}
-		connect_disconnected_vertices_and_add_face(mesh, vertices, vertices_count);
+		connect_disconnected_vertices_and_add_face(mesh, vertices, vertices_count, stack);
 		remove_face_and_its_unlinked_edges_and_vertices(mesh, face);
+		STACK_DEALLOCATE(stack, vertices);
 	}
 
 	map_destroy(&map);
@@ -7888,88 +7980,6 @@ static void colour_all_faces(Mesh* mesh, Vector3 colour)
 }
 
 } // namespace jan
-
-struct Stack
-{
-	u8* memory;
-	u32 top;
-	u32 bytes;
-};
-
-static void stack_create(Stack* stack, u32 bytes)
-{
-	stack->memory = ALLOCATE(u8, bytes);
-	stack->top = 0;
-	stack->bytes = bytes;
-}
-
-static void stack_destroy(Stack* stack)
-{
-	if(stack)
-	{
-		SAFE_DEALLOCATE(stack->memory);
-		stack->top = 0;
-		stack->bytes = 0;
-	}
-}
-
-static void* stack_allocate(Stack* stack, int bytes)
-{
-	u32 prior_top = stack->top;
-	u32 header_size = sizeof(prior_top);
-	u8* top = stack->memory + stack->top;
-
-	uintptr_t address = reinterpret_cast<uintptr_t>(top + header_size);
-	const u32 alignment = 16;
-	u32 adjustment = alignment - (address & (alignment - 1));
-	if(adjustment == alignment)
-	{
-		adjustment = 0;
-	}
-
-	u32 total_bytes = adjustment + header_size + bytes;
-	if(stack->top + total_bytes > stack->bytes)
-	{
-		return nullptr;
-	}
-	stack->top += total_bytes;
-
-	top += adjustment;
-	*reinterpret_cast<u32*>(top) = prior_top;
-
-	void* result = top + header_size;
-	memset(result, 0, bytes);
-	return result;
-}
-
-static void* stack_reallocate(Stack* stack, void* memory, int bytes)
-{
-	u8* place = static_cast<u8*>(memory);
-	u32 more_bytes = stack->top - (place - stack->memory);
-	if(stack->top + more_bytes > stack->bytes)
-	{
-		return nullptr;
-	}
-	stack->top += more_bytes;
-	return memory;
-}
-
-static void stack_deallocate(Stack* stack, void* memory)
-{
-	u32 prior_top;
-	u8* header = static_cast<u8*>(memory) - sizeof(prior_top);
-	prior_top = *header;
-	stack->top = prior_top;
-}
-
-#define STACK_ALLOCATE(stack, type, count)\
-	static_cast<type*>(stack_allocate(stack, sizeof(type) * (count)))
-
-#define STACK_REALLOCATE(stack, type, memory, count)\
-	static_cast<type*>(stack_reallocate(stack, memory, sizeof(type) * (count)))
-
-#define STACK_DEALLOCATE(stack, memory)\
-	stack_deallocate(stack, memory)
 
 // §3.14 Render System..........................................................
 
@@ -8800,6 +8810,7 @@ Vector2* particles;
 int particles_count;
 LineSegment* isolines[5];
 int isolines_count[5];
+Stack stack;
 
 TWEAKER_BOOL(debug_draw_colliders, false);
 TWEAKER_INT_RANGE(debug_bih_tree_depth, 0, -1, 16);
@@ -8815,6 +8826,7 @@ static bool system_initialise()
 	glEnable(GL_CULL_FACE);
 
 	arandom::seed_by_time(&randomness);
+	stack_create(&stack, 1024 * 4);
 
 	Object tetrahedron;
 	Vector3 positions[4] =
@@ -8938,14 +8950,16 @@ static bool system_initialise()
 
 	Object octagon;
 	AABB octagon_bounds;
+	octagon_bounds.max = vector3_one;
+	octagon_bounds.min = -vector3_one;
 	object_create(&octagon);
 	{
 		jan::Mesh mesh;
 		jan::create_mesh(&mesh);
-		jan::make_a_weird_face(&mesh);
+		jan::make_a_weird_face(&mesh, &stack);
 
 		jan::Selection selection = jan::select_all(&mesh);
-		jan::extrude(&mesh, &selection, 0.6f);
+		jan::extrude(&mesh, &selection, 0.6f, &stack);
 
 		Vector3 cyan = {0.0f, 1.0f, 1.0f};
 		jan::colour_all_faces(&mesh, cyan);
@@ -9172,6 +9186,8 @@ static void system_terminate(bool functions_loaded)
 			SAFE_DEALLOCATE(isolines[i]);
 		}
 	}
+
+	stack_destroy(&stack);
 }
 
 static void resize_viewport(int width, int height)
@@ -13102,6 +13118,7 @@ static bool ogl_load_functions()
 {
 	p_glBlendFunc = reinterpret_cast<void (APIENTRYA*)(GLenum sfactor, GLenum dfactor)>(GET_PROC("glBlendFunc"));
 	p_glClear = reinterpret_cast<void (APIENTRYA*)(GLbitfield)>(GET_PROC("glClear"));
+	p_glDepthFunc = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glDepthFunc"));
 	p_glDepthMask = reinterpret_cast<void (APIENTRYA*)(GLboolean)>(GET_PROC("glDepthMask"));
 	p_glDisable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glDisable"));
 	p_glEnable = reinterpret_cast<void (APIENTRYA*)(GLenum)>(GET_PROC("glEnable"));
@@ -13160,6 +13177,7 @@ static bool ogl_load_functions()
 
 	failure_count += p_glBlendFunc == nullptr;
 	failure_count += p_glClear == nullptr;
+	failure_count += p_glDepthFunc == nullptr;
 	failure_count += p_glDepthMask == nullptr;
 	failure_count += p_glDisable == nullptr;
 	failure_count += p_glEnable == nullptr;
@@ -14584,6 +14602,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_pa
     }
 }
 
+#define MAKEINTATOMA(atom) \
+    ((LPCSTR)((ULONG_PTR)((WORD)(atom))))
+
 static bool main_create(HINSTANCE instance, int show_command)
 {
 	PROFILE_THREAD_ENTER();
@@ -14605,7 +14626,7 @@ static bool main_create(HINSTANCE instance, int show_command)
     }
 
     DWORD window_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    window = CreateWindowExA(WS_EX_APPWINDOW, MAKEINTATOM(registered_class), app_name, window_style, CW_USEDEFAULT, CW_USEDEFAULT, window_width, window_height, nullptr, nullptr, instance, nullptr);
+    window = CreateWindowExA(WS_EX_APPWINDOW, MAKEINTATOMA(registered_class), app_name, window_style, CW_USEDEFAULT, CW_USEDEFAULT, window_width, window_height, nullptr, nullptr, instance, nullptr);
     if(!window)
     {
         LOG_ERROR("Failed to create the window.");
@@ -14622,9 +14643,11 @@ static bool main_create(HINSTANCE instance, int show_command)
     PIXELFORMATDESCRIPTOR descriptor = {};
     descriptor.nSize = sizeof descriptor;
     descriptor.nVersion = 1;
-    descriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_DEPTH_DONTCARE;
+    descriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
     descriptor.iPixelType = PFD_TYPE_RGBA;
     descriptor.cColorBits = 32;
+	descriptor.cDepthBits = 24;
+	descriptor.cStencilBits = 8;
     descriptor.iLayerType = PFD_MAIN_PLANE;
     int format_index = ChoosePixelFormat(device_context, &descriptor);
     if(format_index == 0)
@@ -14653,8 +14676,6 @@ static bool main_create(HINSTANCE instance, int show_command)
         LOG_ERROR("Couldn't set this thread's rendering context (wglMakeCurrent failed).");
         return false;
     }
-
-    arandom::seed(time(nullptr));
 
     ogl_functions_loaded = ogl_load_functions();
     if(!ogl_functions_loaded)
